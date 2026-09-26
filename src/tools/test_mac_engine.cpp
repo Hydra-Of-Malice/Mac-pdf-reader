@@ -44,7 +44,9 @@ static void SleepMs(int ms) {
     usleep((useconds_t)ms * 1000);
 }
 
+// stdout is flushed too, so a crash leaves the report of the stages that ran
 static void Stage(const char* name) {
+    fflush(stdout);
     fprintf(stderr, "stage: %s\n", name);
     fflush(stderr);
 }

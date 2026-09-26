@@ -123,7 +123,10 @@
 #include <pthread.h>
 #include <strings.h>
 #endif
+// macOS's <sys/cdefs.h> already has one
+#ifndef __unused
 #define __unused [[maybe_unused]]
+#endif
 
 #define _USE_MATH_DEFINES
 #include <math.h>

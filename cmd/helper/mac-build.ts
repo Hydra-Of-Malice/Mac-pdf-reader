@@ -442,7 +442,7 @@ const djvudec: LibDef = {
 };
 
 // mupdf as in premake5.lua, minus the Windows-only pieces: WIC JPEG-XR, the CryptoAPI signature code
-// (pkcs7-windows.c) and the command-line tools that call it
+// (pkcs7-windows.c) and the command-line tools that call it (only pdfinfo.c, for EngineMupdfGetPdfInfo())
 function makeMupdf(t: PosixTarget): LibDef {
   const lib = structuredClone(mupdfBase);
   lib.defines = lib.defines.filter((d) => !d.startsWith("_CRT"));
@@ -459,7 +459,9 @@ function makeMupdf(t: PosixTarget): LibDef {
     if (g.dir === "src/mupdf") g.patterns = pats.filter((p) => p !== "pkcs7-windows.c");
     if (g.dir === "ext/mupdf/source/fitz") g.patterns = pats.map((p) => (p === "load-jxr-win.c" ? "load-jxr.c" : p));
   }
-  lib.files = lib.files.filter((g) => g.dir !== "ext/mupdf/source/tools");
+  for (const g of lib.files) {
+    if (g.dir === "ext/mupdf/source/tools") g.patterns = ["pdfinfo.c"];
+  }
   lib.files.push({ dir: "ext/mupdf/source/helpers/pkcs7", patterns: ["pkcs7-openssl.c"] });
   return lib;
 }
@@ -642,7 +644,9 @@ export function cocoaSources(): string[] {
 
 // Unit tests that run on POSIX (the Windows app runs the full set from src/tests/Sumatra_ut.cpp) and the modules
 // they test. Not here: ClipboardImage_ut / Win_ut (Win32), File_ut (Windows path semantics), PdfSync_ut (SyncTeX),
-// RefHover_ut, the gui/ tests and the ones for Win32 UI modules (AnnotSearch, PagePosition, ReadAloud, ShortcutParse).
+// RefHover_ut, CommandPalette_ut (Commands.cpp needs the Windows settings), PdfDarkModeImageClassifier_ut (the
+// engines link PdfDarkModeNoOp.cpp), the gui/ tests and the ones for Win32 UI modules (AnnotSearch, PagePosition,
+// ReadAloud, ShortcutParse).
 export const TEST_UTIL_SOURCES = [
   "src/base/tests/Base_ut.cpp",
   "src/base/tests/ByteReaderWriter_ut.cpp",
@@ -660,21 +664,14 @@ export const TEST_UTIL_SOURCES = [
   "src/base/tests/Vec_ut.cpp",
   "src/tests/CachedObjects_ut.cpp",
   "src/tests/ChapterTable_ut.cpp",
-  "src/tests/CommandPalette_ut.cpp",
   "src/tests/EngineDjvuDec_ut.cpp",
   "src/tests/LitDoc_ut.cpp",
   "src/tests/MobiDoc_ut.cpp",
   "src/tests/PageRenderPolicy_ut.cpp",
-  "src/tests/PdfDarkModeImageClassifier_ut.cpp",
   "src/tests/PdfDarkModeOklab_ut.cpp",
   "src/tests/SimpleLog_ut.cpp",
   "src/tests/TextSelection_ut.cpp",
-  "src/Commands.cpp",
   "src/CrashHandlerNoOp.cpp",
-  "src/FilterUtil.cpp",
-  "src/PdfDarkModeImageClassifier.cpp",
-  "src/PdfDarkModeImageRules.cpp",
-  "src/PdfDarkModeImageStats.cpp",
   "src/PdfDarkModeOklab.cpp",
   "src/SumatraLog_posix.cpp",
   "src/tools/test_util.cpp",
@@ -683,9 +680,16 @@ export const TEST_UTIL_SOURCES = [
 // executables every POSIX build links: name -> its own sources (on top of the libraries)
 export function testExeSources(): Record<string, string[]> {
   return {
-    test_util: [...ENGINE_SOURCES, ...READER_SOURCES, ...TEST_UTIL_SOURCES],
+    test_util: [...ENGINE_SOURCES, "src/PageRenderPolicy.cpp", ...TEST_UTIL_SOURCES],
     test_engines: [...ENGINE_SOURCES, "src/tools/test_engines.cpp"],
-    test_mac_engine: [...ENGINE_SOURCES, ...READER_SOURCES, ...macEngineSources(), "src/tools/test_mac_engine.cpp"],
+    // headless_gui_posix.cpp stands in for the Cocoa GUI (src/gui/mac) the app links
+    test_mac_engine: [
+      ...ENGINE_SOURCES,
+      ...READER_SOURCES,
+      ...macEngineSources(),
+      "src/tools/headless_gui_posix.cpp",
+      "src/tools/test_mac_engine.cpp",
+    ],
     // defines its own document type, so not SumatraMacEngine.cpp
     test_mac_thumbnails: [...ENGINE_SOURCES, "src/mac/MacThumbnails.cpp", "src/tools/test_mac_thumbnails.cpp"],
   };

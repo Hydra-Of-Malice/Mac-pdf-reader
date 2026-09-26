@@ -213,6 +213,12 @@ Pixmap* PixmapCopyAs32bppDIB(const Pixmap*) {
     return nullptr;
 }
 
+// RenderedBitmap wraps a GDI bitmap: takes px and has nothing to give back
+RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px) {
+    FreePixmap(px);
+    return nullptr;
+}
+
 void FreePixmapNativeBitmap(Pixmap* p) {
     if (p) {
         p->data = nullptr;

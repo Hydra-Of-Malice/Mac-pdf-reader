@@ -14,7 +14,7 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Check out source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Toolchain
         run: sw_vers && xcrun --show-sdk-version && clang --version
@@ -37,6 +37,21 @@ jobs:
           done
           exit $status
 
+  # The port touches shared code; make sure the Windows debug build and unit tests still pass.
+  windows:
+    name: Windows regression (debug + unit tests)
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@v5
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build and run unit tests
+        run: bun cmd/run-unit-tests.ts -dbg
+
   build:
     name: Build ${{ matrix.arch }}
     strategy:
@@ -51,7 +66,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Check out source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
@@ -74,6 +89,38 @@ jobs:
           else
             bun -e 'import { buildMac } from "./cmd/helper/mac-build.ts"; await buildMac({ outDir: "out/mac-dbg64" });'
           fi
+
+      # Launch the debug app with a PDF; it must still be running after 15s.
+      - name: Launch smoke test
+        run: |
+          app=$(find out -maxdepth 3 -type d -name SumatraPDF.app | head -1)
+          echo "app: $app"
+          test -n "$app"
+          smoke="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke"
+          "$app/Contents/MacOS/SumatraPDF" "$PWD/tests/mac/fixtures/text.pdf" > "$smoke/app.log" 2>&1 &
+          pid=$!
+          sleep 15
+          screencapture -x "$smoke/screen.png" || echo "screencapture failed"
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "app still running after 15s"
+            kill "$pid"
+          else
+            wait "$pid" && rc=0 || rc=$?
+            echo "app exited early with code $rc"
+            tail -50 "$smoke/app.log"
+            exit 1
+          fi
+          tail -50 "$smoke/app.log"
+
+      - name: Upload smoke test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.arch }}
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Release build
         run: |

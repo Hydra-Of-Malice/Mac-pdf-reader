@@ -29,12 +29,10 @@ void VecTest();
 // in src/tests/
 void CachedObjects_UnitTests();
 void ChapterTable_UnitTests();
-void CommandPaletteModel_UnitTests();
 void EngineDjvuDec_UnitTests();
 void LitDoc_UnitTests();
 void MobiDoc_UnitTests();
 void PageRenderPolicy_UnitTests();
-void PdfDarkModeImageClassifier_UnitTests();
 void PdfDarkModeOklab_UnitTests();
 void SimpleLogTest();
 void TextSelection_UnitTests();
@@ -80,12 +78,10 @@ int main(int argc, char** argv) {
 
     CachedObjects_UnitTests();
     ChapterTable_UnitTests();
-    CommandPaletteModel_UnitTests();
     EngineDjvuDec_UnitTests();
     LitDoc_UnitTests();
     MobiDoc_UnitTests();
     PageRenderPolicy_UnitTests();
-    PdfDarkModeImageClassifier_UnitTests();
     PdfDarkModeOklab_UnitTests();
     SimpleLogTest();
     TextSelection_UnitTests();
