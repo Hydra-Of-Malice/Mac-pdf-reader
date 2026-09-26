@@ -1421,6 +1421,24 @@ static int dir_fetch_page(chm_ctx *ctx, int32_t page, uint8_t* page_buf) {
     return fetch_bytes(ctx, page_buf, offset, ctx->block_len) == ctx->block_len;
 }
 
+/* FPC's chmcmd sets index_head to the 2nd listing (PMGL) chunk, which hides the
+   entries of the 1st: follow block_prev back to the real first one */
+static int32_t first_listing_page(chm_ctx *ctx) {
+    int32_t page = ctx->index_head;
+    uint8_t *buf = (uint8_t *)chm_alloc(ctx, (size_t)ctx->block_len);
+    uint64_t n;
+    if (!buf) return page;
+    for (n = 0; n < ctx->dir_page_count; n++) {
+        int32_t prev;
+        if (!dir_fetch_page(ctx, page, buf) || memcmp(buf, _chm_pmgl_marker, 4) != 0) break;
+        prev = (int32_t)((uint32_t)buf[12] | (uint32_t)buf[13] << 8 | (uint32_t)buf[14] << 16 | (uint32_t)buf[15] << 24);
+        if (!dir_fetch_page(ctx, prev, buf) || memcmp(buf, _chm_pmgl_marker, 4) != 0) break;
+        page = prev;
+    }
+    chm_free(ctx, buf);
+    return page;
+}
+
 static void dir_visit_reset(chm_ctx *ctx) {
     ctx->dir_pages_seen = 0;
     memset(ctx->dir_seen_bitmap, 0, sizeof(ctx->dir_seen_bitmap));
@@ -2103,6 +2121,7 @@ bool chm_open(chm_ctx *ctx, const uint8_t *data, size_t len)
         return false;
     }
     ctx->dir_page_count = dir_page_count(ctx);
+    ctx->index_head = first_listing_page(ctx);
 
     if (ctx->index_root <= -1) ctx->index_root = ctx->index_head;
 

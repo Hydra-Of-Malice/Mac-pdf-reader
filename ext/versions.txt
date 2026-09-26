@@ -20,6 +20,9 @@ chmdec          dist       2026-07-28
   https://github.com/kjk/chmdec
   commit dbf9c5a899709543724dca344ecfb0b6a21d45a4
   amalgamated dist/chm.c + dist/chm.h only (was ext/libchm)
+  local change (re-apply on update; upstream to github.com/kjk/chmdec): chm.c first_listing_page()
+  follows block_prev back from the ITSP index_head, which FPC's chmcmd points at the 2nd PMGL chunk;
+  without it the 1st chunk's entries (incl. /#SYSTEM) are missing and such CHMs don't open
 
 freetype        2.14.3
   https://github.com/ArtifexSoftware/thirdparty-freetype2/tree/artifex

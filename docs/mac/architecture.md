@@ -21,7 +21,8 @@ headers clash with Sumatra names such as `Size`), so the two sides meet only thr
 
 ## Handles and ownership
 
-- A document handle (`void*`) comes from `MacOpenDocumentEx()` and is owned by one `SumatraTabState`. It is closed
+- A document handle (`void*`) comes from `MacOpenDocumentAsync()` (or `MacOpenDocumentEx()`) and is owned by one
+  `SumatraTabState`. It is closed
   with `MacCloseDocument()` exactly once, on the main thread, after `-[SumatraSidebar documentWillClose:]`.
   Closing stops the document's find worker and render thread (joins them) before freeing anything.
 - Strings the bridge returns (`MacCopy*`, `MacPrefsCopy*`) are `malloc`ed; free with `MacFreeString()`.
@@ -48,8 +49,14 @@ headers clash with Sumatra names such as `Size`), so the two sides meet only thr
   The result (hit rectangles, page) is copied under a mutex and read by the main thread. The completion callback
   runs on the main queue with a token; the app ignores it unless the active tab still has that document and token.
 - Thumbnails: `MacThumbnails` (see `MacThumbnails.h`), owned by the sidebar.
-- Password prompts are app-modal and run synchronously inside `MacOpenDocumentEx()`. Engines keep asking until
-  the password is right or the prompt is cancelled.
+- Opening: `MacOpenDocumentAsync()` opens on its own thread (8 MB stack; the app runs at most 4 at a time). The tab
+  exists at once (`loadRequest` set, no document); the result arrives on the main queue and a document whose tab
+  was closed meanwhile is closed there. The loader can't be interrupted. Password prompts: the loader calls the
+  per-open callback, which runs the app-modal prompt on the main thread with `dispatch_sync`; the main thread never
+  waits for a loader, so this can't deadlock. Engines keep asking until the password is right or the prompt is
+  cancelled. Reloading a changed file still opens synchronously (`MacOpenDocumentEx()`).
+- Select All on long documents: `MacPrepareTextStart()` extracts every page's text on a worker (the engine's text
+  cache is thread-safe), progress arrives on the main queue with a token; `MacCloseDocument()` joins the worker.
 
 ## Coordinates
 

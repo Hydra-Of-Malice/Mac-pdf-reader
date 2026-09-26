@@ -78,6 +78,7 @@ void* MacOpenDocument(void* passwordParent, const char* path, MacPageReadyCallba
 void MacSetPasswordCallback(MacPasswordCallback callback, void* context);
 
 int MacPageCount(void* document);
+bool MacPageCountIsFinal(void* document);
 
 bool MacPageSize(void* document, int pageNo, double* widthOut, double* heightOut);
 

@@ -437,6 +437,16 @@ int MacPageCount(void* document) {
     return AsDocument(document)->model->PageCount();
 }
 
+// False while a chaptered doc (EPUB) still lays chapters out: MacPageCount()
+// grows and a page-ready callback follows each change.
+bool MacPageCountIsFinal(void* document) {
+    if (!document) {
+        return true;
+    }
+    EngineBase* engine = AsDocument(document)->model->GetEngine();
+    return !engine->HasChapters() || engine->ChaptersLaidOut() == engine->ChapterCount();
+}
+
 // Mediabox size of pageNo (1-based) in points. Returns false if invalid.
 bool MacPageSize(void* document, int pageNo, double* widthOut, double* heightOut) {
     if (!document) {

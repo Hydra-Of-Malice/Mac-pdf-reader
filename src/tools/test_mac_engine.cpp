@@ -5,7 +5,7 @@
 // exactly like SumatraMac.mm (plain C API, no base/Base.h) and prints one JSON object per run.
 // Driven by tests/mac/run-engine-tests.ts; runs on macOS and on Linux (-mac-core builds).
 //
-// usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>] [-render-all]
+// usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>] [-render-all] [-fuzz]
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,10 +30,13 @@ constexpr int kAsyncPages = 8;
 constexpr int kLinkScanPages = 3;
 constexpr int kLinkScanStep = 4;
 constexpr double kLinkScanMaxCells = 400;
+constexpr double kFuzzLinkScanMaxCells = 60;
 constexpr int kMaxLinks = 16;
 constexpr int kRenderAllMax = 64;
 constexpr int kWaitMs = 30000;
-constexpr int kSettleMs = 300;
+// -fuzz: damaged docs can leave a page that never arrives from the async renderer
+constexpr int kFuzzWaitMs = 3000;
+constexpr int kSettleMs = 20;
 constexpr float kZoomFitWidth = -2.f;
 constexpr char kMissingWord[] = "xq7zzyNotInAnyFixture";
 
@@ -46,6 +49,8 @@ struct PasswordState {
 static int gPagesReady = 0;
 static int gFindCallbacks = 0;
 static bool gFirstField = true;
+static int gWaitMs = kWaitMs;
+static double gLinkScanMaxCells = kLinkScanMaxCells;
 
 static double NowMs() {
     timespec ts;
@@ -275,7 +280,7 @@ static void CheckAsyncRender(void* doc, int nPages, bool page1Renders) {
     int nGot = 0;
     RenderStats first;
     double start = NowMs();
-    while (nGot < nExpected && NowMs() - start < kWaitMs) {
+    while (nGot < nExpected && NowMs() - start < gWaitMs) {
         for (int pageNo = 1; pageNo <= n; pageNo++) {
             if (got[pageNo] || !expected[pageNo]) {
                 continue;
@@ -304,7 +309,7 @@ static void CheckAsyncRender(void* doc, int nPages, bool page1Renders) {
     if (page1Renders) {
         MacRequestPage(doc, 1, 0.5f, 0, 0);
         start = NowMs();
-        while (!again && NowMs() - start < kWaitMs) {
+        while (!again && NowMs() - start < gWaitMs) {
             MacRenderedPage page{};
             again = MacCopyRenderedPage(doc, 1, 0.5f, 0, &page);
             MacFreeRenderedPage(&page);
@@ -324,7 +329,7 @@ static bool Find(void* doc, int startPage, const char* word, MacFindDirection di
         return false;
     }
     double start = NowMs();
-    while (MacFindIsBusy(doc) && NowMs() - start < kWaitMs) {
+    while (MacFindIsBusy(doc) && NowMs() - start < gWaitMs) {
         SleepMs(2);
     }
     *timedOut = MacFindIsBusy(doc);
@@ -454,8 +459,8 @@ static void CheckLinks(void* doc, int nPages) {
         double h = 0;
         MacPageSize(doc, pageNo, &w, &h);
         // coarser grid on huge (e.g. corrupt) pages so the scan stays bounded
-        double stepX = w / kLinkScanStep > kLinkScanMaxCells ? w / kLinkScanMaxCells : kLinkScanStep;
-        double stepY = h / kLinkScanStep > kLinkScanMaxCells ? h / kLinkScanMaxCells : kLinkScanStep;
+        double stepX = w / kLinkScanStep > gLinkScanMaxCells ? w / gLinkScanMaxCells : kLinkScanStep;
+        double stepY = h / kLinkScanStep > gLinkScanMaxCells ? h / gLinkScanMaxCells : kLinkScanStep;
         for (double y = 1; y < h; y += stepY) {
             for (double x = 1; x < w; x += stepX) {
                 MacLink link{};
@@ -508,22 +513,17 @@ static void CheckProperties(void* doc) {
 }
 
 // Chaptered docs (EPUB) lay out the first chapter at open and count the rest in
-// the background, so the page count grows. Wait until it's stable, delivering the
+// the background, so the page count grows. Wait until it's final, delivering the
 // page-ready callbacks the app relayouts on.
 static int SettlePageCount(void* doc) {
     Stage("settle");
-    int pages = MacPageCount(doc);
     double start = NowMs();
-    double stableSince = start;
-    while (NowMs() - stableSince < kSettleMs && NowMs() - start < kWaitMs) {
+    while (!MacPageCountIsFinal(doc) && NowMs() - start < gWaitMs) {
         SleepMs(10);
-        int n = MacPageCount(doc);
-        if (n != pages) {
-            pages = n;
-            stableSince = NowMs();
-        }
     }
-    PumpUiTasks();
+    // the last change's page-ready task may still be queued
+    SleepMs(kSettleMs);
+    KeyBool("pageCountFinal", MacPageCountIsFinal(doc));
     KeyInt("pagesSettled", MacPageCount(doc));
     KeyInt("pageReadyCallbacksAtSettle", __atomic_load_n(&gPagesReady, __ATOMIC_SEQ_CST));
     KeyNum("settleMs", NowMs() - start);
@@ -568,7 +568,9 @@ static void Stress(void* doc, int nPages, int nRequests) {
 }
 
 static void Usage() {
-    fprintf(stderr, "usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>] [-render-all]\n");
+    fprintf(stderr,
+            "usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>] [-render-all] "
+            "[-fuzz]\n");
 }
 
 int main(int argc, char** argv) {
@@ -587,6 +589,11 @@ int main(int argc, char** argv) {
             stress = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "-render-all")) {
             renderAll = true;
+        } else if (!strcmp(argv[i], "-fuzz")) {
+            // damaged input: render every page, short waits, coarse link scan
+            renderAll = true;
+            gWaitMs = kFuzzWaitMs;
+            gLinkScanMaxCells = kFuzzLinkScanMaxCells;
         } else if (argv[i][0] != '-' && !path) {
             path = argv[i];
         } else {

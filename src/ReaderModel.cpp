@@ -55,7 +55,8 @@ static EngineBase* CreateReaderEngine(Str path, PasswordUI* pwdUI) {
         return CreateEngineImageFromFile(path);
     }
     if (IsEngineCbxSupportedFileType(kind)) {
-        return CreateEngineCbxFromFile(path, pwdUI, kind);
+        // the content type, as in EngineCreate.cpp: Archive::Open() sends RAR to UnRAR only when the hint is Rar
+        return CreateEngineCbxFromFile(path, pwdUI, GuessFileTypeFromFile(path));
     }
     if (kind == FileType::Lit) {
         return CreateEngineLitFromFile(path, pwdUI);

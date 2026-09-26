@@ -2535,8 +2535,10 @@ EngineBase* EngineCbx::Clone() {
             log(StrL("EngineCbx::Clone() failed: CreateFromData() failed\n"));
         }
     } else if (path) {
-        // keep the cached-local-copy in play on the clone too
-        clone = CreateFromFile(path, {}, nullptr, nullptr, FileType::Unknown, physicalPath);
+        // keep the cached-local-copy in play on the clone too, and the
+        // password of an encrypted archive
+        Str password = cbxArchive ? cbxArchive->password : Str{};
+        clone = CreateFromFile(path, password, nullptr, nullptr, FileType::Unknown, physicalPath);
         if (!clone) {
             logf("EngineCbx::Clone() failed: CreateFromFile('%s') failed\n", path);
         }

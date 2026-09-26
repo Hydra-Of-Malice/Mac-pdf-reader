@@ -9,10 +9,13 @@
 #include "libarchive/archive.h"
 #include "libarchive/archive_entry.h"
 
-#if OS_WIN
+#if !OS_WIN
+// dll.hpp spells its calling convention with these Win32 macros
+#define CALLBACK
+#define PASCAL
+#endif
 // TODO: set include path to ext/ dir
 #include "../../ext/a-unrar/dll.hpp"
-#endif
 #include "base/Archive.h"
 
 // we pad data read with 3 zeros for convenience. That way returned
@@ -489,8 +492,6 @@ Archive* OpenArchiveFromData(Str data) {
     return archive;
 }
 
-// ext/a-unrar is built for Windows only; elsewhere libarchive reads RAR files
-#if OS_WIN
 struct UnrarData {
     u8* d = nullptr;
     int sz = 0;
@@ -715,12 +716,3 @@ bool Archive::OpenUnrarFallback(Str rarPath, bool eagerLoad, const ArchiveExtrac
     rarFilePath_ = str::Dup(a, rarPath);
     return true;
 }
-#else
-Str Archive::ReadUnrarEntry(FileInfo*, int, bool*) {
-    return {};
-}
-
-bool Archive::OpenUnrarFallback(Str, bool, const ArchiveExtractProgressCb&) {
-    return false;
-}
-#endif

@@ -130,6 +130,7 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
 
     char* _passwords[kMaxPasswords];
     int _passwordCount;
+    NSMutableArray* _retiredPasswords; // NSValue pointers, freed in dealloc
     int _prompts; // written by the loader thread
 }
 
@@ -153,11 +154,16 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     _report = [[NSMutableDictionary alloc] init];
     _results = [[NSMutableArray alloc] init];
     _ignored = [[NSMutableArray alloc] init];
+    _retiredPasswords = [[NSMutableArray alloc] init];
     return self;
 }
 
 - (void)dealloc {
     [self setPasswords:nil];
+    for (NSValue* password in _retiredPasswords) {
+        free([password pointerValue]);
+    }
+    [_retiredPasswords release];
     if (_watchdog) {
         dispatch_source_cancel(_watchdog);
         dispatch_release(_watchdog);
@@ -198,12 +204,15 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     return _passwords[attempt - 1];
 }
 
+// The loader of a case that timed out may still read the old passwords, so
+// they're retired, not freed.
 - (void)setPasswords:(NSString*)list {
-    for (int i = 0; i < _passwordCount; i++) {
-        free(_passwords[i]);
+    int old = _passwordCount;
+    _passwordCount = 0;
+    for (int i = 0; i < old; i++) {
+        [_retiredPasswords addObject:[NSValue valueWithPointer:_passwords[i]]];
         _passwords[i] = nullptr;
     }
-    _passwordCount = 0;
     __atomic_store_n(&_prompts, 0, __ATOMIC_SEQ_CST);
     for (NSString* password in [list componentsSeparatedByString:@","]) {
         if (_passwordCount < kMaxPasswords) {

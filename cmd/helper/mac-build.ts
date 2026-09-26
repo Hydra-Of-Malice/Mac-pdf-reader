@@ -9,7 +9,7 @@
  * SOURCE_DATE_EPOCH (from the HEAD commit) so no build time is baked in.
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { cpus } from "node:os";
 import { join } from "node:path";
 import { Glob } from "bun";
@@ -39,6 +39,7 @@ import {
   mujs,
   mupdf as mupdfBase,
   openjpeg,
+  unrar,
   zlib,
 } from "../deps-build-defs";
 import { extractSumatraVersion } from "../util";
@@ -139,6 +140,12 @@ export function commonCompileFlags(t: PosixTarget, cfg: PosixConfig): string[] {
 }
 
 //--- third-party libraries --------------------------------------------------------------------------------------
+
+// Writes a generated source only when it changed, so its mtime doesn't force a rebuild of what includes it
+function writeGenerated(path: string, data: string, encoding: BufferEncoding = "utf8"): void {
+  if (existsSync(path) && readFileSync(path, encoding) === data) return;
+  writeFileSync(path, data, encoding);
+}
 
 // ext/a-libarchive was generated for Windows only: the build supplies a POSIX config header and the few functions
 // whose POSIX sources the amalgamation left out.
@@ -294,12 +301,12 @@ int archive_read_disk_set_uname_lookup(struct archive* a, void* data, const char
 function makeLibarchive(t: PosixTarget, genDir: string): LibDef {
   const dir = join(genDir, "libarchive");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "config_posix.h"), libarchiveConfigPosix);
-  writeFileSync(join(dir, "libarchive_posix_stubs.c"), libarchiveStubsPosix);
+  writeGenerated(join(dir, "config_posix.h"), libarchiveConfigPosix);
+  writeGenerated(join(dir, "libarchive_posix_stubs.c"), libarchiveStubsPosix);
   const lzmaDir = join(genDir, "liblzma");
   mkdirSync(lzmaDir, { recursive: true });
   const lzmaConfig = t.os === "mac" ? "config_macos.h" : "config_linux.h";
-  cpSync(join("ext", "liblzma", lzmaConfig), join(lzmaDir, "config.h"));
+  writeGenerated(join(lzmaDir, "config.h"), readFileSync(join("ext", "liblzma", lzmaConfig), "utf8"));
   return {
     name: "a-libarchive",
     alwaysOptimize: true,
@@ -391,7 +398,7 @@ function makeDav1d(t: PosixTarget, genDir: string): LibDef {
     `#define PREFIX ${isArm && t.os === "mac" ? 1 : 0}`,
     "",
   ].join("\n");
-  writeFileSync(join(dir, "config.h"), config);
+  writeGenerated(join(dir, "config.h"), config);
   const files: LibDef["files"] = [
     {
       dir: "ext/dav1d/src",
@@ -486,6 +493,31 @@ function makeMupdf(t: PosixTarget): LibDef {
   return lib;
 }
 
+// ext/a-unrar/unrar.cpp is generated (cmd/amalgam.ts) from upstream's Windows build, which includes isnt.cpp and
+// motw.cpp: Windows-only files the Unix makefile leaves out. Build from a copy without them; the rest of the
+// amalgamation already has upstream's _UNIX / _APPLE code paths.
+const unrarWindowsOnly: [string, string, string][] = [
+  ["isnt.cpp", "\nDWORD WinNT()\n{", "\n#if defined(_WIN_ALL) && !defined(SFX_MODULE) && !defined(RARDLL)"],
+  ["motw.cpp", "\nMarkOfTheWeb::MarkOfTheWeb()\n{", "\nRAROptions::RAROptions()\n{"],
+];
+
+function posixUnrar(genDir: string): LibDef {
+  let src = readFileSync(join("ext", "a-unrar", "unrar.cpp"), "latin1");
+  for (const [file, startMarker, endMarker] of unrarWindowsOnly) {
+    const start = src.indexOf(startMarker);
+    const end = start < 0 ? -1 : src.indexOf(endMarker, start);
+    if (end < 0) throw new Error(`ext/a-unrar/unrar.cpp: can't find ${file}; update unrarWindowsOnly in mac-build.ts`);
+    src = `${src.slice(0, start)}\n// ${file}: Windows only, left out by cmd/helper/mac-build.ts\n${src.slice(end)}`;
+  }
+  const dir = join(genDir, "unrar");
+  mkdirSync(dir, { recursive: true });
+  writeGenerated(join(dir, "unrar_posix.cpp"), src, "latin1");
+  const lib = structuredClone(unrar);
+  lib.defines = lib.defines.filter((d) => d !== "_CRT_SECURE_NO_WARNINGS");
+  lib.files = [{ dir, patterns: ["unrar_posix.cpp"] }];
+  return lib;
+}
+
 // ext/a-harfbuzz only works the way MSVC builds it: gcc / clang otherwise skip the tables that the amalgamation
 // put inside an #ifdef HB_NO_VISIBILITY block (MSVC always defines it)
 function posixHarfbuzz(): LibDef {
@@ -557,8 +589,7 @@ function baseLib(t: PosixTarget): LibDef {
   };
 }
 
-// The libraries in link order; names are also the archive names (lib<name>.a). No a-unrar: that amalgamation
-// only builds for Windows, elsewhere libarchive reads RAR (src/base/Archive.cpp).
+// The libraries in link order; names are also the archive names (lib<name>.a).
 export function posixLibs(t: PosixTarget, genDir: string): LibDef[] {
   const libs: LibDef[] = [
     baseLib(t),
@@ -581,6 +612,7 @@ export function posixLibs(t: PosixTarget, genDir: string): LibDef[] {
     djvudec,
     chmdec,
     msdes,
+    posixUnrar(genDir),
     makeLibarchive(t, genDir),
     structuredClone(zlib),
   ];

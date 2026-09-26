@@ -235,7 +235,7 @@ function mutate(data: Uint8Array, rnd: () => number): [Uint8Array, string[]] {
 
 async function runDriver(driver: string, v: Variant, timeoutMs: number): Promise<Outcome> {
   const start = performance.now();
-  const args = [v.file, "-render-all"];
+  const args = [v.file, "-fuzz"];
   if (v.fixture.password) args.push("-password", v.fixture.password.split(",").pop()!);
   const proc = Bun.spawn([driver, ...args], {
     stdout: "pipe",
@@ -291,7 +291,7 @@ function saveRepro(o: Outcome, stderrNote: string) {
     `mutations: ${v.mutations.join(", ")}`,
     `result: ${o.kind} ${o.detail}`,
     `last stage: ${o.stage}`,
-    `repro: <driver> ${dst} -render-all${v.fixture.password ? " -password <pw>" : ""}`,
+    `repro: <driver> ${dst} -fuzz${v.fixture.password ? " -password <pw>" : ""}`,
     stderrNote,
   ].join("\n");
   writeFileSync(join(reproDir, `${base}.txt`), note);

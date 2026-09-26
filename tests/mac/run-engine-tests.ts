@@ -153,6 +153,7 @@ function checkOpened(f: Fixture, r: any, fail: (s: string) => void) {
   if ((r.pagesAtEnd ?? pages) !== (r.pagesSettled ?? pages)) {
     fail(`page count still changed after settling: ${r.pagesSettled} -> ${r.pagesAtEnd}`);
   }
+  if (r.pageCountFinal === false) fail("background chapter layout didn't finish");
   if (f.growth) checkGrowth(f, r, fail);
   if (f.pages !== undefined && pages !== f.pages) fail(`pages ${pages} != ${f.pages}`);
   if (f.minPages !== undefined && pages < f.minPages) fail(`pages ${pages} < ${f.minPages}`);

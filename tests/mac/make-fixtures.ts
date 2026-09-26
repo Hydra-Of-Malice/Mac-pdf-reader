@@ -170,11 +170,12 @@ function makeChaptersEpub(): Uint8Array {
     { length: 45 },
     (_, i) => `<p>Paragraph ${i + 1} of this chapter fills up another line.</p>`,
   );
+  // a link into the last chapter: its target page only exists once that chapter is laid out
+  const jump = `<p><a href="ch${words.length}.xhtml#c${words.length}">Jump to the last chapter</a></p>`;
   const chapter = (i: number) =>
-    `<?xml version="1.0" encoding="utf-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter ${i + 1}</title></head>` +
-    `<body><h1 id="c${i + 1}">Chapter ${i + 1}</h1><p>The ${words[i]} appears in chapter ${i + 1}.</p>${filler.join("")}</body></html>
-`;
+    `<?xml version="1.0" encoding="utf-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml">` +
+    `<head><title>Chapter ${i + 1}</title></head><body><h1 id="c${i + 1}">Chapter ${i + 1}</h1>` +
+    `<p>The ${words[i]} appears in chapter ${i + 1}.</p>${i === 0 ? jump : ""}${filler.join("")}</body></html>\n`;
   const ids = words.map((_, i) => `ch${i + 1}`);
   return makeZip([
     { name: "mimetype", data: "application/epub+zip", store: true },
