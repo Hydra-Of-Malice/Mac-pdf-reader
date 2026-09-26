@@ -218,22 +218,27 @@ static void CheckLayout(void* doc, int nPages) {
     KeyBool("layoutPageCountOk", countOk);
 }
 
-static void CheckRender(void* doc, int nPages) {
+static bool CheckRender(void* doc, int nPages) {
     Stage("render-sync");
-    KeyRender("render1", RenderSync(doc, 1, 1.0f, 0));
+    RenderStats first = RenderSync(doc, 1, 1.0f, 0);
+    KeyRender("render1", first);
     RenderStats rotated = RenderSync(doc, 1, 0.5f, 90);
     KeyRender("render1Rotated", rotated);
     if (nPages > 1) {
         KeyRender("renderLast", RenderSync(doc, nPages, 1.0f, 0));
     }
     MacRenderedPage page{};
-    KeyBool("renderOutOfRangeFails", !MacRenderPage(doc, nPages + 1, 1.0f, 0, &page));
+    // chaptered (EPUB) documents can grow while chapters get laid out
+    KeyBool("renderOutOfRangeFails", !MacRenderPage(doc, MacPageCount(doc) + 1, 1.0f, 0, &page));
     MacFreeRenderedPage(&page);
+    return first.ok;
 }
 
-// request pages through the async PageRenderService and wait for them like the app does
-static void CheckAsyncRender(void* doc, int nPages) {
+// request pages through the async PageRenderService and wait for them like the app does;
+// a page that failed to render synchronously won't show up, so don't wait long for it
+static void CheckAsyncRender(void* doc, int nPages, bool page1Renders) {
     Stage("render-async");
+    const double waitMs = page1Renders ? kWaitMs : kWaitMs / 10;
     int n = nPages < kAsyncPages ? nPages : kAsyncPages;
     const float zoom = 0.75f;
     for (int pageNo = 1; pageNo <= n; pageNo++) {
@@ -243,7 +248,7 @@ static void CheckAsyncRender(void* doc, int nPages) {
     int nGot = 0;
     RenderStats first;
     double start = NowMs();
-    while (nGot < n && NowMs() - start < kWaitMs) {
+    while (nGot < n && NowMs() - start < waitMs) {
         for (int pageNo = 1; pageNo <= n; pageNo++) {
             if (got[pageNo]) {
                 continue;
@@ -271,7 +276,7 @@ static void CheckAsyncRender(void* doc, int nPages) {
     MacRequestPage(doc, 1, 0.5f, 0, 0);
     bool again = false;
     start = NowMs();
-    while (!again && NowMs() - start < kWaitMs) {
+    while (!again && NowMs() - start < waitMs) {
         MacRenderedPage page{};
         again = MacCopyRenderedPage(doc, 1, 0.5f, 0, &page);
         MacFreeRenderedPage(&page);
@@ -366,7 +371,7 @@ static void CheckSelectAll(void* doc, const char* word) {
     MacClearSelection(doc);
 }
 
-static void CheckToc(void* doc, int nPages) {
+static void CheckToc(void* doc) {
     Stage("toc");
     int n = MacTocItemCount(doc);
     int badPages = 0;
@@ -375,7 +380,8 @@ static void CheckToc(void* doc, int nPages) {
     for (int i = 0; i < n; i++) {
         char* title = MacCopyTocItemTitle(doc, i);
         int pageNo = MacTocItemPage(doc, i);
-        if (pageNo < 0 || pageNo > nPages) {
+        // resolving an EPUB destination lays out its chapter, which can add pages
+        if (pageNo < 0 || pageNo > MacPageCount(doc)) {
             badPages++;
         }
         if (i < 20) {
@@ -544,18 +550,19 @@ int main(int argc, char** argv) {
         KeyInt("pages", nPages);
         CheckPageSizes(doc, nPages);
         CheckLayout(doc, nPages);
-        CheckRender(doc, nPages);
-        CheckAsyncRender(doc, nPages);
+        bool page1Renders = CheckRender(doc, nPages);
+        CheckAsyncRender(doc, nPages, page1Renders);
         if (search) {
             CheckSearch(doc, nPages, search);
         }
         CheckSelectAll(doc, search);
-        CheckToc(doc, nPages);
+        CheckToc(doc);
         CheckLinks(doc, nPages);
         CheckProperties(doc);
         if (stress > 0) {
             Stress(doc, nPages, stress);
         }
+        KeyInt("pagesAtEnd", MacPageCount(doc));
         // informational: both are posted to the main run loop, which only the app runs
         KeyInt("pageReadyCallbacks", __atomic_load_n(&gPagesReady, __ATOMIC_SEQ_CST));
         KeyInt("findCallbacks", __atomic_load_n(&gFindCallbacks, __ATOMIC_SEQ_CST));

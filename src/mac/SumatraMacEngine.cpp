@@ -103,6 +103,17 @@ static void LoadProperties(MacDocument* document) {
     }
 }
 
+// Target page of a link / ToC destination, 0 if none. Chaptered (EPUB) engines
+// resolve destinations lazily, so dest->pageNo alone is often unset.
+static int DestPageNo(MacDocument* document, IPageDestination* dest) {
+    EngineBase* engine = document->model->GetEngine();
+    Location loc = engine->ResolveDest(dest);
+    if (!loc.IsValid()) {
+        return 0;
+    }
+    return engine->PageNoFromLocation(loc);
+}
+
 static PointF ToPagePoint(MacDocument* document, int pageNo, double x, double y, double zoom, int rotation) {
     PointF point((float)x, (float)y);
     return document->model->GetEngine()->Transform(point, pageNo, (float)zoom, rotation, true);
@@ -546,7 +557,7 @@ bool MacLinkAtPoint(void* document, int pageNo, double x, double y, double zoom,
     if (!dest) {
         return false;
     }
-    int targetPage = PageDestGetPageNo(dest);
+    int targetPage = DestPageNo(doc, dest);
     if (targetPage >= 1 && targetPage <= doc->model->PageCount()) {
         link->kind = MacLinkKind::Page;
         link->pageNo = targetPage;
@@ -601,7 +612,7 @@ int MacTocItemPage(void* document, int index) {
     }
     TocItem* item = doc->tocItems[index];
     IPageDestination* dest = item->GetPageDestination();
-    int pageNo = dest ? PageDestGetPageNo(dest) : item->pageNo;
+    int pageNo = dest ? DestPageNo(doc, dest) : item->pageNo;
     return pageNo >= 1 && pageNo <= doc->model->PageCount() ? pageNo : 0;
 }
 
@@ -1211,5 +1222,34 @@ bool MacFindResultRect(void* document, int pageNo, int index, double zoom, int r
     rect->y = r.y;
     rect->width = r.dx;
     rect->height = r.dy;
+    return true;
+}
+
+//--- scroll position (FileState.ScrollPos is in page units, like the Windows app)
+
+// Page-local view point (x, y at zoom and rotation) to page units.
+bool MacPagePointFromView(void* document, int pageNo, double x, double y, double zoom, int rotation, double* pageX,
+                          double* pageY) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !pageX || !pageY || zoom <= 0 || pageNo < 1 || pageNo > doc->model->PageCount()) {
+        return false;
+    }
+    PointF p = ToPagePoint(doc, pageNo, x, y, zoom, rotation);
+    *pageX = p.x;
+    *pageY = p.y;
+    return true;
+}
+
+// Page units to a page-local view point at zoom and rotation.
+bool MacViewPointFromPage(void* document, int pageNo, double pageX, double pageY, double zoom, int rotation, double* x,
+                          double* y) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !x || !y || zoom <= 0 || pageNo < 1 || pageNo > doc->model->PageCount()) {
+        return false;
+    }
+    PointF p((float)pageX, (float)pageY);
+    PointF v = doc->model->GetEngine()->Transform(p, pageNo, (float)zoom, rotation);
+    *x = v.x;
+    *y = v.y;
     return true;
 }

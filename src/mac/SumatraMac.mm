@@ -308,6 +308,11 @@ static BOOL IsRiskyLinkTarget(NSString* path) {
 @property(nonatomic) NSPoint scrollOrigin;
 @property(nonatomic) BOOL hasScrollOrigin;
 @property(nonatomic) BOOL needsInitialScroll;
+// FileState.ScrollPos of scrollPage (see -captureScrollState:)
+@property(nonatomic) BOOL hasScrollState;
+@property(nonatomic) int scrollPage;
+@property(nonatomic) double scrollX;
+@property(nonatomic) double scrollY;
 @property(nonatomic) int findToken;
 @property(nonatomic) int historyIndex;
 @property(nonatomic, retain) NSMutableArray* history; // NSNumber page numbers
@@ -1042,6 +1047,12 @@ static void FindDone(void* context, void* document, int token, bool found) {
         tab.continuous = state.continuous ? YES : NO;
         tab.rotation = ((state.rotation % 360) + 360) % 360 / 90 * 90;
         tab.currentPage = MAX(1, MIN(tab.pageCount, state.pageNo));
+        // like the Windows app, a page that no longer exists loses the position
+        BOOL samePage = state.pageNo == tab.currentPage;
+        tab.hasScrollState = YES;
+        tab.scrollPage = tab.currentPage;
+        tab.scrollX = samePage ? state.scrollX : -1;
+        tab.scrollY = samePage ? state.scrollY : -1;
         if (state.zoomVirtual > 0) {
             tab.zoom = MAX(kZoomMin, MIN(kZoomMax, (CGFloat)(state.zoomVirtual / 100.0)));
         } else {
@@ -1055,12 +1066,20 @@ static void FindDone(void* context, void* document, int token, bool found) {
 }
 
 - (MacPrefsViewState)prefsStateForTab:(SumatraTabState*)tab {
+    [self captureScrollState:tab];
     MacPrefsViewState state = {};
     state.valid = true;
     state.continuous = tab.continuous;
     state.zoomVirtual = tab.zoom > 0 ? tab.zoom * 100.0 : tab.zoom;
     state.rotation = tab.rotation;
     state.pageNo = tab.currentPage;
+    state.scrollX = -1;
+    state.scrollY = -1;
+    if (tab.hasScrollState) {
+        state.pageNo = tab.scrollPage;
+        state.scrollX = tab.scrollX;
+        state.scrollY = tab.scrollY;
+    }
     return state;
 }
 
@@ -1104,6 +1123,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
     if (!tab) {
         return;
     }
+    [self captureScrollState:tab];
     tab.scrollOrigin = [[_scrollView contentView] bounds].origin;
     tab.hasScrollOrigin = YES;
     tab.findToken = 0;
@@ -1156,7 +1176,11 @@ static void FindDone(void* context, void* document, int token, bool found) {
     [self updateLayout];
     if (tab.needsInitialScroll || !tab.hasScrollOrigin) {
         tab.needsInitialScroll = NO;
-        [self showPage:tab.currentPage position:PagePosition::Top];
+        if (tab.hasScrollState) {
+            [self restoreScrollState];
+        } else {
+            [self showPage:tab.currentPage position:PagePosition::Top];
+        }
         return;
     }
     [self scrollToOrigin:tab.scrollOrigin];
@@ -1408,11 +1432,12 @@ static void FindDone(void* context, void* document, int token, bool found) {
 
 // The exact render if available (copied once from the render service into
 // _imageCache), else a request plus the best stale image as placeholder.
-- (CGImageRef)imageForPage:(int)pageNo renderZoom:(float)renderZoom request:(BOOL)request {
+- (CGImageRef)imageForPage:(int)pageNo renderZoom:(float)renderZoom request:(BOOL)request exact:(BOOL*)exact {
     SumatraTabState* tab = _active;
     NSNumber* key = [NSNumber numberWithInt:pageNo];
     SumatraCachedImage* cached = [_imageCache objectForKey:key];
     int rotation = tab.rotation;
+    *exact = YES;
     if (cached && cached.renderZoom == renderZoom && cached.rotation == rotation) {
         return cached.image;
     }
@@ -1430,6 +1455,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
             return entry.image;
         }
     }
+    *exact = NO;
     if (request) {
         MacRequestPage(tab.document, pageNo, renderZoom, rotation, 0);
     }
@@ -1488,6 +1514,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
 
 - (void)layoutOnce {
     SumatraTabState* tab = _active;
+    _visibleRendered = NO;
     if (!tab || !tab.document) {
         [self showEmptyState];
         return;
@@ -1511,6 +1538,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
     NSMutableArray* pages = [NSMutableArray array];
     int first = 0;
     int last = 0;
+    BOOL allExact = request;
     for (int i = 0; i < layout.pageCount; i++) {
         MacLayoutPage* lp = &layout.pages[i];
         if (!lp->shown || lp->visibleRatio <= 0) {
@@ -1520,7 +1548,9 @@ static void FindDone(void* context, void* document, int token, bool found) {
         page.pageNo = lp->pageNo;
         page.frame = NSMakeRect(lp->x, lp->y, lp->width, lp->height);
         page.layoutZoom = lp->layoutZoom;
-        page.image = [self imageForPage:lp->pageNo renderZoom:(float)lp->renderZoom request:request];
+        BOOL exact = NO;
+        page.image = [self imageForPage:lp->pageNo renderZoom:(float)lp->renderZoom request:request exact:&exact];
+        allExact = allExact && exact;
         page.findRects = [self highlightRects:Highlight::Find forPage:lp];
         page.selectionRects = [self highlightRects:Highlight::Selection forPage:lp];
         [pages addObject:page];
@@ -1556,6 +1586,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
     }
     MacFreeDocumentLayout(&layout);
 
+    _visibleRendered = allExact && [pages count] > 0;
     [_documentView setMessage:nil];
     [_documentView setPages:pages];
     [self pageStateChanged];
@@ -1685,6 +1716,73 @@ static void FindDone(void* context, void* document, int token, bool found) {
             origin.y = f.origin.y - kPageTopGap;
         }
     }
+    [self scrollToOrigin:origin];
+    [self updateLayout];
+}
+
+static BOOL SwapsAxes(int rotation) {
+    return rotation == 90 || rotation == 270;
+}
+
+// The Windows app's ScrollState (DisplayModel::GetScrollState): the first
+// visible page and the page point at the view's top-left, clamped into the
+// page. A coordinate is -1 where the page's edge (margin) is in view; unlike
+// Windows, -1 goes to the page axis matching that screen axis when rotated.
+- (void)captureScrollState:(SumatraTabState*)tab {
+    MacDocumentLayout layout = {};
+    if (tab != _active || !tab.document || ![self buildLayout:&layout]) {
+        return;
+    }
+    NSRect visible = [[_scrollView contentView] bounds];
+    for (int i = 0; i < layout.pageCount; i++) {
+        MacLayoutPage* lp = &layout.pages[i];
+        NSRect f = NSMakeRect(lp->x, lp->y, lp->width, lp->height);
+        if (!lp->shown || !NSIntersectsRect(f, visible)) {
+            continue;
+        }
+        double vx = MAX(visible.origin.x, f.origin.x) - f.origin.x;
+        double vy = MAX(visible.origin.y, f.origin.y) - f.origin.y;
+        double px = 0;
+        double py = 0;
+        if (!MacPagePointFromView(tab.document, lp->pageNo, vx, vy, lp->layoutZoom, tab.rotation, &px, &py)) {
+            break;
+        }
+        BOOL marginX = f.origin.x > visible.origin.x;
+        BOOL marginY = f.origin.y > visible.origin.y;
+        BOOL swap = SwapsAxes(tab.rotation);
+        tab.scrollPage = lp->pageNo;
+        tab.scrollX = (swap ? marginY : marginX) ? -1 : px;
+        tab.scrollY = (swap ? marginX : marginY) ? -1 : py;
+        tab.hasScrollState = YES;
+        break;
+    }
+    MacFreeDocumentLayout(&layout);
+}
+
+// Shows the active tab's saved scroll state (-captureScrollState:).
+- (void)restoreScrollState {
+    SumatraTabState* tab = _active;
+    [self showPage:tab.scrollPage position:PagePosition::Top];
+    if (tab.scrollX < 0 && tab.scrollY < 0) {
+        return;
+    }
+    double zoom = 0;
+    NSRect f = [self frameOfPage:tab.scrollPage zoom:&zoom];
+    double vx = 0;
+    double vy = 0;
+    if (NSIsEmptyRect(f) || !MacViewPointFromPage(tab.document, tab.scrollPage, MAX(tab.scrollX, 0.0),
+                                                  MAX(tab.scrollY, 0.0), zoom, tab.rotation, &vx, &vy)) {
+        return;
+    }
+    BOOL swap = SwapsAxes(tab.rotation);
+    NSPoint origin = [[_scrollView contentView] bounds].origin;
+    if ((swap ? tab.scrollY : tab.scrollX) >= 0) {
+        origin.x = round(f.origin.x + vx);
+    }
+    if ((swap ? tab.scrollX : tab.scrollY) >= 0) {
+        origin.y = round(f.origin.y + vy);
+    }
+    _pinnedPage = NO;
     [self scrollToOrigin:origin];
     [self updateLayout];
 }
@@ -1935,6 +2033,73 @@ static void FindDone(void* context, void* document, int token, bool found) {
 
 - (void)sidebarGoToPage:(int)pageNo {
     [self goToPage:pageNo];
+}
+
+#pragma mark - SumatraSelfTestHost
+
+- (NSWindow*)selfTestWindow {
+    return _window;
+}
+
+- (NSView*)selfTestDocumentView {
+    return _documentView;
+}
+
+- (NSSearchField*)selfTestSearchField {
+    return [_searchField window] == _window ? _searchField : nil;
+}
+
+- (NSTextField*)selfTestPageField {
+    return [_pageField window] == _window ? _pageField : nil;
+}
+
+- (NSString*)selfTestActivePath {
+    return _active.path;
+}
+
+- (struct SumatraTestState)selfTestState {
+    struct SumatraTestState s = {};
+    SumatraTabState* tab = _active;
+    s.tabCount = (int)[_tabs count];
+    s.hasTab = tab != nil;
+    s.loading = tab && !tab.document;
+    s.lastOpenError = _lastOpenError;
+    s.sidebarVisible = _sidebarVisible;
+    s.thumbnails = _sidebarVisible ? [_sidebar visibleThumbnailCount] : 0;
+    if (!tab.document) {
+        return s;
+    }
+    s.pageCount = tab.pageCount;
+    s.currentPage = tab.currentPage;
+    s.zoom = tab.zoom;
+    s.displayZoom = [self displayZoom];
+    s.rotation = tab.rotation;
+    s.continuous = tab.continuous;
+    s.rendered = _visibleRendered;
+    s.findPending = tab.findToken != 0;
+    s.findPage = MacFindResultPage(tab.document);
+    s.hasSelection = MacHasSelection(tab.document);
+    NSRect f = [self frameOfPage:tab.currentPage zoom:nullptr];
+    if (!NSIsEmptyRect(f)) {
+        NSPoint origin = [[_scrollView contentView] bounds].origin;
+        s.pageOffsetX = origin.x - f.origin.x;
+        s.pageOffsetY = origin.y - f.origin.y;
+    }
+    return s;
+}
+
+// What quitting and launching again does to the settings file.
+- (void)selfTestReloadPrefs {
+    MacPrefsShutdown();
+    MacPrefsInit([_settingsPath fileSystemRepresentation]);
+}
+
+// Quits through the normal shutdown path; applicationWillTerminate: exits with exitCode.
+- (void)selfTestFinished:(int)exitCode {
+    _selfTestExitCode = exitCode;
+    _selfTestDone = YES;
+    [NSApp terminate:nil];
+    exit(exitCode);
 }
 
 #pragma mark - Links

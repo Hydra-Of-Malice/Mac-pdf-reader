@@ -3847,7 +3847,13 @@ EngineBase* EngineMupdf::Clone() {
     // prefer re-loading from the file: it streams large documents on demand
     // rather than copying them, and is the cheapest path when the file is present.
     EngineMupdf* clone = nullptr;
-    if (FilePath()) {
+    if (len(cloneSourceData) > 0) {
+        clone = (EngineMupdf*)CreateEngineMupdfFromData(cloneSourceData, cloneSourceName, pwdUI);
+        if (clone) {
+            clone->SetFilePath(FilePath());
+        }
+    }
+    if (!clone && FilePath()) {
         clone = new EngineMupdf();
         if (!clone->Load(FilePath(), pwdUI)) {
             delete clone;
@@ -9076,6 +9082,16 @@ bool IsEngineMupdfSupportedFileType(FileType kind) {
     return false;
 }
 
+// Clone() gets a PDF's bytes from GetFileData(); other docs loaded from memory
+// keep a copy, since re-opening FilePath() would load a different format.
+static void KeepCloneSource(EngineMupdf* e, Str data, Str name) {
+    if (e->pdfdoc || len(data) == 0) {
+        return;
+    }
+    e->cloneSourceData = str::Dup(e->arena, data);
+    e->cloneSourceName = str::Dup(e->arena, name);
+}
+
 EngineBase* CreateEngineMupdfFromFile(Str path, FileType kind, int displayDPI, PasswordUI* pwdUI) {
     if (len(path) == 0) {
         return nullptr;
@@ -9104,6 +9120,7 @@ EngineBase* CreateEngineMupdfFromFile(Str path, FileType kind, int displayDPI, P
             SafeEngineRelease(&engine);
             return {};
         }
+        KeepCloneSource(engine, d, StrL("foo.fb2"));
         engine->SetFilePath(path);
         return engine;
     }
@@ -9130,6 +9147,7 @@ EngineBase* CreateEngineMupdfFromData(Str data, Str nameHint, PasswordUI* pwdUI)
         SafeEngineRelease(&engine);
         return nullptr;
     }
+    KeepCloneSource(engine, data, nameHint);
     return engine;
 }
 

@@ -7,6 +7,9 @@ struct MacPrefsViewState {
     double zoomVirtual;
     int rotation;
     int pageNo;
+    // FileState.ScrollPos: page units at the view's top-left on pageNo; -1: page edge visible on that axis
+    double scrollX;
+    double scrollY;
 };
 
 void MacPrefsInit(const char* settingsPath);

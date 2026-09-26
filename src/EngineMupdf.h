@@ -238,6 +238,11 @@ class EngineMupdf : public EngineBase {
     // change can restyle without reopening the file
     Str ebookUserCss;
     int ebookPublisherCss = 1;
+
+    // bytes of a non-PDF doc loaded from memory (FBZ's inner FB2, LIT / MOBI /
+    // CHM converted to EPUB), which Clone() can't re-open from FilePath()
+    Str cloneSourceData;
+    Str cloneSourceName;
     float ebookLayoutW = 0;
     float ebookLayoutH = 0;
     float ebookLayoutEm = 0;

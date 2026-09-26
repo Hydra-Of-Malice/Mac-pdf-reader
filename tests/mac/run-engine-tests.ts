@@ -131,7 +131,8 @@ function lastStage(stderr: string): string {
 }
 
 function checkOpened(f: Fixture, r: any, fail: (s: string) => void) {
-  const pages = r.pages ?? 0;
+  // chaptered (EPUB) documents can grow as chapters get laid out
+  const pages = Math.max(r.pages ?? 0, r.pagesAtEnd ?? 0);
   if (f.pages !== undefined && pages !== f.pages) fail(`pages ${pages} != ${f.pages}`);
   if (f.minPages !== undefined && pages < f.minPages) fail(`pages ${pages} < ${f.minPages}`);
   if (r.badPageSizes) fail(`${r.badPageSizes} pages without a size`);

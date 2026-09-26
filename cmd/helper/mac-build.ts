@@ -74,7 +74,11 @@ export function hostArch(): MacArch {
 }
 
 export function macTarget(arch: MacArch): PosixTarget {
-  return { os: "mac", arch, flags: ["-arch", arch === "arm64" ? "arm64" : "x86_64", `-mmacosx-version-min=${kMacMinVersion}`] };
+  return {
+    os: "mac",
+    arch,
+    flags: ["-arch", arch === "arm64" ? "arm64" : "x86_64", `-mmacosx-version-min=${kMacMinVersion}`],
+  };
 }
 
 export function defaultJobs(): number {
@@ -83,7 +87,9 @@ export function defaultJobs(): number {
 
 function requireDarwin(): void {
   if (process.platform !== "darwin") {
-    throw new Error(`-mac builds SumatraPDF.app and needs macOS with Xcode (this is ${process.platform}); use -mac-core`);
+    throw new Error(
+      `-mac builds SumatraPDF.app and needs macOS with Xcode (this is ${process.platform}); use -mac-core`,
+    );
   }
 }
 
@@ -291,7 +297,13 @@ function makeLibarchive(t: PosixTarget, genDir: string): LibDef {
   return {
     name: "a-libarchive",
     alwaysOptimize: true,
-    defines: ["LIBARCHIVE_STATIC", 'PLATFORM_CONFIG_H="config_posix.h"', "BZ_NO_STDIO", "HAVE_CONFIG_H", "LZMA_API_STATIC"],
+    defines: [
+      "LIBARCHIVE_STATIC",
+      'PLATFORM_CONFIG_H="config_posix.h"',
+      "BZ_NO_STDIO",
+      "HAVE_CONFIG_H",
+      "LZMA_API_STATIC",
+    ],
     includes: [
       dir,
       lzmaDir, // config.h for liblzma, shadows ext/liblzma/config.h
@@ -745,7 +757,13 @@ export async function buildPosixLibs(a: CompileArgs): Promise<string[]> {
   const commonFlags = commonCompileFlags(a.t, a.cfg);
   const cxxFlags = ["-D__GXX_TYPEINFO_EQUALITY_INLINE=1"];
   for (const lib of libs) {
-    await buildLibrary(lib, a.outDir, a.cfg.isRelease, { tools: a.tools, commonDefines: [], commonFlags, cxxFlags, jobs: a.jobs });
+    await buildLibrary(lib, a.outDir, a.cfg.isRelease, {
+      tools: a.tools,
+      commonDefines: [],
+      commonFlags,
+      cxxFlags,
+      jobs: a.jobs,
+    });
   }
   return libArchivePaths(a.outDir, libs);
 }

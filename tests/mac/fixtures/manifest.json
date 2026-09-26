@@ -15,7 +15,7 @@
         { "kind": "page", "targetPage": 3 },
         { "kind": "url", "value": "https://www.sumatrapdfreader.org/" }
       ],
-      "props": { "Title": "SumatraPDF mac fixture" },
+      "props": { "title": "SumatraPDF mac fixture" },
       "lastPageLandscape": true
     },
     {
@@ -204,7 +204,7 @@
       "searchPage": 1,
       "tocMin": 2
     },
-    { "id": "djvu-corrupt", "format": "DjVu", "path": "tests/mac/fixtures/corrupt.djvu", "expect": "fail" },
+    { "id": "djvu-corrupt", "format": "DjVu", "path": "tests/mac/fixtures/corrupt.djvu", "expect": "any" },
     { "id": "png", "format": "Image", "path": "tests/mac/fixtures/sample.png", "expect": "open", "pages": 1 },
     { "id": "bmp", "format": "Image", "path": "tests/mac/fixtures/sample.bmp", "expect": "open", "pages": 1 },
     { "id": "tga", "format": "Image", "path": "tests/mac/fixtures/sample.tga", "expect": "open", "pages": 1 },

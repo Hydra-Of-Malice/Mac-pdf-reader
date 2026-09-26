@@ -75,13 +75,23 @@ jobs:
         run: sw_vers && uname -m && xcrun --show-sdk-version && clang --version && bun --version
 
       - name: Portable core check (engines + unit tests)
+        id: core
         run: bun cmd/build.ts -mac-core
 
+      # Per-format engine tests through the same bridge the app uses; reported, not gating.
+      - name: Format test matrix
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: bun tests/mac/run-engine-tests.ts --driver out/mac-core-dbg-clang/test_mac_engine --json out/mac-engine-results.json
+
       - name: Debug build
+        id: debug
+        if: ${{ !cancelled() }}
         run: bun cmd/build.ts -mac -dbg
 
       # Launch the debug app with a PDF; it must still be running after 15s.
       - name: Launch smoke test
+        if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
         run: |
           app=$(find out -maxdepth 3 -type d -name SumatraPDF.app | head -1)
           echo "app: $app"
@@ -113,6 +123,7 @@ jobs:
           retention-days: 14
 
       - name: Release build
+        if: ${{ !cancelled() }}
         run: bun cmd/build.ts -mac -rel
 
       - name: List outputs
@@ -125,8 +136,66 @@ jobs:
         with:
           name: SumatraPDF-mac-${{ matrix.arch }}
           path: |
+            out/mac-engine-results.json
             out/**/*.tar.gz
             out/**/*.dmg
             out/**/*.zip
           if-no-files-found: warn
+          retention-days: 14
+
+      # The debug app's built-in self-test (src/mac/MacSelfTest.mm): opens every manifest fixture the way Finder
+      # does, drives menus, find, sidebar, links, copy and close/reopen, snapshots pages. Last, so the builds above
+      # are uploaded even when it fails.
+      # Drives the real app through every manifest fixture; reported, not gating (yet).
+      - name: App self-test
+        if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 40
+        run: |
+          app=$(find out -maxdepth 3 -type d -name SumatraPDF.app -path "*dbg*" | head -1)
+          if [ -z "$app" ]; then app=$(find out -maxdepth 3 -type d -name SumatraPDF.app | head -1); fi
+          echo "app: $app"
+          test -n "$app"
+          out="$RUNNER_TEMP/selftest"
+          mkdir -p "$out/prefs"
+          bun -e 'import { makeLargePdf } from "./tests/mac/fixture-lib.ts"; import { mkdirSync, writeFileSync } from "node:fs"; mkdirSync("tests/tmp/mac-fixtures", { recursive: true }); writeFileSync("tests/tmp/mac-fixtures/large-2000.pdf", makeLargePdf(2000));' || echo "large-2000.pdf not generated; that case is skipped"
+          rc=0
+          "$app/Contents/MacOS/SumatraPDF" -for-testing -prefs-dir "$out/prefs" -self-test "$out/report.json" \
+            -self-test-manifest tests/mac/fixtures/manifest.json -self-test-timeout 2100 > "$out/app.log" 2>&1 || rc=$?
+          echo "app exit code: $rc"
+          grep -E "^selftest: " "$out/app.log" | grep -v "^selftest:   ok" || true
+          if [ ! -f "$out/report.json" ]; then
+            echo "::error title=self-test::no report written"
+            tail -100 "$out/app.log"
+            exit 1
+          fi
+          python3 - "$out/report.json" <<'EOF'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          for f in r.get("files", []):
+              status = "SKIP" if f.get("skipped") else ("PASS" if f.get("pass") else "FAIL")
+              print(f"{status}  {f.get('id', ''):<26} {f.get('ms', 0):>8.0f} ms  {f.get('path', '')}")
+              if f.get("pass"):
+                  continue
+              for s in f.get("steps", []):
+                  if not s.get("ok"):
+                      print(f"      FAIL {s.get('name')}: {s.get('detail', '')}")
+                      print(f"::error title=self-test {f.get('id')}::{s.get('name')}: {s.get('detail', '')}")
+              for a in f.get("alerts", []):
+                  print(f"      alert: {a}")
+          print(f"finished={r.get('finished')} pass={r.get('pass')} cases={r.get('cases')} "
+                f"failed={r.get('failed')} skipped={r.get('skipped')} ms={r.get('ms')}")
+          if r.get("error"):
+              print(f"::error title=self-test::{r['error']}")
+          sys.exit(0 if r.get("finished") and r.get("pass") else 1)
+          EOF
+          exit $rc
+
+      - name: Upload self-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/selftest
+          if-no-files-found: ignore
           retention-days: 14

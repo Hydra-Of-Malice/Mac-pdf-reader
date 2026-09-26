@@ -174,3 +174,8 @@ int MacFindStart(void* document, int startPage, const char* text, MacFindDirecti
 void MacFindCancel(void* document);
 bool MacFindIsBusy(void* document);
 void MacFindClear(void* document);
+
+bool MacPagePointFromView(void* document, int pageNo, double x, double y, double zoom, int rotation, double* pageX,
+                          double* pageY);
+bool MacViewPointFromPage(void* document, int pageNo, double pageX, double pageY, double zoom, int rotation, double* x,
+                          double* y);

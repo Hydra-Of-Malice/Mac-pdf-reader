@@ -26,7 +26,7 @@ static const double kPollSeconds = 0.02;
 static const double kSettleSeconds = 0.3;
 static const int kMaxPasswords = 8;
 static const int kLinkScanPages = 8;
-static const double kLinkScanSteps = 64.0;
+static const double kLinkScanSteps = 128.0;
 static const double kScrollTolerance = 3.0;
 static const CGFloat kScrollProbe = 60.0;
 static const int kMaxSnapshotSamples = 250;
@@ -716,6 +716,11 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
         [self skip:@"navigation" detail:@"single page"];
         return;
     }
+    // another case may have left this file's saved state elsewhere
+    if ([self state].currentPage != 1) {
+        [self invoke:@selector(goToFirstPage:)];
+        [self waitRendered];
+    }
     [self command:@selector(goToNextPage:)
              name:@"next page"
             check:^NSString*(struct SumatraTestState s) {
@@ -1106,9 +1111,14 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
                                                         after.currentPage, after.zoom, after.rotation,
                                                         after.pageOffsetX, after.pageOffsetY];
     [self step:@"view state restored" ok:[problems count] == 0 since:t0 detail:detail];
-    if (reopened) {
-        [self command:@selector(rotateLeft:) name:@"persistence: rotate back" check:nil];
+    if (!reopened) {
+        return;
     }
+    // leave the default view saved for cases that open this file again
+    [self command:@selector(rotateLeft:) name:@"persistence: rotate back" check:nil];
+    [self invoke:@selector(zoomFitPage:)];
+    [self invoke:@selector(goToFirstPage:)];
+    [self waitRendered];
 }
 
 - (void)closeAllTabs {

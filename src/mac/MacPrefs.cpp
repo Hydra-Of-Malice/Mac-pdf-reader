@@ -76,6 +76,8 @@ static void StateFromFileState(FileState* fileState, MacPrefsViewState* state) {
     state->zoomVirtual = ZoomFromString(fileState->zoom, kZoomFitWidth);
     state->rotation = fileState->rotation;
     state->pageNo = PageNoFromStored(fileState->pageNo);
+    state->scrollX = fileState->scrollPos.x;
+    state->scrollY = fileState->scrollPos.y;
 }
 
 static void SaveState(FileState* fileState, const MacPrefsViewState* state) {
@@ -88,6 +90,7 @@ static void SaveState(FileState* fileState, const MacPrefsViewState* state) {
     str::ReplaceWithCopy(&fileState->pageNo, fmt("%d", state->pageNo));
     ZoomToString(&fileState->zoom, (float)state->zoomVirtual, fileState);
     fileState->rotation = state->rotation;
+    fileState->scrollPos = PointF((float)state->scrollX, (float)state->scrollY);
 }
 
 static SessionData* SavedSession() {
@@ -190,6 +193,7 @@ void MacPrefsAppendSession(const char* path, const MacPrefsViewState* state) {
     str::ReplaceWithCopy(&tab->pageNo, fileState->pageNo);
     str::ReplaceWithCopy(&tab->zoom, fileState->zoom);
     tab->rotation = fileState->rotation;
+    tab->scrollPos = fileState->scrollPos;
     VecAppend(*gBuildingSession->tabStates, tab);
 }
 
@@ -228,6 +232,8 @@ char* MacPrefsCopySessionTab(int index, MacPrefsViewState* state) {
         state->zoomVirtual = ZoomFromString(tab->zoom, kZoomFitWidth);
         state->rotation = tab->rotation;
         state->pageNo = PageNoFromStored(tab->pageNo);
+        state->scrollX = tab->scrollPos.x;
+        state->scrollY = tab->scrollPos.y;
     }
     return CopyCString(tab->filePath);
 }

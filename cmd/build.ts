@@ -242,7 +242,10 @@ function validateOptions(opts: BuildOptions): void {
   reject(opts.cross && mode !== "mac-core", "-cross is only valid with -mac-core");
   reject(opts.cross && opts.asan, "-asan is not valid with -mac-core -cross");
   reject(!!opts.cc && (mode !== "mac-core" || opts.cross), "-cc is only valid with -mac-core (not -cross)");
-  reject(!!opts.arch && !(mode === "mac" || mode === "mac-remote" || opts.cross), "-arch is only valid with -mac, -mac-remote or -mac-core -cross");
+  reject(
+    !!opts.arch && !(mode === "mac" || mode === "mac-remote" || opts.cross),
+    "-arch is only valid with -mac, -mac-remote or -mac-core -cross",
+  );
   reject(opts.dmg && mode !== "mac" && mode !== "mac-remote", "-dmg is only valid with -mac or -mac-remote");
   reject(!!opts.branch && mode !== "mac-remote", "-branch is only valid with -mac-remote");
   reject(mode === "mac-remote" && !opts.branch, "-mac-remote requires -branch <name>");

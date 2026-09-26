@@ -33,6 +33,7 @@ Call everything but MacThumbsReleaseImage() from one thread (the main thread).
 
 static const long long kDefaultMaxCacheBytes = 64LL * 1024 * 1024;
 static const int kMaxThumbDx = 4096;
+static const float kMaxThumbZoom = 64.0f;
 
 struct ThumbPixels {
     AtomicInt refs;
@@ -297,10 +298,11 @@ static float ThumbZoom(EngineBase* engine, const ThumbKey& key) {
         return 0;
     }
     float zoom = std::min((float)key.dx / pageDx, (float)key.dy / pageDy);
-    if (!(zoom > 0) || zoom > 64.0f) {
+    if (!(zoom > 0)) {
         return 0;
     }
-    return zoom;
+    // tiny pages (e.g. 1x1 px comic images) get a smaller thumbnail instead of none
+    return std::min(zoom, kMaxThumbZoom);
 }
 
 static ThumbPixels* RenderThumb(ThumbService* s, EngineBase* engine, const ThumbKey& key) {
