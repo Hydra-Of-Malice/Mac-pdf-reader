@@ -18,6 +18,31 @@
 #error "unsupported arch"
 #endif
 
+#ifdef _WIN32
+#define OS_WIN 1
+#else
+#define OS_WIN 0
+#endif
+
+#ifdef __APPLE__
+#define OS_MAC 1
+#else
+#define OS_MAC 0
+#endif
+
+#ifdef __linux__
+#define OS_LINUX 1
+#else
+#define OS_LINUX 0
+#endif
+
+// macOS and Linux share the *_posix.cpp implementations
+#if OS_MAC || OS_LINUX
+#define OS_POSIX 1
+#else
+#define OS_POSIX 0
+#endif
+
 #ifdef _MSC_VER
 #define COMPILER_MSVC 1
 #else
@@ -93,11 +118,17 @@
 #include <new>       // for placement new
 #include <algorithm> // for std::min, std::max
 #include <utility>   // for std::forward
+#if OS_POSIX
+// before __unused below: glibc's pthread mutex structs have a field named __unused
+#include <pthread.h>
+#include <strings.h>
+#endif
 #define __unused [[maybe_unused]]
 
 #define _USE_MATH_DEFINES
 #include <math.h>
 
+#if OS_WIN
 #define NOMINMAX
 #include <winsock2.h> // must include before <windows.h>
 #include <windows.h>
@@ -135,6 +166,72 @@
 #undef NOMINMAX
 #undef min
 #undef max
+#else
+// the Win32 scalar types shared code uses in portable signatures
+using BYTE = uint8_t;
+using WORD = uint16_t;
+using DWORD = uint32_t;
+using DWORD64 = uint64_t;
+using UINT = unsigned int;
+using UINT_PTR = uintptr_t;
+using LONG = int32_t;
+using BOOL = int;
+using WCHAR = wchar_t;
+using LPWSTR = WCHAR*;
+using WPARAM = uintptr_t;
+using LPARAM = intptr_t;
+using LRESULT = intptr_t;
+using LCID = uint32_t;
+using COLORREF = uint32_t;
+
+// opaque, so structs and declarations shared with Windows compile
+using HANDLE = void*;
+using HGDIOBJ = void*;
+struct HWND__;
+using HWND = HWND__*;
+struct HDC__;
+using HDC = HDC__*;
+struct HFONT__;
+using HFONT = HFONT__*;
+struct HBITMAP__;
+using HBITMAP = HBITMAP__*;
+struct HBRUSH__;
+using HBRUSH = HBRUSH__*;
+struct HICON__;
+using HICON = HICON__*;
+struct HMENU__;
+using HMENU = HMENU__*;
+struct HACCEL__;
+using HACCEL = HACCEL__*;
+struct HINSTANCE__;
+using HINSTANCE = HINSTANCE__*;
+using HMODULE = HINSTANCE;
+struct HIMAGELIST__;
+using HIMAGELIST = HIMAGELIST__*;
+
+struct ACCEL;
+struct EXCEPTION_POINTERS;
+struct MINIDUMP_EXCEPTION_INFORMATION;
+
+struct FILETIME {
+    DWORD dwLowDateTime;
+    DWORD dwHighDateTime;
+};
+
+#define CP_ACP 0
+#define CP_UTF8 65001
+#define LOCALE_USER_DEFAULT 0
+#define LOCALE_INVARIANT 0
+#define __TEXT(s) L##s
+#define TEXT(s) __TEXT(s)
+constexpr int MAX_PATH = 4096;
+constexpr int URLZONE_INVALID = -1;
+constexpr int URLZONE_INTERNET = 3;
+
+#define ZeroMemory(Destination, Length) memset((Destination), 0, (Length))
+
+uint64_t GetTickCount64();
+#endif
 
 using i8 = int8_t;
 using u8 = uint8_t;
@@ -783,10 +880,12 @@ struct RectG {
     T dy = 0;
 
     RectG() = default;
+#if OS_WIN
     // implicit for Rect, explicit for RectF, as before
     explicit(!std::is_same_v<T, int>) RectG(RECT r)
         : x((T)r.left), y((T)r.top), dx((T)(r.right - r.left)), dy((T)(r.bottom - r.top)) {}
     RectG(Gdiplus::RectF r) : x((T)r.X), y((T)r.Y), dx((T)r.Width), dy((T)r.Height) {} // NOLINT
+#endif
     RectG(T x, T y, T dx, T dy) : x(x), y(y), dx(dx), dy(dy) {}
     RectG(PointG<T> pt, SizeG<T> sz) : x(pt.x), y(pt.y), dx(sz.dx), dy(sz.dy) {}
     RectG(PointG<T> min, PointG<T> max) : x(min.x), y(min.y), dx(max.x - min.x), dy(max.y - min.y) {}
@@ -845,6 +944,7 @@ Rect ToRect(const RectF& r);
 // conversions to and from the Win32 / GDI+ geometry types. Those types only
 // exist on Windows, so the whole group is Windows-only; portable code uses the
 // types above
+#if OS_WIN
 int RectDx(const RECT& r);
 int RectDy(const RECT& r);
 
@@ -860,11 +960,13 @@ Gdiplus::RectF ToGdipRectF(const Rect& r);
 
 Gdiplus::Rect ToGdipRect(const RectF& r);
 Gdiplus::RectF ToGdipRectF(const RectF& r);
+#endif
 
 int NormalizeRotation(int rotation);
 
 //--- Thread.h ------------------------------------------------------------------
 
+#if OS_WIN
 using ThreadId = DWORD;
 using ThreadHandle = HANDLE;
 
@@ -900,6 +1002,53 @@ struct RecursiveMutex {
     void Unlock() { LeaveCriticalSection(&lock); }
     bool TryLock() { return TryEnterCriticalSection(&lock); }
 };
+#else
+using ThreadId = u64;
+
+struct ThreadHandlePosix;
+using ThreadHandle = ThreadHandlePosix*;
+
+struct Mutex {
+    pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+    Mutex() = default;
+    ~Mutex() = default;
+
+    void Lock() { pthread_mutex_lock(&lock); }
+    void Unlock() { pthread_mutex_unlock(&lock); }
+    bool TryLock() { return pthread_mutex_trylock(&lock) == 0; }
+};
+
+struct ConditionVariable {
+    pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+    ConditionVariable() = default;
+    ~ConditionVariable() { pthread_cond_destroy(&cond); }
+
+    void Wait(Mutex* mutex) { pthread_cond_wait(&cond, &mutex->lock); }
+    void Wake() { pthread_cond_signal(&cond); }
+    void WakeAll() { pthread_cond_broadcast(&cond); }
+};
+
+struct RecursiveMutex {
+    pthread_mutex_t lock;
+
+    RecursiveMutex() {
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&lock, &attr);
+        pthread_mutexattr_destroy(&attr);
+    }
+    ~RecursiveMutex() { pthread_mutex_destroy(&lock); }
+
+    void Lock() { pthread_mutex_lock(&lock); }
+    void Unlock() { pthread_mutex_unlock(&lock); }
+    bool TryLock() { return pthread_mutex_trylock(&lock) == 0; }
+};
+
+ThreadId GetCurrentThreadId();
+#endif
 
 struct AutoUnlockMutex {
     Mutex* mutex;
@@ -920,6 +1069,7 @@ void SleepInMs(int ms);
 
 void RunAsync(const Func0&, Str threadName = {});
 ThreadHandle StartThread(const Func0&, Str threadName = {});
+#if OS_WIN
 inline bool SafeCloseThreadHandle(ThreadHandle* hPtr) {
     ThreadHandle h = *hPtr;
     if (!h || h == INVALID_HANDLE_VALUE) {
@@ -930,6 +1080,9 @@ inline bool SafeCloseThreadHandle(ThreadHandle* hPtr) {
     *hPtr = nullptr;
     return !!ok;
 }
+#else
+bool SafeCloseThreadHandle(ThreadHandle*);
+#endif
 
 extern AtomicInt gDangerousThreadCount;
 bool AreDangerousThreadsPending();
@@ -2338,7 +2491,9 @@ bool IsNearBlack(Color c);
 DWORD PremultiplyPixel(Color c, u8 alpha);
 
 // GDI+ only exists on Windows; portable code works with Color
+#if OS_WIN
 Gdiplus::Color GdiRgbFromColor(Color c);
+#endif
 
 constexpr Color RgbToColor(Color rgb) {
     return ((rgb & 0x0000FF) << 16) | (rgb & 0x00FF00) | ((rgb & 0xFF0000) >> 16);

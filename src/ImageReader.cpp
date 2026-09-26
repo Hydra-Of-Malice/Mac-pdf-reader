@@ -14,10 +14,14 @@ extern "C" {
 }
 
 #include "base/File.h"
+#if OS_WIN
 #include "base/AutoWin.h"
+#endif
 #include "base/TgaReader.h"
+#if OS_WIN
 #include "base/Win.h"
 #include "base/GdiPlusUtil.h"
+#endif
 #include "AvifReader.h"
 #include "JxlReader.h"
 #include "WebpReader.h"
@@ -25,7 +29,9 @@ extern "C" {
 #if COMPILER_MSVC
 #pragma warning(disable : 4668)
 #endif
+#if OS_WIN
 #include <wincodec.h>
+#endif
 
 #include "ImageReader.h"
 
@@ -304,6 +310,8 @@ Size ImageSizeFromData(Str d) {
     return result;
 }
 
+// the POSIX PixmapFromData(), PixmapsFromData() and LoadRenderedBitmap() are in ImageReader_posix.cpp
+#if OS_WIN
 using Gdiplus::Bitmap;
 using Gdiplus::BitmapData;
 using Gdiplus::Ok;
@@ -687,3 +695,4 @@ RenderedBitmap* LoadRenderedBitmap(Str path) {
 
     return rendered;
 }
+#endif

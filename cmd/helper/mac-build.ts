@@ -1,113 +1,302 @@
 /**
- * Build SumatraPDF dependency static libraries on macOS (ext/).
+ * macOS build of SumatraPDF.app (cmd/build.ts -mac), plus the source lists, library definitions and compile / link
+ * helpers shared with the POSIX core check (cmd/helper/mac-core-build.ts, cmd/build.ts -mac-core).
  *
- * Invoked by cmd/build.ts -mac.
+ * Output: out/mac-<cfg>-<arch>/ with SumatraPDF.app, test_util, test_engines, test_mac_engine,
+ * test_mac_thumbnails, lib/*.a. <cfg> is dbg, rel, asan or rel_asan; <arch> is arm64, x64 or universal.
  *
- * Output: out/mac-dbg64/lib/*.a (or out/mac-rel64 / out/mac-asan64 / out/mac-rel64_asan)
- *
- * Mirrors the dependency projects in premake5.lua / premake5.files.lua.
- * Builds portable src/ test tools, but not the Windows-only SumatraPDF UI.
+ * Reproducible: fixed flags, source paths mapped to "." (-ffile-prefix-map), sorted sources, ZERO_AR_DATE=1 and
+ * SOURCE_DATE_EPOCH (from the HEAD commit) so no build time is baked in.
  */
 
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
-import { join, basename } from "node:path";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpus } from "node:os";
+import { join } from "node:path";
+import { Glob } from "bun";
 import {
   type BuildTools,
   type LibDef,
-  DEFAULT_JOBS,
-  FONT_FILES,
   buildLibrary,
   compileAll,
   dropX86OnlyCflags,
-  embedBinaryFile,
   invalidateObjsIfBuildChanged,
   objPath,
   spawnCmd,
 } from "../deps-build-common";
 import {
   aGumbo,
-  zlib,
-  unrar,
-  libwebp,
-  jxldec,
-  heicdec,
-  libjpegTurbo,
-  jbig2dec,
-  openjpeg,
-  freetype,
-  lcms2,
-  harfbuzz,
-  mujs,
-  extract,
   brotli,
   cmarkGfm,
+  extract,
+  freetype,
+  harfbuzz,
+  heicdec,
+  jbig2dec,
+  jxldec,
+  lcms2,
+  libjpegTurbo,
+  libwebp,
+  mujs,
   mupdf as mupdfBase,
+  openjpeg,
+  zlib,
 } from "../deps-build-defs";
 import { extractSumatraVersion } from "../util";
+import { addBundleResources, packageMacApp } from "./mac-bundle";
 
-type MacArch = "arm64" | "x64";
+export type MacArch = "arm64" | "x64";
+export type PosixOs = "mac" | "linux";
+
+// first macOS that runs on Apple Silicon; matches LSMinimumSystemVersion in src/mac/Resources/Info.plist
+export const kMacMinVersion = "11.0";
+
+// a compile target: the OS / CPU the code is built for, and the flags that select it
+export interface PosixTarget {
+  os: PosixOs;
+  arch: MacArch;
+  // go on every compile and link line: -arch, -mmacosx-version-min, zig's -target
+  flags: string[];
+}
+
+export interface PosixConfig {
+  isRelease: boolean;
+  asan: boolean;
+}
+
+export function configDirName(cfg: PosixConfig): string {
+  if (cfg.asan) return cfg.isRelease ? "rel_asan" : "asan";
+  return cfg.isRelease ? "rel" : "dbg";
+}
+
+export function hostArch(): MacArch {
+  if (process.arch === "arm64") return "arm64";
+  return "x64";
+}
+
+export function macTarget(arch: MacArch): PosixTarget {
+  return { os: "mac", arch, flags: ["-arch", arch === "arm64" ? "arm64" : "x86_64", `-mmacosx-version-min=${kMacMinVersion}`] };
+}
+
+export function defaultJobs(): number {
+  return Math.max(1, cpus().length);
+}
 
 function requireDarwin(): void {
   if (process.platform !== "darwin") {
-    console.error(`This script must be run on macOS (got ${process.platform})`);
-    process.exit(1);
+    throw new Error(`-mac builds SumatraPDF.app and needs macOS with Xcode (this is ${process.platform}); use -mac-core`);
   }
-}
-
-function detectMacArch(): MacArch {
-  if (process.arch === "arm64") return "arm64";
-  if (process.arch === "x64") return "x64";
-  const proc = Bun.spawnSync(["uname", "-m"]);
-  const m = proc.stdout.toString().trim();
-  return m === "arm64" ? "arm64" : "x64";
 }
 
 function resolveTool(role: string, candidates: string[]): string {
   for (const name of candidates) {
     if (Bun.which(name)) return name;
   }
-  console.error(`Could not find ${role} (tried: ${candidates.join(", ")})`);
-  console.error("Install Xcode command-line tools: xcode-select --install");
-  process.exit(1);
+  throw new Error(`could not find ${role} (tried: ${candidates.join(", ")}); install Xcode: xcode-select --install`);
 }
 
 function resolveMacTools(): BuildTools {
-  const cc = resolveTool("C compiler", ["clang"]);
-  const cxx = resolveTool("C++ compiler", ["clang++"]);
-  const ar = resolveTool("archiver", ["ar"]);
-  // ld from cctools; clang driver also works but plain ld is what mupdf uses on Unix
-  const embed = resolveTool("linker for binary embedding", ["ld", "/usr/bin/ld"]);
-  return { cc, cxx, ar, embed };
-}
-
-async function generateDsym(exePath: string, outputPath = `${exePath}.dSYM`): Promise<void> {
-  const dsymutil = resolveTool("debug symbol generator", ["dsymutil"]);
-  rmSync(outputPath, { recursive: true, force: true });
-  const result = await spawnCmd([dsymutil, exePath, "-o", outputPath]);
-  if (!result.ok) {
-    throw new Error(`dsymutil failed for ${exePath}: ${result.stderr}`);
-  }
-  console.log(`  -> ${outputPath}`);
-}
-
-function makeLibarchive(outDir: string): LibDef {
-  const liblzmaConfigDir = join(outDir, "generated", "liblzma");
   return {
-    name: "libarchive",
+    cc: resolveTool("C compiler", ["clang"]),
+    cxx: resolveTool("C++ compiler", ["clang++"]),
+    ar: resolveTool("archiver", ["ar"]),
+  };
+}
+
+//--- reproducibility -----------------------------------------------------------
+
+// Environment for reproducible output: ar / ld64 write no timestamps (ZERO_AR_DATE), and __DATE__ / __TIME__ come
+// from the HEAD commit instead of the clock (SOURCE_DATE_EPOCH, honored by gcc and clang).
+export function setReproducibleEnv(): void {
+  process.env.ZERO_AR_DATE = "1";
+  if (process.env.SOURCE_DATE_EPOCH) return;
+  const p = Bun.spawnSync(["git", "log", "-1", "--format=%ct"], { stdout: "pipe", stderr: "ignore" });
+  const t = p.exitCode === 0 ? p.stdout.toString().trim() : "";
+  process.env.SOURCE_DATE_EPOCH = /^\d+$/.test(t) ? t : "0";
+}
+
+// flags on every compile: debug info, source paths relative to the repo root, ASan
+export function commonCompileFlags(t: PosixTarget, cfg: PosixConfig): string[] {
+  const root = process.cwd();
+  return [
+    ...t.flags,
+    "-g",
+    `-ffile-prefix-map=${root}=.`,
+    `-fdebug-prefix-map=${root}=.`,
+    ...(cfg.asan ? ["-fsanitize=address", "-fno-omit-frame-pointer"] : []),
+  ];
+}
+
+//--- third-party libraries --------------------------------------------------------------------------------------
+
+// ext/a-libarchive was generated for Windows only: the build supplies a POSIX config header and the few functions
+// whose POSIX sources the amalgamation left out.
+const libarchiveConfigPosix = `/* generated by cmd/helper/mac-build.ts: POSIX config for ext/a-libarchive (read-only subset) */
+#define __LIBARCHIVE_CONFIG_H_INCLUDED 1
+
+#define HAVE_CTYPE_H 1
+#define HAVE_ERRNO_H 1
+#define HAVE_FCNTL_H 1
+#define HAVE_FCNTL 1
+#define HAVE_ICONV 1
+#define HAVE_ICONV_H 1
+#define HAVE_LIMITS_H 1
+#define HAVE_FCHDIR 1
+#define HAVE_DIRFD 1
+#define HAVE_READLINK 1
+#define HAVE_LSTAT 1
+#define HAVE_LOCALE_H 1
+#define HAVE_SIGNAL_H 1
+#define HAVE_STDARG_H 1
+#define HAVE_STDINT_H 1
+#define HAVE_STDLIB_H 1
+#define HAVE_STRING_H 1
+#define HAVE_SYS_STAT_H 1
+#define HAVE_SYS_TYPES_H 1
+#define HAVE_TIME_H 1
+#define HAVE_UNISTD_H 1
+#define HAVE_WCHAR_H 1
+#define HAVE_WCTYPE_H 1
+#define HAVE_DIRENT_H 1
+#define HAVE_DLFCN_H 1
+#define HAVE_PWD_H 1
+#define HAVE_GRP_H 1
+#define HAVE_POLL_H 1
+#define HAVE_SYS_TIME_H 1
+#define HAVE_SYS_WAIT_H 1
+#define HAVE_FSTAT 1
+#define HAVE_STAT 1
+#define HAVE_MEMSET 1
+#define HAVE_MEMMOVE 1
+#define HAVE_SETLOCALE 1
+#define HAVE_STRCHR 1
+#define HAVE_STRDUP 1
+#define HAVE_STRERROR 1
+#define HAVE_STRFTIME 1
+#define HAVE_STRNLEN 1
+#define HAVE_STRRCHR 1
+#define HAVE_VPRINTF 1
+#define HAVE_MBRTOWC 1
+#define HAVE_WCRTOMB 1
+#define HAVE_WCSCMP 1
+#define HAVE_WCSCPY 1
+#define HAVE_WCSLEN 1
+#define HAVE_WCTOMB 1
+#define HAVE_WMEMCMP 1
+#define HAVE_WMEMCPY 1
+#define HAVE_WMEMMOVE 1
+#define HAVE_INTTYPES_H 1
+#define HAVE_INTMAX_T 1
+#define HAVE_UINTMAX_T 1
+#define HAVE_LONG_LONG_INT 1
+#define HAVE_UNSIGNED_LONG_LONG 1
+#define HAVE_UNSIGNED_LONG_LONG_INT 1
+#define HAVE_WCHAR_T 1
+#define HAVE_SSIZE_T 1
+#define HAVE_DECL_INT32_MAX 1
+#define HAVE_DECL_INT32_MIN 1
+#define HAVE_DECL_INT64_MAX 1
+#define HAVE_DECL_INT64_MIN 1
+#define HAVE_DECL_INTMAX_MAX 1
+#define HAVE_DECL_INTMAX_MIN 1
+#define HAVE_DECL_SIZE_MAX 1
+#define HAVE_DECL_SSIZE_MAX 1
+#define HAVE_DECL_UINT32_MAX 1
+#define HAVE_DECL_UINT64_MAX 1
+#define HAVE_DECL_UINTMAX_MAX 1
+#define SIZEOF_WCHAR_T 4
+#define HAVE_EILSEQ 1
+#define ICONV_CONST
+
+#if defined(__APPLE__)
+#define HAVE_ARC4RANDOM_BUF 1
+#define HAVE_STRUCT_STAT_ST_MTIMESPEC 1
+#define HAVE_STRUCT_STAT_ST_MTIMESPEC_TV_NSEC 1
+/* CommonCrypto, part of libSystem */
+#define ARCHIVE_CRYPTO_MD5_LIBSYSTEM 1
+#define ARCHIVE_CRYPTO_SHA1_LIBSYSTEM 1
+#define ARCHIVE_CRYPTO_SHA256_LIBSYSTEM 1
+#define ARCHIVE_CRYPTO_SHA384_LIBSYSTEM 1
+#define ARCHIVE_CRYPTO_SHA512_LIBSYSTEM 1
+#else
+#define HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC 1
+#endif
+
+/* bundled codecs */
+#define HAVE_LIBZ 1
+#define HAVE_ZLIB_H 1
+#define HAVE_BZLIB_H 1
+#define HAVE_LZMA_H 1
+#define HAVE_LIBLZMA 1
+
+/* archive_platform_stat.h's POSIX branch, dropped by the Windows-only amalgamation */
+#include <sys/types.h>
+#include <sys/stat.h>
+typedef off_t la_seek_t;
+typedef struct stat la_seek_stat_t;
+#define la_seek_fstat(fd, st) fstat((fd), (st))
+#define la_seek_stat(fd, st) stat((fd), (st))
+`;
+
+const libarchiveStubsPosix = `/* generated by cmd/helper/mac-build.ts: libarchive functions whose POSIX sources ext/a-libarchive leaves out.
+   SumatraPDF only reads archives from files and memory: no external filter programs, no disk reading. */
+#include <stdint.h>
+#include <sys/types.h>
+
+struct archive;
+#define ARCHIVE_FAILED (-25)
+#define ARCHIVE_FATAL (-30)
+
+int __archive_create_child(const char* cmd, int* child_stdin, int* child_stdout, pid_t* out_child) {
+    (void)cmd;
+    (void)child_stdin;
+    (void)child_stdout;
+    (void)out_child;
+    return ARCHIVE_FAILED;
+}
+
+void __archive_check_child(int in, int out) {
+    (void)in;
+    (void)out;
+}
+
+int archive_read_disk_set_gname_lookup(struct archive* a, void* data, const char* (*lookup)(void*, int64_t),
+                                       void (*cleanup)(void*)) {
+    (void)a;
+    (void)data;
+    (void)lookup;
+    (void)cleanup;
+    return ARCHIVE_FATAL;
+}
+
+int archive_read_disk_set_uname_lookup(struct archive* a, void* data, const char* (*lookup)(void*, int64_t),
+                                       void (*cleanup)(void*)) {
+    (void)a;
+    (void)data;
+    (void)lookup;
+    (void)cleanup;
+    return ARCHIVE_FATAL;
+}
+`;
+
+// libarchive amalgamation + bzip2 + liblzma decoder, like cmd/deps-build-defs.ts's libarchive for Windows
+function makeLibarchive(t: PosixTarget, genDir: string): LibDef {
+  const dir = join(genDir, "libarchive");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config_posix.h"), libarchiveConfigPosix);
+  writeFileSync(join(dir, "libarchive_posix_stubs.c"), libarchiveStubsPosix);
+  const lzmaDir = join(genDir, "liblzma");
+  mkdirSync(lzmaDir, { recursive: true });
+  const lzmaConfig = t.os === "mac" ? "config_macos.h" : "config_linux.h";
+  cpSync(join("ext", "liblzma", lzmaConfig), join(lzmaDir, "config.h"));
+  return {
+    name: "a-libarchive",
     alwaysOptimize: true,
-    defines: [
-      "LIBARCHIVE_STATIC",
-      'PLATFORM_CONFIG_H="config_macos.h"',
-      "BZ_NO_STDIO",
-      "HAVE_CONFIG_H",
-      "LZMA_API_STATIC",
-    ],
+    defines: ["LIBARCHIVE_STATIC", 'PLATFORM_CONFIG_H="config_posix.h"', "BZ_NO_STDIO", "HAVE_CONFIG_H", "LZMA_API_STATIC"],
     includes: [
-      liblzmaConfigDir, // config.h (macOS liblzma) shadows ext/liblzma/config.h
-      "ext/libarchive/libarchive",
-      "ext/libarchive",
+      dir,
+      lzmaDir, // config.h for liblzma, shadows ext/liblzma/config.h
+      "ext/a-libarchive",
+      "ext/a-libarchive/libarchive",
       "ext/a-zlib",
       "ext/a-bzip2",
       "ext/liblzma/api",
@@ -121,95 +310,9 @@ function makeLibarchive(outDir: string): LibDef {
       "ext/liblzma",
     ],
     files: [
-      {
-        dir: "ext/libarchive/libarchive",
-        patterns: [
-          "archive_acl.c",
-          "archive_check_magic.c",
-          "archive_cmdline.c",
-          "archive_cryptor.c",
-          "archive_digest.c",
-          "archive_entry.c",
-          "archive_entry_copy_bhfi.c",
-          "archive_entry_copy_stat.c",
-          "archive_entry_link_resolver.c",
-          "archive_entry_sparse.c",
-          "archive_entry_stat.c",
-          "archive_entry_strmode.c",
-          "archive_entry_xattr.c",
-          "archive_hmac.c",
-          "archive_match.c",
-          "archive_options.c",
-          "archive_pack_dev.c",
-          "archive_pathmatch.c",
-          "archive_ppmd7.c",
-          "archive_ppmd8.c",
-          "archive_random.c",
-          "archive_rb.c",
-          "archive_string.c",
-          "archive_string_sprintf.c",
-          "archive_time.c",
-          "archive_util.c",
-          "archive_version_details.c",
-          "archive_virtual.c",
-          "archive_blake2s_ref.c",
-          "archive_blake2sp_ref.c",
-          "archive_read.c",
-          "archive_read_add_passphrase.c",
-          "archive_read_append_filter.c",
-          "archive_read_data_into_fd.c",
-          "archive_read_extract.c",
-          "archive_read_extract2.c",
-          "archive_read_open_fd.c",
-          "archive_read_open_file.c",
-          "archive_read_open_filename.c",
-          "archive_read_open_memory.c",
-          "archive_read_set_format.c",
-          "archive_read_set_options.c",
-          "archive_read_support_filter_all.c",
-          "archive_read_support_filter_by_code.c",
-          "archive_read_support_filter_bzip2.c",
-          "archive_read_support_filter_compress.c",
-          "archive_read_support_filter_grzip.c",
-          "archive_read_support_filter_gzip.c",
-          "archive_read_support_filter_lrzip.c",
-          "archive_read_support_filter_lz4.c",
-          "archive_read_support_filter_lzop.c",
-          "archive_read_support_filter_none.c",
-          "archive_read_support_filter_program.c",
-          "archive_read_support_filter_rpm.c",
-          "archive_read_support_filter_uu.c",
-          "archive_read_support_filter_xz.c",
-          "archive_read_support_filter_zstd.c",
-          "archive_read_support_format_7zip.c",
-          "archive_read_support_format_all.c",
-          "archive_read_support_format_ar.c",
-          "archive_read_support_format_by_code.c",
-          "archive_read_support_format_cab.c",
-          "archive_read_support_format_cpio.c",
-          "archive_read_support_format_empty.c",
-          "archive_read_support_format_iso9660.c",
-          "archive_read_support_format_lha.c",
-          "archive_read_support_format_mtree.c",
-          "archive_read_support_format_rar.c",
-          "archive_read_support_format_rar5.c",
-          "archive_read_support_format_raw.c",
-          "archive_read_support_format_tar.c",
-          "archive_read_support_format_warc.c",
-          "archive_read_support_format_xar.c",
-          "archive_read_support_format_zip.c",
-          "archive_read_disk_set_standard_lookup.c",
-          "archive_read_disk_posix.c",
-          "archive_parse_date.c",
-          "filter_fork_posix.c",
-          "xxhash.c",
-        ],
-      },
-      {
-        dir: "ext/a-bzip2",
-        patterns: ["bzip2.c"],
-      },
-      // LzmaDec/Bra* live in base/exe for LzSA (not in libsumatrapdf/libarchive)
+      { dir: "ext/a-libarchive", patterns: ["libarchive.c"] },
+      { dir, patterns: ["libarchive_posix_stubs.c"] },
+      { dir: "ext/a-bzip2", patterns: ["bzip2.c"] },
       {
         dir: "ext/liblzma",
         patterns: [
@@ -248,15 +351,29 @@ function makeLibarchive(outDir: string): LibDef {
   };
 }
 
-function makeDav1d(arch: MacArch, generatedDir: string): LibDef {
-  const defines = [
-    "CONFIG_16BPC=1",
-    "CONFIG_8BPC=1",
-    "CONFIG_LOG=1",
-    "ENDIANNESS_BIG=0",
-    "HAVE_ASM=0",
-    "STACK_ALIGNMENT=16",
-  ];
+// dav1d without asm (HAVE_ASM=0) and without win32/thread.c; config.h is generated per arch
+function makeDav1d(t: PosixTarget, genDir: string): LibDef {
+  const isArm = t.arch === "arm64";
+  const dir = join(genDir, "dav1d");
+  mkdirSync(dir, { recursive: true });
+  const config = [
+    "/* generated by cmd/helper/mac-build.ts */",
+    "#pragma once",
+    `#define ARCH_AARCH64 ${isArm ? 1 : 0}`,
+    "#define ARCH_ARM 0",
+    `#define ARCH_X86 ${isArm ? 0 : 1}`,
+    "#define ARCH_X86_32 0",
+    `#define ARCH_X86_64 ${isArm ? 0 : 1}`,
+    "#define CONFIG_16BPC 1",
+    "#define CONFIG_8BPC 1",
+    "#define CONFIG_LOG 1",
+    "#define ENDIANNESS_BIG 0",
+    "#define HAVE_ASM 0",
+    "#define STACK_ALIGNMENT 16",
+    `#define PREFIX ${isArm && t.os === "mac" ? 1 : 0}`,
+    "",
+  ].join("\n");
+  writeFileSync(join(dir, "config.h"), config);
   const files: LibDef["files"] = [
     {
       dir: "ext/dav1d/src",
@@ -293,35 +410,20 @@ function makeDav1d(arch: MacArch, generatedDir: string): LibDef {
       ],
     },
   ];
-  const includes = ["ext/dav1d", "ext/dav1d/include", generatedDir];
-
-  if (arch === "arm64") {
-    defines.push("ARCH_AARCH64=1", "ARCH_ARM=0", "ARCH_X86=0", "PREFIX=1");
-    // HAVE_ASM=0: generic src/cpu.c is enough; arch-specific cpu.c needs asm headers
-  } else {
-    defines.push("ARCH_AARCH64=0", "ARCH_ARM=0", "ARCH_X86=1", "ARCH_X86_32=0", "ARCH_X86_64=1");
+  if (!isArm) {
     files.push({ dir: "ext/dav1d/src/x86", patterns: ["cpu.c"] });
   }
-
-  return {
-    name: "dav1d",
-    alwaysOptimize: true,
-    defines,
-    includes,
-    files,
-  };
+  return { name: "dav1d", alwaysOptimize: true, defines: [], includes: [dir, "ext/dav1d", "ext/dav1d/include"], files };
 }
 
-function makeChmdec(): LibDef {
-  return {
-    name: "chmdec",
-    alwaysOptimize: true,
-    defines: ["_stricmp=strcasecmp", "_strnicmp=strncasecmp"],
-    includes: [],
-    extraCflags: ["-include", "limits.h"],
-    files: [{ dir: "ext/chmdec", patterns: ["chm.c"] }],
-  };
-}
+const chmdec: LibDef = {
+  name: "chmdec",
+  alwaysOptimize: true,
+  defines: ["_stricmp=strcasecmp", "_strnicmp=strncasecmp"],
+  includes: [],
+  extraCflags: ["-include", "limits.h"],
+  files: [{ dir: "ext/chmdec", patterns: ["chm.c"] }],
+};
 
 const msdes: LibDef = {
   name: "msdes",
@@ -339,768 +441,488 @@ const djvudec: LibDef = {
   files: [{ dir: "ext/djvudec", patterns: ["djvu.c"] }],
 };
 
-function makeMupdf(arch: MacArch): LibDef {
+// mupdf as in premake5.lua, minus the Windows-only pieces: WIC JPEG-XR, the CryptoAPI signature code
+// (pkcs7-windows.c) and the command-line tools that call it
+function makeMupdf(t: PosixTarget): LibDef {
   const lib = structuredClone(mupdfBase);
   lib.defines = lib.defines.filter((d) => !d.startsWith("_CRT"));
-  lib.defines.push(
-    "FZ_ENABLE_PDF=1",
-    "FZ_ENABLE_MD=1",
-    "HAVE_LIBARCHIVE",
-    "LIBARCHIVE_STATIC",
-    "CMARK_GFM_STATIC_DEFINE",
-    "HAVE_PTHREAD",
-  );
-  if (arch === "arm64") {
+  lib.defines.push("FZ_ENABLE_MD=1", "HAVE_LIBARCHIVE", "LIBARCHIVE_STATIC", "HAVE_PTHREAD");
+  if (t.arch === "arm64") {
     lib.defines.push("ARCH_HAS_NEON=1");
-    lib.extraCflags = ["-fms-extensions"];
+    lib.extraCflags = [];
   } else {
-    lib.extraCflags = ["-msse4.1", "-DARCH_HAS_SSE=1", "-fms-extensions"];
+    lib.extraCflags = ["-msse4.1", "-DARCH_HAS_SSE=1"];
   }
-  lib.includes.push(
-    "ext/libarchive/libarchive",
-    "ext/cmark-gfm/src",
-    "ext/cmark-gfm/extensions",
-    "ext/mupdf/scripts/cmark-gfm",
-  );
-
-  // Platform-specific sources (Unix instead of Windows)
-  const fitz = lib.files.find((g) => g.dir === "ext/mupdf/source/fitz");
-  if (fitz) {
-    const pats = fitz.patterns as string[];
-    const jxrIdx = pats.indexOf("load-jxr-win.c");
-    if (jxrIdx >= 0) pats[jxrIdx] = "load-jxr.c";
-    for (const extra of ["cull-device.c", "options.c"]) {
-      if (!pats.includes(extra)) pats.push(extra);
-    }
+  lib.includes.push("ext/a-libarchive/libarchive");
+  for (const g of lib.files) {
+    const pats = g.patterns;
+    if (g.dir === "src/mupdf") g.patterns = pats.filter((p) => p !== "pkcs7-windows.c");
+    if (g.dir === "ext/mupdf/source/fitz") g.patterns = pats.map((p) => (p === "load-jxr-win.c" ? "load-jxr.c" : p));
   }
-  const html = lib.files.find((g) => g.dir === "ext/mupdf/source/html");
-  if (html && !html.patterns.includes("md.c")) {
-    (html.patterns as string[]).push("md.c");
-  }
-  const pdf = lib.files.find((g) => g.dir === "ext/mupdf/source/pdf");
-  if (pdf && !pdf.patterns.includes("pdf-struct.c")) {
-    (pdf.patterns as string[]).push("pdf-struct.c");
-  }
-  const tools = lib.files.find((g) => g.dir === "ext/mupdf/source/tools");
-  if (tools && !tools.patterns.includes("muraster.c")) {
-    (tools.patterns as string[]).push("muraster.c");
-  }
-  const pkcs7 = lib.files.find((g) => g.dir === "ext/mupdf/source/helpers/pkcs7");
-  if (pkcs7) pkcs7.patterns = ["pkcs7-openssl.c"];
-
+  lib.files = lib.files.filter((g) => g.dir !== "ext/mupdf/source/tools");
+  lib.files.push({ dir: "ext/mupdf/source/helpers/pkcs7", patterns: ["pkcs7-openssl.c"] });
   return lib;
 }
 
-async function writeLiblzmaConfig(outDir: string): Promise<void> {
-  const dir = join(outDir, "generated", "liblzma");
-  mkdirSync(dir, { recursive: true });
-  const src = await Bun.file("ext/liblzma/config_macos.h").text();
-  await writeFile(join(dir, "config.h"), src);
-}
-
-async function writeDav1dConfig(generatedDir: string, arch: MacArch): Promise<void> {
-  const isArm = arch === "arm64";
-  const text = `/* Generated by cmd/build.ts -mac for dav1d on macOS */
-#pragma once
-#define ARCH_AARCH64 ${isArm ? 1 : 0}
-#define ARCH_ARM 0
-#define ARCH_X86 ${isArm ? 0 : 1}
-#define ARCH_X86_32 0
-#define ARCH_X86_64 ${isArm ? 0 : 1}
-#define CONFIG_16BPC 1
-#define CONFIG_8BPC 1
-#define CONFIG_LOG 1
-#define ENDIANNESS_BIG 0
-#define HAVE_ASM 0
-#define STACK_ALIGNMENT 16
-#define PREFIX ${isArm ? 1 : 0}
-`;
-  mkdirSync(generatedDir, { recursive: true });
-  await writeFile(join(generatedDir, "config.h"), text);
-}
-
-async function embedFonts(tools: BuildTools, outDir: string): Promise<string[]> {
-  console.log("Embedding font files into mupdf...");
-  const objs: string[] = [];
-  for (const font of FONT_FILES) {
-    if (!existsSync(font.path)) {
-      console.error(`  WARNING: font not found: ${font.path}`);
-      continue;
-    }
-    const base = basename(font.path, `.${font.ext}`).replace(/-/g, "_");
-    const sym = `_binary_${base}_${font.ext}`;
-    const obj = join(outDir, "obj", "fonts", `${base}.o`);
-    await embedBinaryFile(tools, "macho", font.path, obj, sym);
-    objs.push(obj);
-  }
-  return objs;
-}
-
-function makeUnrar(): LibDef {
-  const lib = structuredClone(unrar);
-  lib.defines = lib.defines.filter((d) => d !== "_CRT_SECURE_NO_WARNINGS");
-  const files = lib.files[0];
-  files.patterns = files.patterns.filter((p) => p !== "isnt.cpp" && p !== "motw.cpp");
+// ext/a-harfbuzz only works the way MSVC builds it: gcc / clang otherwise skip the tables that the amalgamation
+// put inside an #ifdef HB_NO_VISIBILITY block (MSVC always defines it)
+function posixHarfbuzz(): LibDef {
+  const lib = structuredClone(harfbuzz);
+  lib.defines.push("HB_NO_VISIBILITY");
   return lib;
 }
 
-const DEP_LIBS_BASE = [
-  {
+// src/base: the portable sources plus the POSIX (*_posix.cpp) versions of the OS-specific ones
+export const BASE_SOURCES = [
+  "src/base/Archive.cpp",
+  "src/base/Arena_posix.cpp",
+  "src/base/Base.cpp",
+  "src/base/Base_posix.cpp",
+  "src/base/ByteReaderWriter.cpp",
+  "src/base/Crypto_posix.cpp",
+  "src/base/CssParser.cpp",
+  "src/base/DbgHelpDyn_posix.cpp",
+  "src/base/Dict.cpp",
+  "src/base/DirScan.cpp",
+  "src/base/DirScan_posix.cpp",
+  "src/base/Exif.cpp",
+  "src/base/File.cpp",
+  "src/base/File_posix.cpp",
+  "src/base/GuessFileType.cpp",
+  "src/base/HtmlTags.cpp",
+  "src/base/JsonParser.cpp",
+  "src/base/Pixmap.cpp",
+  "src/base/SettingsUtil.cpp",
+  "src/base/SquareTreeParser.cpp",
+  "src/base/StrQueue.cpp",
+  "src/base/TgaReader.cpp",
+  "src/base/UITask_posix.cpp",
+  "src/base/WinDynCalls_posix.cpp",
+  "src/base/Zip.cpp",
+  "src/gui/Dpi_posix.cpp",
+];
+
+// every include dir src/ code needs (premake5.lua's test_engines plus zlib)
+export const SRC_INCLUDES = [
+  "src",
+  "ext/mupdf/include",
+  "ext/mupdf/generated",
+  "ext/djvudec",
+  "ext/msdes",
+  "ext/chmdec",
+  "ext/a-libarchive",
+  "ext/a-unrar",
+  "ext/heicdec",
+  "ext/a-libwebp",
+  "ext/jxldec",
+  "ext/a-zlib",
+];
+
+function baseLib(): LibDef {
+  const groups = new Map<string, string[]>();
+  for (const src of BASE_SOURCES) {
+    const i = src.lastIndexOf("/");
+    const dir = src.slice(0, i);
+    groups.set(dir, [...(groups.get(dir) ?? []), src.slice(i + 1)]);
+  }
+  return {
     name: "base",
     alwaysOptimize: false,
-    defines: [],
-    includes: ["src", "ext/libarchive"],
-    files: [
-      {
-        dir: "src/base",
-        patterns: [
-          "AppendStore.cpp",
-          "Base.cpp",
-          "Base_posix.cpp",
-          "Archive.cpp",
-          "Arena.cpp",
-          "Arena_posix.cpp",
-          "ByteReaderWriter.cpp",
-          "CmdLineArgsIter.cpp",
-          "Color.cpp",
-          "Crypto_posix.cpp",
-          "CssParser.cpp",
-          "Dict.cpp",
-          "DbgHelpDyn_posix.cpp",
-          "DirScan.cpp",
-          "DirScan_posix.cpp",
-          "Exif.cpp",
-          "File.cpp",
-          "File_posix.cpp",
-          "Geom.cpp",
-          "GuessFileType.cpp",
-          "GuessFileTypeFromFile.cpp",
-          "HtmlTags.cpp",
-          "Http.cpp",
-          "Http_mac.cpp",
-          "JsonParser.cpp",
-          "Pixmap.cpp",
-          "Pixmap_mac.cpp",
-          "SettingsUtil.cpp",
-          "SquareTreeParser.cpp",
-          "StrQueue.cpp",
-          "Thread.cpp",
-          "UtAssert.cpp",
-          "WinDynCalls_posix.cpp",
-          "Str.cpp",
-          "StrUtf8.cpp",
-          "StrFormatParse.cpp",
-          "StrVec.cpp",
-          "Strconv.cpp",
-          "TgaReader.cpp",
-          "Zip.cpp",
-        ],
-      },
-      {
-        dir: "src/gui",
-        patterns: ["Dpi_posix.cpp", "Layout.cpp"],
-      },
-    ],
-  },
-  zlib,
-  aGumbo,
-  makeUnrar,
-  makeChmdec,
-  msdes,
-  djvudec,
-  "libarchive",
-  libwebp,
-  makeDav1d,
-  heicdec,
-  jxldec,
-  libjpegTurbo,
-  jbig2dec,
-  openjpeg,
-  freetype,
-  lcms2,
-  harfbuzz,
-  mujs,
-  extract,
-  brotli,
-  cmarkGfm,
-  makeMupdf,
-] as const;
+    defines: ["LIBARCHIVE_STATIC"],
+    includes: SRC_INCLUDES,
+    files: [...groups].map(([dir, patterns]) => ({ dir, patterns })),
+  };
+}
 
-const TEST_UTIL_SOURCES = [
-  "src/Commands.cpp",
-  "src/CrashHandlerNoOp.cpp",
-  "src/DisplayMode.cpp",
+// The libraries in link order; names are also the archive names (lib<name>.a). No a-unrar: that amalgamation
+// only builds for Windows, elsewhere libarchive reads RAR (src/base/Archive.cpp).
+export function posixLibs(t: PosixTarget, genDir: string): LibDef[] {
+  const libs: LibDef[] = [
+    baseLib(),
+    makeMupdf(t),
+    structuredClone(libwebp),
+    structuredClone(aGumbo),
+    structuredClone(cmarkGfm),
+    structuredClone(mujs),
+    structuredClone(extract),
+    posixHarfbuzz(),
+    structuredClone(freetype),
+    structuredClone(brotli),
+    structuredClone(lcms2),
+    structuredClone(openjpeg),
+    structuredClone(jbig2dec),
+    structuredClone(libjpegTurbo),
+    structuredClone(heicdec),
+    makeDav1d(t, genDir),
+    structuredClone(jxldec),
+    djvudec,
+    chmdec,
+    msdes,
+    makeLibarchive(t, genDir),
+    structuredClone(zlib),
+  ];
+  for (const lib of libs) {
+    lib.defines = lib.defines.filter((d) => d !== "_CRT_SECURE_NO_WARNINGS");
+    // deps-build-defs.ts's brotli asks for file groups that no longer exist
+    lib.files = lib.files.filter((g) => g);
+    dropX86OnlyCflags(lib, t.arch);
+  }
+  return libs;
+}
+
+export function libArchivePaths(outDir: string, libs: LibDef[]): string[] {
+  return libs.map((l) => join(outDir, "lib", `lib${l.name}.a`));
+}
+
+//--- our sources -------------------------------------------------------------------------------------------------
+
+// the document engines and what they need (premake5.files.lua test_engines_files(), with POSIX variants)
+export const ENGINE_SOURCES = [
+  "src/AvifReader.cpp",
+  "src/CachedObjects.cpp",
+  "src/ChapterTable.cpp",
+  "src/ChmFile.cpp",
   "src/DocProperties.cpp",
-  "src/Flags.cpp",
-  "src/FilterUtil.cpp",
-  "src/GlobalPrefs.cpp",
+  "src/EbookDoc.cpp",
+  "src/EmbeddedResources.cpp",
+  "src/EmbeddedResources_posix.cpp",
+  "src/EngineBase.cpp",
+  "src/EngineDjvuDec.cpp",
+  "src/EngineImages.cpp",
+  "src/EngineMupdf.cpp",
+  "src/GumboHtmlParser.cpp",
+  "src/ImageReader.cpp",
+  "src/ImageReader_posix.cpp",
+  "src/JxlReader.cpp",
+  "src/LitDoc.cpp",
+  "src/MobiDoc.cpp",
+  "src/PalmDbReader.cpp",
+  "src/PdfCad.cpp",
+  "src/PdfDarkModeNoOp.cpp",
+  "src/TextSearch.cpp",
+  "src/TextSelection.cpp",
+  "src/WebpReader.cpp",
+  "src/gui/UIModels.cpp",
+];
+
+// the portable reader model the Cocoa app drives through src/mac/SumatraMacEngine.h
+export const READER_SOURCES = [
+  "src/DisplayMode.cpp",
+  "src/DocumentLayout.cpp",
   "src/PageRenderPolicy.cpp",
-  "src/RefHoverDetect.cpp",
-  "src/RefHoverTextDetect.cpp",
-  "src/gui/CommandPaletteModel.cpp",
-  "src/PdfDarkModeImageRules.cpp",
-  "src/PdfDarkModeOklab.cpp",
-  "src/PdfDarkModeImageClassifier_ut.cpp",
-  "src/PdfDarkModeOklab_ut.cpp",
-  "src/SimpleLog_ut.cpp",
-  "src/SumatraConfig.cpp",
-  "src/SumatraLog_posix.cpp",
-  "src/SumatraUnitTests.cpp",
-  "src/base/tests/AppendStore_ut.cpp",
+  "src/PageRenderService.cpp",
+  "src/ReaderModel.cpp",
+  "src/gui/PasswordDialog.cpp",
+];
+
+// Sorted files in dir matching ext. src/mac/*.cpp and src/gui/mac/*.cpp are plain C++ (Cocoa code lives in .mm
+// files), so new ones are picked up without editing this file.
+export function sourcesIn(dir: string, ext: string): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(ext))
+    .sort()
+    .map((f) => `${dir}/${f}`);
+}
+
+// src/mac/*.cpp: SumatraMacEngine (the plain-C bridge), MacPrefs, MacThumbnails, ...
+export function macEngineSources(): string[] {
+  return sourcesIn("src/mac", ".cpp");
+}
+
+// src/gui/mac/*.cpp: portable C++ that calls into GuiMacBridge.mm, so it links only into the app
+export function guiMacSources(): string[] {
+  return sourcesIn("src/gui/mac", ".cpp");
+}
+
+// Objective-C++ (AppKit): only the macOS app
+export function cocoaSources(): string[] {
+  return [...sourcesIn("src/gui/mac", ".mm"), ...sourcesIn("src/mac", ".mm")];
+}
+
+// Unit tests that run on POSIX (the Windows app runs the full set from src/tests/Sumatra_ut.cpp) and the modules
+// they test. Not here: ClipboardImage_ut / Win_ut (Win32), File_ut (Windows path semantics), PdfSync_ut (SyncTeX),
+// RefHover_ut, the gui/ tests and the ones for Win32 UI modules (AnnotSearch, PagePosition, ReadAloud, ShortcutParse).
+export const TEST_UTIL_SOURCES = [
   "src/base/tests/Base_ut.cpp",
   "src/base/tests/ByteReaderWriter_ut.cpp",
   "src/base/tests/Crypto_ut.cpp",
   "src/base/tests/CssParser_ut.cpp",
   "src/base/tests/Dict_ut.cpp",
-  "src/base/tests/File_ut.cpp",
   "src/base/tests/GuessFileType_ut.cpp",
   "src/base/tests/JsonParser_ut.cpp",
-  "src/base/tests/RefHover_ut.cpp",
   "src/base/tests/SettingsUtil_ut.cpp",
   "src/base/tests/SquareTreeParser_ut.cpp",
   "src/base/tests/StrFormat_ut.cpp",
   "src/base/tests/StrVec_ut.cpp",
   "src/base/tests/Str_ut.cpp",
+  "src/base/tests/UtAssert.cpp",
   "src/base/tests/Vec_ut.cpp",
+  "src/tests/CachedObjects_ut.cpp",
+  "src/tests/ChapterTable_ut.cpp",
+  "src/tests/CommandPalette_ut.cpp",
+  "src/tests/EngineDjvuDec_ut.cpp",
+  "src/tests/LitDoc_ut.cpp",
+  "src/tests/MobiDoc_ut.cpp",
+  "src/tests/PageRenderPolicy_ut.cpp",
+  "src/tests/PdfDarkModeImageClassifier_ut.cpp",
+  "src/tests/PdfDarkModeOklab_ut.cpp",
+  "src/tests/SimpleLog_ut.cpp",
+  "src/tests/TextSelection_ut.cpp",
+  "src/Commands.cpp",
+  "src/CrashHandlerNoOp.cpp",
+  "src/FilterUtil.cpp",
+  "src/PdfDarkModeImageClassifier.cpp",
+  "src/PdfDarkModeImageRules.cpp",
+  "src/PdfDarkModeImageStats.cpp",
+  "src/PdfDarkModeOklab.cpp",
+  "src/SumatraLog_posix.cpp",
   "src/tools/test_util.cpp",
 ];
 
-const TEST_ENGINES_SOURCES = [
-  "src/base/GuessFileType.cpp",
-  "src/DocProperties.cpp",
-  "src/EbookDoc.cpp",
-  "src/EngineBase.cpp",
-  "src/EngineDjvuDec.cpp",
-  "src/EngineImages.cpp",
-  "src/EngineMupdf.cpp",
-  "src/ImageReader.cpp",
-  "src/ImageReader_posix.cpp",
-  "src/GumboHtmlParser.cpp",
-  "src/GumboHelpers.cpp",
-  "src/LitDoc.cpp",
-  "src/MobiDoc.cpp",
-  "src/PalmDbReader.cpp",
-  "src/PdfCadDetect.cpp",
-  "src/PdfCadEnhanceDevice.cpp",
-  "src/PdfDarkModeNoOp.cpp",
-  "src/TextSelection.cpp",
-  "src/TextSearch.cpp",
-  "src/gui/UIModels.cpp",
-  "src/tools/test_engines.cpp",
+// executables every POSIX build links: name -> its own sources (on top of the libraries)
+export function testExeSources(): Record<string, string[]> {
+  return {
+    test_util: [...ENGINE_SOURCES, ...READER_SOURCES, ...TEST_UTIL_SOURCES],
+    test_engines: [...ENGINE_SOURCES, "src/tools/test_engines.cpp"],
+    test_mac_engine: [...ENGINE_SOURCES, ...READER_SOURCES, ...macEngineSources(), "src/tools/test_mac_engine.cpp"],
+    // defines its own document type, so not SumatraMacEngine.cpp
+    test_mac_thumbnails: [...ENGINE_SOURCES, "src/mac/MacThumbnails.cpp", "src/tools/test_mac_thumbnails.cpp"],
+  };
+}
+
+//--- compile / link ----------------------------------------------------------------------------------------------
+
+export interface CompileArgs {
+  t: PosixTarget;
+  cfg: PosixConfig;
+  tools: BuildTools;
+  outDir: string;
+  jobs: number;
+}
+
+// Compiles srcs (C++; clang takes .mm as Objective-C++, manual retain/release) into outDir/obj/<group>/.
+// Returns the object paths.
+export async function compileSources(a: CompileArgs, group: string, srcs: string[]): Promise<string[]> {
+  const opt = a.cfg.isRelease ? ["-O2", "-DNDEBUG"] : ["-O0", "-DDEBUG"];
+  const common = commonCompileFlags(a.t, a.cfg);
+  const includes = SRC_INCLUDES.map((d) => `-I${d}`);
+  const units = srcs.map((src) => {
+    const obj = objPath(a.outDir, group, src);
+    const args = [a.tools.cxx, ...opt, ...common, ...includes, "-DLIBARCHIVE_STATIC", "-w", "-std=c++23"];
+    args.push("-fno-rtti", "-fno-exceptions", "-c", src, "-o", obj);
+    return { src, obj, args };
+  });
+  await compileAll(units, a.jobs);
+  return units.map((u) => u.obj);
+}
+
+export function linkFlags(t: PosixTarget, cfg: PosixConfig): string[] {
+  const flags = [...t.flags, ...(cfg.asan ? ["-fsanitize=address"] : [])];
+  if (t.os === "mac") return [...flags, "-liconv"];
+  return [...flags, "-lpthread", "-lm"];
+}
+
+// Links objs and the static libraries into exePath. GNU ld / lld need the group for the libraries' mutual
+// references; ld64 resolves them in any order.
+export async function linkExe(a: CompileArgs, exePath: string, objs: string[], libs: string[], extra: string[] = []) {
+  const libArgs = a.t.os === "mac" ? libs : ["-Wl,--start-group", ...libs, "-Wl,--end-group"];
+  const args = [a.tools.cxx, "-o", exePath, ...objs, ...libArgs, ...linkFlags(a.t, a.cfg), ...extra];
+  const res = await spawnCmd(args);
+  if (!res.ok) {
+    throw new Error(`link ${exePath} failed:\n${res.stderr.slice(0, 4000)}`);
+  }
+  console.log(`  -> ${exePath}`);
+}
+
+// Builds the libraries; returns their archive paths in link order.
+export async function buildPosixLibs(a: CompileArgs): Promise<string[]> {
+  const libs = posixLibs(a.t, join(a.outDir, "generated"));
+  const commonFlags = commonCompileFlags(a.t, a.cfg);
+  const cxxFlags = ["-D__GXX_TYPEINFO_EQUALITY_INLINE=1"];
+  for (const lib of libs) {
+    await buildLibrary(lib, a.outDir, a.cfg.isRelease, { tools: a.tools, commonDefines: [], commonFlags, cxxFlags, jobs: a.jobs });
+  }
+  return libArchivePaths(a.outDir, libs);
+}
+
+// Compiles and links the test executables; returns their paths by name.
+export async function buildTestExes(a: CompileArgs, libs: string[]): Promise<Record<string, string>> {
+  const res: Record<string, string> = {};
+  for (const [name, srcs] of Object.entries(testExeSources())) {
+    console.log(`Building ${name}...`);
+    const objs = await compileSources(a, "app", srcs);
+    const exe = join(a.outDir, name);
+    await linkExe(a, exe, objs, libs);
+    res[name] = exe;
+  }
+  return res;
+}
+
+// mupdf's built-in fonts, the same set cmd/pack-embedded-prebuild.cmd packs into the Windows exe; POSIX builds read
+// them from <dir>/fonts (see src/EmbeddedResources_posix.cpp)
+const mupdfFonts: [string, string[]][] = [
+  ["urw", ["Dingbats.cff", "NimbusMonoPS-*.cff", "NimbusRoman-*.cff", "NimbusSans-*.cff", "StandardSymbolsPS.cff"]],
+  ["droid", ["DroidSansFallbackFull.ttf"]],
+  ["sil", ["CharisSIL*.cff"]],
+  [
+    "noto",
+    [
+      "NotoSans-Regular.otf",
+      "NotoSerif-Regular.otf",
+      "NotoSansMath-Regular.otf",
+      "NotoMusic-Regular.otf",
+      "NotoSansSymbols-Regular.otf",
+      "NotoSansSymbols2-Regular.otf",
+      "NotoEmoji-Regular.ttf",
+    ],
+  ],
 ];
 
-const MAC_APP_SOURCES = [
-  "src/Commands.cpp",
-  "src/FilterUtil.cpp",
-  "src/GlobalPrefs.cpp",
-  "src/base/GuessFileType.cpp",
-  "src/DisplayMode.cpp",
-  "src/DocumentLayout.cpp",
-  "src/DocProperties.cpp",
-  "src/EbookDoc.cpp",
-  "src/EngineBase.cpp",
-  "src/EngineDjvuDec.cpp",
-  "src/EngineImages.cpp",
-  "src/EngineMupdf.cpp",
-  "src/ImageReader.cpp",
-  "src/ImageReader_posix.cpp",
-  "src/GumboHtmlParser.cpp",
-  "src/GumboHelpers.cpp",
-  "src/LitDoc.cpp",
-  "src/MobiDoc.cpp",
-  "src/PalmDbReader.cpp",
-  "src/PdfCadDetect.cpp",
-  "src/PdfCadEnhanceDevice.cpp",
-  "src/PdfDarkModeNoOp.cpp",
-  "src/PageRenderPolicy.cpp",
-  "src/PageRenderService.cpp",
-  "src/ReaderModel.cpp",
-  "src/SumatraConfig.cpp",
-  "src/TextSelection.cpp",
-  "src/TextSearch.cpp",
-  "src/gui/UIModels.cpp",
-  "src/KeyboardHelp.cpp",
-  "src/gui/GuiColors.cpp",
-  "src/gui/CommandPaletteModel.cpp",
-  "src/gui/PasswordDialog.cpp",
-  "src/gui/PlatformFont.cpp",
-  "src/gui/mac/GfxMac.cpp",
-  "src/gui/mac/KeyboardHelpMac.cpp",
-  "src/gui/mac/PlatformFontMac.cpp",
-  "src/gui/mac/PasswordDialogMac.cpp",
-  "src/gui/mac/PlatformWindowMac.cpp",
-  "src/gui/mac/GuiMacBridge.mm",
-  "src/mac/SumatraMacEngine.cpp",
-  "src/mac/MacPrefs.cpp",
-  "src/mac/SumatraMac.mm",
-];
+export function stageMupdfFonts(dir: string): void {
+  const dst = join(dir, "fonts");
+  rmSync(dst, { recursive: true, force: true });
+  mkdirSync(dst, { recursive: true });
+  let n = 0;
+  for (const [forge, patterns] of mupdfFonts) {
+    const src = join("ext", "mupdf", "resources", "fonts", forge);
+    for (const pat of patterns) {
+      const names = [...new Glob(pat).scanSync(src)].sort();
+      if (names.length === 0) throw new Error(`no font matches ${src}/${pat}`);
+      for (const name of names) {
+        cpSync(join(src, name), join(dst, name));
+        n++;
+      }
+    }
+  }
+  console.log(`  -> ${dst} (${n} fonts)`);
+}
 
-const PORTABLE_COMPILE_SOURCES = [
-  // unblocked by LRESULT / HBITMAP / HBRUSH in base/Base.h
-  "src/AppUnitTests.cpp",
-  "src/FileHistory.cpp",
-  "src/PdfDarkModeAnalysis.cpp",
-  "src/RefHoverInternal.cpp",
-  // Verified to compile on Linux (clang, WSL Ubuntu): no Win32 call, constant
-  // or header, directly or through the headers they include.
-  "src/GlobalPrefs.cpp",
-  "src/MuPDF_Exports.cpp",
-  // the dark-mode engine: color and image math over mupdf, no UI
-  "src/PdfDarkModeCache.cpp",
-  "src/PdfDarkModeDevice.cpp",
-  "src/PdfDarkModeEngineCache.cpp",
-  "src/PdfDarkModeImageBgBlend.cpp",
-  "src/PdfDarkModeImageClassifier.cpp",
-  "src/PdfDarkModeImageStats.cpp",
-  "src/PdfDarkModeScanProcess.cpp",
-  "src/DisplayMode.cpp",
-  "src/DocumentLayout.cpp",
-  "src/GumboHtmlParser.cpp",
-  "src/HtmlFormatter.cpp",
-  "src/EbookFormatter.cpp",
-  "src/EngineEbook.cpp",
-  "src/gui/GuiColors.cpp",
-  "src/SvgIcons.cpp",
-  "src/TextSelection.cpp",
-  "src/TextSearch.cpp",
-];
+export async function runTestUtil(exePath: string): Promise<void> {
+  const env = { ...process.env, ASAN_OPTIONS: "abort_on_error=1:halt_on_error=1:detect_leaks=0" };
+  const proc = Bun.spawn([exePath, "-for-ai"], { env, stdout: "inherit", stderr: "inherit" });
+  const code = await proc.exited;
+  if (code !== 0) throw new Error(`${exePath} failed with exit code ${code}`);
+}
+
+//--- the macOS app -----------------------------------------------------------------------------------------------
+
+async function generateDsym(exePath: string, outputPath = `${exePath}.dSYM`): Promise<void> {
+  const dsymutil = resolveTool("debug symbol generator", ["dsymutil"]);
+  rmSync(outputPath, { recursive: true, force: true });
+  const result = await spawnCmd([dsymutil, exePath, "-o", outputPath]);
+  if (!result.ok) throw new Error(`dsymutil failed for ${exePath}: ${result.stderr}`);
+  console.log(`  -> ${outputPath}`);
+}
+
+// arm64 code must be signed to run; ad-hoc unless SUMATRA_MAC_SIGN_IDENTITY names a Developer ID
+async function signApp(appDir: string): Promise<void> {
+  const identity = process.env.SUMATRA_MAC_SIGN_IDENTITY;
+  const args = identity
+    ? ["codesign", "--force", "--deep", "--options", "runtime", "--timestamp", "-s", identity, appDir]
+    : ["codesign", "--force", "--deep", "-s", "-", appDir];
+  const res = await spawnCmd(args);
+  if (!res.ok) throw new Error(`codesign failed: ${res.stderr}`);
+  console.log(`  signed ${appDir} (${identity ? identity : "ad-hoc"})`);
+}
+
+// SumatraPDF.app/Contents: the executable is in place; add Info.plist, icon, licenses (mac-bundle.ts) and mupdf's
+// fonts, then sign. Everything that goes into the bundle belongs here, before signing.
+async function assembleAppBundle(appDir: string, linkInputs: string[]): Promise<void> {
+  addBundleResources(appDir, linkInputs);
+  stageMupdfFonts(join(appDir, "Contents", "Resources"));
+  await signApp(appDir);
+}
+
+async function buildMacApp(a: CompileArgs, libs: string[]): Promise<string> {
+  console.log("Building SumatraPDF.app...");
+  const srcs = [...ENGINE_SOURCES, ...READER_SOURCES, ...macEngineSources(), ...guiMacSources(), ...cocoaSources()];
+  const objs = await compileSources(a, "app", srcs);
+  const appDir = join(a.outDir, "SumatraPDF.app");
+  rmSync(appDir, { recursive: true, force: true });
+  const macosDir = join(appDir, "Contents", "MacOS");
+  mkdirSync(macosDir, { recursive: true });
+  const exe = join(macosDir, "SumatraPDF");
+  await linkExe(a, exe, objs, libs, ["-framework", "Cocoa"]);
+  return appDir;
+}
 
 export interface MacBuildOptions {
-  outDir: string;
-  isRelease?: boolean;
-  asan?: boolean;
-  clean?: boolean;
-  tools?: Partial<BuildTools>;
+  isRelease: boolean;
+  asan: boolean;
+  clean: boolean;
+  arch: MacArch | "universal";
   jobs?: number;
+  dmg?: boolean; // also package a .dmg; default: plain release builds only
+}
+
+export function macOutDir(cfg: PosixConfig, arch: MacArch | "universal"): string {
+  return join("out", `mac-${configDirName(cfg)}-${arch}`);
+}
+
+// one architecture: libraries, test tools (test_util runs when arch is the host's), SumatraPDF.app
+async function buildMacArch(opts: MacBuildOptions, arch: MacArch, tools: BuildTools): Promise<string> {
+  const cfg = { isRelease: opts.isRelease, asan: opts.asan };
+  const outDir = macOutDir(cfg, arch);
+  if (opts.clean) rmSync(outDir, { recursive: true, force: true });
+  const t = macTarget(arch);
+  const a: CompileArgs = { t, cfg, tools, outDir, jobs: opts.jobs ?? defaultJobs() };
+  invalidateObjsIfBuildChanged(outDir, tools, configDirName(cfg), commonCompileFlags(t, cfg));
+  console.log(`\n=== macOS ${arch} ${configDirName(cfg)} -> ${outDir} ===\n`);
+
+  const libs = await buildPosixLibs(a);
+  const exes = await buildTestExes(a, libs);
+  stageMupdfFonts(outDir);
+  if (arch === hostArch()) {
+    await runTestUtil(exes.test_util);
+  } else {
+    console.log(`  (not running ${arch} test_util on a ${hostArch()} Mac)`);
+  }
+  const appDir = await buildMacApp(a, libs);
+  await generateDsym(join(appDir, "Contents", "MacOS", "SumatraPDF"), `${appDir}.dSYM`);
+  await assembleAppBundle(appDir, libs);
+  return appDir;
+}
+
+// arm64 + x64 apps merged with lipo
+async function makeUniversalApp(cfg: PosixConfig, armApp: string, x64App: string, libs: string[]): Promise<string> {
+  const outDir = macOutDir(cfg, "universal");
+  const appDir = join(outDir, "SumatraPDF.app");
+  rmSync(appDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  cpSync(armApp, appDir, { recursive: true });
+  const rel = join("Contents", "MacOS", "SumatraPDF");
+  const res = await spawnCmd(["lipo", "-create", join(armApp, rel), join(x64App, rel), "-output", join(appDir, rel)]);
+  if (!res.ok) throw new Error(`lipo failed: ${res.stderr}`);
+  await generateDsym(join(appDir, rel), `${appDir}.dSYM`);
+  await assembleAppBundle(appDir, libs);
+  return appDir;
 }
 
 export async function buildMac(opts: MacBuildOptions): Promise<void> {
   requireDarwin();
-  const arch = detectMacArch();
-  const tools: BuildTools = { ...resolveMacTools(), ...opts.tools };
-  const jobs = opts.jobs ?? DEFAULT_JOBS;
-  const isRelease = opts.isRelease ?? false;
-  const isAsan = opts.asan ?? false;
-  const outDir = opts.outDir;
-  const generatedDir = join(outDir, "generated", "dav1d");
-
-  if (opts.clean && existsSync(outDir)) {
-    console.log(`Cleaning ${outDir}...`);
-    rmSync(outDir, { recursive: true, force: true });
-  }
-
+  setReproducibleEnv();
+  const tools = resolveMacTools();
+  const cfg = { isRelease: opts.isRelease, asan: opts.asan };
   const startTime = performance.now();
-  const config = isAsan ? (isRelease ? "release-asan" : "asan") : isRelease ? "release" : "debug";
-  const commonDefines: string[] = isAsan ? ["ASAN_BUILD"] : [];
-  const commonFlags = ["-g", ...(isAsan ? ["-fsanitize=address", "-fno-omit-frame-pointer"] : [])];
-  invalidateObjsIfBuildChanged(outDir, tools, config, commonFlags);
-  console.log(`\n=== Building SumatraPDF dependencies (${config}, macOS ${arch}) ===\n`);
-  console.log(`Output: ${outDir}`);
-  console.log(`Tools: ${tools.cc}, ${tools.cxx}`);
-  console.log(`Parallel jobs: ${jobs}\n`);
 
-  mkdirSync(join(outDir, "obj"), { recursive: true });
-  mkdirSync(join(outDir, "lib"), { recursive: true });
-  await writeDav1dConfig(generatedDir, arch);
-  await writeLiblzmaConfig(outDir);
-
-  const cxxFlags: string[] = ["-D__GXX_TYPEINFO_EQUALITY_INLINE=1"];
-
-  const fontObjs = await embedFonts(tools, outDir);
-
-  for (const entry of DEP_LIBS_BASE) {
-    let lib: LibDef;
-    if (entry === "libarchive") {
-      lib = makeLibarchive(outDir);
-    } else if (typeof entry === "function") {
-      if (entry === makeDav1d) {
-        lib = makeDav1d(arch, generatedDir);
-      } else if (entry === makeMupdf) {
-        lib = makeMupdf(arch);
-      } else {
-        lib = entry();
-      }
-    } else {
-      lib = structuredClone(entry);
-      if (lib.defines) {
-        lib.defines = lib.defines.filter((d) => d !== "_CRT_SECURE_NO_WARNINGS");
-      }
-    }
-
-    dropX86OnlyCflags(lib, arch);
-
-    const extraObjs = lib.name === "mupdf" ? fontObjs : undefined;
-    await buildLibrary(lib, outDir, isRelease, {
-      tools,
-      commonDefines,
-      commonFlags,
-      cxxFlags,
-      jobs,
-      extraObjs,
-    });
+  let appDir: string;
+  if (opts.arch === "universal") {
+    const armApp = await buildMacArch(opts, "arm64", tools);
+    const x64App = await buildMacArch(opts, "x64", tools);
+    const libs = posixLibs(macTarget("arm64"), join(macOutDir(cfg, "arm64"), "generated"));
+    appDir = await makeUniversalApp(cfg, armApp, x64App, libArchivePaths(macOutDir(cfg, "arm64"), libs));
+  } else {
+    appDir = await buildMacArch(opts, opts.arch, tools);
   }
 
-  await buildTestUtil(outDir, isRelease, tools, jobs, commonDefines, commonFlags, cxxFlags);
-  await compilePortableSources(outDir, isRelease, tools, jobs, commonDefines, commonFlags, cxxFlags);
-  await buildTestEngines(outDir, isRelease, tools, jobs, commonDefines, commonFlags, cxxFlags);
-  await buildMacApp(outDir, isRelease, tools, jobs, commonDefines, commonFlags, cxxFlags);
-  await buildMacPortableArchive(outDir, arch, config);
+  const cfgName = configDirName(cfg);
+  const suffix = cfgName === "rel" ? "" : `-${cfgName}`;
+  const packageName = `SumatraPDF-${extractSumatraVersion()}-mac-${opts.arch}${suffix}`;
+  console.log("Building macOS packages...");
+  const outDir = macOutDir(cfg, opts.arch);
+  await packageMacApp({ outDir, appDir, packageName, dmg: opts.dmg ?? cfgName === "rel" });
 
   const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-  console.log(`\n=== Dependency build complete (${config}) in ${elapsed}s ===`);
-  console.log(`Static libraries: ${join(outDir, "lib")}\n`);
-}
-
-async function compilePortableSources(
-  outDir: string,
-  isRelease: boolean,
-  tools: BuildTools,
-  jobs: number,
-  commonDefines: string[],
-  commonFlags: string[],
-  cxxFlags: string[],
-): Promise<void> {
-  console.log("Compiling portable source checks...");
-  const optFlags = isRelease ? ["-Os"] : ["-O0", "-g"];
-  const configDefines = isRelease ? ["NDEBUG"] : ["DEBUG"];
-  const defineFlags = [...commonDefines, ...configDefines].map((d) => `-D${d}`);
-  const includeFlags = ["-Isrc", "-Iext/mupdf/include", "-Iext/mupdf/generated"];
-
-  const units = PORTABLE_COMPILE_SOURCES.map((src) => {
-    const obj = objPath(outDir, "portable", src);
-    return {
-      src,
-      obj,
-      args: [
-        tools.cxx,
-        ...optFlags,
-        ...defineFlags,
-        ...includeFlags,
-        ...commonFlags,
-        "-w",
-        "-std=c++23",
-        ...cxxFlags,
-        "-fno-rtti",
-        "-fno-exceptions",
-        "-c",
-        src,
-        "-o",
-        obj,
-      ],
-    };
-  });
-
-  await compileAll(units, jobs);
-}
-
-async function buildTestUtil(
-  outDir: string,
-  isRelease: boolean,
-  tools: BuildTools,
-  jobs: number,
-  commonDefines: string[],
-  commonFlags: string[],
-  cxxFlags: string[],
-): Promise<void> {
-  console.log("Building test_util...");
-  const optFlags = isRelease ? ["-Os"] : ["-O0", "-g"];
-  const configDefines = isRelease ? ["NDEBUG"] : ["DEBUG"];
-  const defineFlags = [...commonDefines, ...configDefines, "SUMATRA_TEST_UTIL=1"].map((d) => `-D${d}`);
-  const includeFlags = ["-Isrc"];
-
-  const units = TEST_UTIL_SOURCES.map((src) => {
-    const obj = objPath(outDir, "test_util", src);
-    return {
-      src,
-      obj,
-      args: [
-        tools.cxx,
-        ...optFlags,
-        ...defineFlags,
-        ...includeFlags,
-        ...commonFlags,
-        "-w",
-        "-std=c++23",
-        ...cxxFlags,
-        "-fno-rtti",
-        "-fno-exceptions",
-        "-c",
-        src,
-        "-o",
-        obj,
-      ],
-    };
-  });
-
-  await compileAll(units, jobs);
-
-  const exePath = join(outDir, "test_util");
-  const linkArgs = [
-    tools.cxx,
-    "-o",
-    exePath,
-    ...commonFlags,
-    ...units.map((u) => u.obj),
-    join(outDir, "lib", "libbase.a"),
-  ];
-  const res = await spawnCmd(linkArgs);
-  if (!res.ok) {
-    throw new Error(`link test_util failed: ${res.stderr}`);
-  }
-  console.log(`  -> ${exePath}`);
-  await generateDsym(exePath);
-
-  const env = commonFlags.includes("-fsanitize=address")
-    ? {
-        ...process.env,
-        ASAN_OPTIONS: "abort_on_error=1:halt_on_error=1:detect_leaks=0",
-      }
-    : process.env;
-  const run = Bun.spawn([exePath, "-for-ai"], {
-    env,
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const code = await run.exited;
-  if (code !== 0) {
-    throw new Error(`test_util failed with exit code ${code}`);
-  }
-}
-
-// Archive names must match LibDef.name (libmupdf.a, liba-zlib.a, …).
-// libwebp is required because mupdf's load-webp.c calls WebPDecode* / WebPGetFeatures.
-function portableEngineLinkArgs(outDir: string): string[] {
-  return [
-    join(outDir, "lib", "libbase.a"),
-    join(outDir, "lib", "libmupdf.a"),
-    join(outDir, "lib", "liblibwebp.a"),
-    join(outDir, "lib", "liba-gumbo.a"),
-    join(outDir, "lib", "libcmark-gfm.a"),
-    join(outDir, "lib", "liba-mujs.a"),
-    join(outDir, "lib", "liba-extract.a"),
-    join(outDir, "lib", "libharfbuzz.a"),
-    join(outDir, "lib", "libfreetype.a"),
-    join(outDir, "lib", "libbrotli.a"),
-    join(outDir, "lib", "liblcms2.a"),
-    join(outDir, "lib", "liba-openjpeg.a"),
-    join(outDir, "lib", "liba-jbig2dec.a"),
-    join(outDir, "lib", "liblibjpeg-turbo.a"),
-    join(outDir, "lib", "libdjvudec.a"),
-    join(outDir, "lib", "libchmdec.a"),
-    join(outDir, "lib", "libmsdes.a"),
-    join(outDir, "lib", "liblibarchive.a"),
-    join(outDir, "lib", "liba-zlib.a"),
-    "-liconv",
-  ];
-}
-
-async function buildMacApp(
-  outDir: string,
-  isRelease: boolean,
-  tools: BuildTools,
-  jobs: number,
-  commonDefines: string[],
-  commonFlags: string[],
-  cxxFlags: string[],
-): Promise<void> {
-  console.log("Building SumatraPDF.app...");
-  const optFlags = isRelease ? ["-Os"] : ["-O0", "-g"];
-  const configDefines = isRelease ? ["NDEBUG"] : ["DEBUG"];
-  const defineFlags = [...commonDefines, ...configDefines].map((d) => `-D${d}`);
-  const includeFlags = ["-Isrc", "-Iext/djvudec", "-Iext/msdes", "-Iext/mupdf/include", "-Iext/mupdf/generated"];
-
-  const units = MAC_APP_SOURCES.map((src) => {
-    const obj = objPath(outDir, "sumatrapdf_app", src);
-    const sourceDefines = src === "src/Commands.cpp" ? ["-DSUMATRA_TEST_UTIL=1"] : [];
-    return {
-      src,
-      obj,
-      args: [
-        tools.cxx,
-        ...optFlags,
-        ...defineFlags,
-        ...sourceDefines,
-        ...includeFlags,
-        ...commonFlags,
-        "-w",
-        "-std=c++23",
-        ...cxxFlags,
-        "-fno-rtti",
-        "-fno-exceptions",
-        "-c",
-        src,
-        "-o",
-        obj,
-      ],
-    };
-  });
-
-  await compileAll(units, jobs);
-
-  const appDir = join(outDir, "SumatraPDF.app");
-  const contentsDir = join(appDir, "Contents");
-  const macosDir = join(contentsDir, "MacOS");
-  mkdirSync(macosDir, { recursive: true });
-
-  const exePath = join(macosDir, "SumatraPDF");
-  const linkArgs = [
-    tools.cxx,
-    "-o",
-    exePath,
-    ...commonFlags,
-    ...units.map((u) => u.obj),
-    ...portableEngineLinkArgs(outDir),
-    "-framework",
-    "Cocoa",
-  ];
-  const res = await spawnCmd(linkArgs);
-  if (!res.ok) {
-    throw new Error(`link SumatraPDF.app failed: ${res.stderr}`);
-  }
-  await generateDsym(exePath, `${appDir}.dSYM`);
-
-  await writeFile(
-    join(contentsDir, "Info.plist"),
-    `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleExecutable</key>
-  <string>SumatraPDF</string>
-  <key>CFBundleIdentifier</key>
-  <string>com.sumatrapdf.SumatraPDF</string>
-  <key>CFBundleName</key>
-  <string>SumatraPDF</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>${extractSumatraVersion()}</string>
-  <key>CFBundleDocumentTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleTypeName</key>
-      <string>Documents</string>
-      <key>CFBundleTypeRole</key>
-      <string>Viewer</string>
-      <key>CFBundleTypeExtensions</key>
-      <array>
-        <string>pdf</string>
-        <string>xps</string>
-        <string>oxps</string>
-        <string>epub</string>
-        <string>mobi</string>
-        <string>fb2</string>
-        <string>lit</string>
-        <string>cbz</string>
-        <string>cbr</string>
-        <string>cb7</string>
-        <string>cbt</string>
-        <string>djvu</string>
-        <string>djv</string>
-        <string>chm</string>
-        <string>png</string>
-        <string>jpg</string>
-        <string>jpeg</string>
-        <string>gif</string>
-        <string>tif</string>
-        <string>tiff</string>
-        <string>tga</string>
-        <string>bmp</string>
-        <string>webp</string>
-        <string>jxl</string>
-        <string>heic</string>
-        <string>avif</string>
-      </array>
-    </dict>
-  </array>
-  <key>NSHighResolutionCapable</key>
-  <true/>
-</dict>
-</plist>
-`,
-  );
-  console.log(`  -> ${appDir}`);
-}
-
-async function buildMacPortableArchive(outDir: string, arch: MacArch, config: string): Promise<void> {
-  const version = extractSumatraVersion();
-  const configSuffix = config === "release" ? "" : `-${config}`;
-  const packageName = `SumatraPDF-${version}-mac-${arch}${configSuffix}`;
-  const tempRoot = mkdtempSync(join(tmpdir(), "sumatrapdf-mac-package-"));
-  const packageDir = join(tempRoot, packageName);
-  const archivePath = join(outDir, `${packageName}.tar.gz`);
-  rmSync(archivePath, { force: true });
-
-  console.log("Building portable macOS archive...");
-  try {
-    mkdirSync(packageDir, { recursive: true });
-    cpSync(join(outDir, "SumatraPDF.app"), join(packageDir, "SumatraPDF.app"), { recursive: true });
-    copyFileSync("COPYING", join(packageDir, "COPYING"));
-    copyFileSync("packaging/mac/README.md", join(packageDir, "README.md"));
-    const result = await spawnCmd(["tar", "-czf", archivePath, "-C", tempRoot, packageName]);
-    if (!result.ok) {
-      throw new Error(`create portable macOS archive failed: ${result.stderr}`);
-    }
-  } finally {
-    rmSync(tempRoot, { recursive: true, force: true });
-  }
-  console.log(`  -> ${archivePath}`);
-}
-
-async function buildTestEngines(
-  outDir: string,
-  isRelease: boolean,
-  tools: BuildTools,
-  jobs: number,
-  commonDefines: string[],
-  commonFlags: string[],
-  cxxFlags: string[],
-): Promise<void> {
-  console.log("Building test_engines...");
-  const optFlags = isRelease ? ["-Os"] : ["-O0", "-g"];
-  const configDefines = isRelease ? ["NDEBUG"] : ["DEBUG"];
-  const defineFlags = [...commonDefines, ...configDefines].map((d) => `-D${d}`);
-  const includeFlags = ["-Isrc", "-Iext/djvudec", "-Iext/msdes", "-Iext/mupdf/include", "-Iext/mupdf/generated"];
-
-  const units = TEST_ENGINES_SOURCES.map((src) => {
-    const obj = objPath(outDir, "test_engines", src);
-    return {
-      src,
-      obj,
-      args: [
-        tools.cxx,
-        ...optFlags,
-        ...defineFlags,
-        ...includeFlags,
-        ...commonFlags,
-        "-w",
-        "-std=c++23",
-        ...cxxFlags,
-        "-fno-rtti",
-        "-fno-exceptions",
-        "-c",
-        src,
-        "-o",
-        obj,
-      ],
-    };
-  });
-
-  await compileAll(units, jobs);
-
-  const exePath = join(outDir, "test_engines");
-  const linkArgs = [
-    tools.cxx,
-    "-o",
-    exePath,
-    ...commonFlags,
-    ...units.map((u) => u.obj),
-    ...portableEngineLinkArgs(outDir),
-  ];
-  const res = await spawnCmd(linkArgs);
-  if (!res.ok) {
-    throw new Error(`link test_engines failed: ${res.stderr}`);
-  }
-  console.log(`  -> ${exePath}`);
-  await generateDsym(exePath);
+  console.log(`\n=== macOS build (${cfgName}, ${opts.arch}) done in ${elapsed}s: ${appDir} ===`);
 }

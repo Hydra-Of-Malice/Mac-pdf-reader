@@ -6,8 +6,22 @@ import { clearDirPreserveSettings } from "./clean";
 import { ensureNinja, ninjaDir, ninjaToRoot } from "./ninja";
 import { detectVisualStudio2026, runLogged } from "./util";
 
-type BuildMode = "windows" | "all" | "smoke" | "ci" | "daily" | "codeql" | "mingw" | "wine" | "build-no";
+type BuildMode =
+  | "windows"
+  | "all"
+  | "smoke"
+  | "ci"
+  | "daily"
+  | "codeql"
+  | "mingw"
+  | "wine"
+  | "mac"
+  | "mac-core"
+  | "mac-remote"
+  | "build-no";
 type Config = "debug" | "release" | "profile";
+type MacArchOpt = "arm64" | "x64" | "universal";
+type CoreCompiler = "gcc" | "clang" | "zig";
 
 interface BuildOptions {
   mode?: BuildMode;
@@ -20,6 +34,11 @@ interface BuildOptions {
   run: boolean;
   runArgs: string[];
   buildNo?: string;
+  arch?: MacArchOpt;
+  cc?: CoreCompiler;
+  cross: boolean;
+  dmg: boolean;
+  branch?: string;
 }
 
 const usage = `Usage: bun cmd/build.ts <mode> [options]
@@ -41,6 +60,22 @@ MinGW cross-builds (they still produce a Windows exe):
   -wine [-clean] [-run] [-- <SumatraPDF args>]
                            MinGW build on Linux and optionally run under Wine;
                            from Windows it runs through WSL Ubuntu
+
+macOS (native Cocoa app, see docs/mac/BUILDING.md):
+  -mac [-dbg|-rel] [-asan] [-arch arm64|x64|universal] [-dmg] [-clean]
+                           Build SumatraPDF.app on macOS (Xcode); defaults to -dbg
+                           and the host arch. Output: out/mac-<cfg>-<arch>/ and
+                           .tar.gz / .zip packages (-rel also a .dmg, -dmg forces one)
+  -mac-core [-dbg|-rel] [-asan] [-cc gcc|clang|zig] [-clean]
+                           Build the app's portable core (engines, reader model,
+                           src/mac/*.cpp) and its tests on Linux or macOS, run
+                           test_util: out/mac-core-<cfg>-<cc>/
+  -mac-core -cross [-dbg|-rel] [-arch arm64|x64|universal] [-clean]
+                           Compile the same sources for macOS with zig (objects
+                           only, no Mac needed); default: both archs
+  -mac-remote -branch <name> [-dbg|-rel] [-asan] [-arch ...] [-dmg] [-clean]
+                           Run -mac for a pushed branch on a Mac over ssh
+                           ($SUMATRA_MAC_HOST, checkout $SUMATRA_MAC_DIR)
 
 Other:
   -build-no [number|sha1] List recent build numbers or resolve a number or sha1
@@ -92,6 +127,8 @@ function parseArgs(args: string[]): BuildOptions | undefined {
     win32: false,
     run: false,
     runArgs: [],
+    cross: false,
+    dmg: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -132,6 +169,32 @@ function parseArgs(args: string[]): BuildOptions | undefined {
     else if (arg === "-run") {
       if (opts.run) throw new CliError("-run can only be specified once");
       opts.run = true;
+    } else if (arg === "-mac") setMode(opts, "mac");
+    else if (arg === "-mac-core") setMode(opts, "mac-core");
+    else if (arg === "-mac-remote") setMode(opts, "mac-remote");
+    else if (arg === "-cross") {
+      if (opts.cross) throw new CliError("-cross can only be specified once");
+      opts.cross = true;
+    } else if (arg === "-dmg") {
+      if (opts.dmg) throw new CliError("-dmg can only be specified once");
+      opts.dmg = true;
+    } else if (arg === "-arch") {
+      if (opts.arch) throw new CliError("-arch can only be specified once");
+      const value = args[++i];
+      if (value !== "arm64" && value !== "x64" && value !== "universal") {
+        throw new CliError("-arch requires arm64, x64 or universal");
+      }
+      opts.arch = value;
+    } else if (arg === "-cc") {
+      if (opts.cc) throw new CliError("-cc can only be specified once");
+      const value = args[++i];
+      if (value !== "gcc" && value !== "clang" && value !== "zig") throw new CliError("-cc requires gcc, clang or zig");
+      opts.cc = value;
+    } else if (arg === "-branch") {
+      if (opts.branch) throw new CliError("-branch can only be specified once");
+      const value = args[++i];
+      if (!value || value.startsWith("-")) throw new CliError("-branch requires a branch name");
+      opts.branch = value;
     } else if (arg === "-build-no") {
       setMode(opts, "build-no");
       const value = args[i + 1];
@@ -172,7 +235,21 @@ function validateOptions(opts: BuildOptions): void {
     reject(!opts.config, "-mingw requires -dbg or -rel");
     reject(opts.asan, "-asan is not supported with -mingw");
   }
-  reject(opts.clean && !["windows", "all", "mingw", "wine"].includes(mode), `-clean is not valid with -${mode}`);
+  const macModes: BuildMode[] = ["mac", "mac-core", "mac-remote"];
+  if (macModes.includes(mode)) {
+    reject(opts.config === "profile", `-profile is not valid with -${mode}`);
+  }
+  reject(opts.cross && mode !== "mac-core", "-cross is only valid with -mac-core");
+  reject(opts.cross && opts.asan, "-asan is not valid with -mac-core -cross");
+  reject(!!opts.cc && (mode !== "mac-core" || opts.cross), "-cc is only valid with -mac-core (not -cross)");
+  reject(!!opts.arch && !(mode === "mac" || mode === "mac-remote" || opts.cross), "-arch is only valid with -mac, -mac-remote or -mac-core -cross");
+  reject(opts.dmg && mode !== "mac" && mode !== "mac-remote", "-dmg is only valid with -mac or -mac-remote");
+  reject(!!opts.branch && mode !== "mac-remote", "-branch is only valid with -mac-remote");
+  reject(mode === "mac-remote" && !opts.branch, "-mac-remote requires -branch <name>");
+  reject(
+    opts.clean && !["windows", "all", "mingw", "wine", ...macModes].includes(mode),
+    `-clean is not valid with -${mode}`,
+  );
   reject(opts.ninja && opts.msbuild, "-ninja and -msbuild cannot be used together");
   reject(opts.ninja && !["windows", "all", "smoke"].includes(mode), `-ninja is not valid with -${mode}`);
   reject(opts.msbuild && !["windows", "all", "smoke"].includes(mode), `-msbuild is not valid with -${mode}`);
@@ -423,7 +500,37 @@ async function runBuild(opts: BuildOptions): Promise<void> {
       const { buildWine } = await import("./helper/wine-build");
       await buildWine({ clean: opts.clean, run: opts.run, runArgs: opts.runArgs });
     }
-  } else if (mode === "build-no") await showBuildNo(opts.buildNo);
+  } else if (mode === "mac" || mode === "mac-core" || mode === "mac-remote") await runMacBuild(opts);
+  else if (mode === "build-no") await showBuildNo(opts.buildNo);
+}
+
+// the native arch of this machine, as -arch spells it
+function hostMacArch(): "arm64" | "x64" {
+  return process.arch === "arm64" ? "arm64" : "x64";
+}
+
+async function runMacBuild(opts: BuildOptions): Promise<void> {
+  const isRelease = opts.config === "release";
+  const jobs = cpus().length;
+  if (opts.mode === "mac") {
+    const { buildMac } = await import("./helper/mac-build");
+    const arch = opts.arch ?? hostMacArch();
+    await buildMac({ isRelease, asan: opts.asan, clean: opts.clean, arch, jobs, dmg: opts.dmg || undefined });
+  } else if (opts.mode === "mac-remote") {
+    const { buildMacRemote } = await import("./helper/mac-remote-build");
+    const args = [isRelease ? "-rel" : "-dbg", ...(opts.asan ? ["-asan"] : []), ...(opts.clean ? ["-clean"] : [])];
+    if (opts.arch) args.push("-arch", opts.arch);
+    if (opts.dmg) args.push("-dmg");
+    await buildMacRemote(opts.branch!, args);
+  } else if (process.platform === "win32") {
+    throw new Error("-mac-core runs on Linux or macOS; from Windows run it in WSL: wsl -- bun cmd/build.ts -mac-core");
+  } else if (opts.cross) {
+    const { buildMacCross } = await import("./helper/mac-core-build");
+    await buildMacCross({ isRelease, clean: opts.clean, arch: opts.arch ?? "universal", jobs });
+  } else {
+    const { buildMacCore } = await import("./helper/mac-core-build");
+    await buildMacCore({ isRelease, asan: opts.asan, clean: opts.clean, cc: opts.cc, jobs });
+  }
 }
 
 async function main(): Promise<void> {

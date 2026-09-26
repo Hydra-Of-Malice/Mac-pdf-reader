@@ -4,7 +4,9 @@
 #include "base/Base.h"
 #include "base/Pixmap.h"
 #include "base/GuessFileType.h"
+#if OS_WIN
 #include "base/GdiPlusUtil.h"
+#endif
 
 #ifndef NO_LIBWEBP
 #include <webp/decode.h>

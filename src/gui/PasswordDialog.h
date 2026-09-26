@@ -7,6 +7,8 @@ struct PasswordDialogArgs {
     bool canRemember = false;
     bool rememberPassword = false;
     bool showPassword = false;
+    // the previous password for this file was rejected
+    bool isRetry = false;
 };
 
 struct PasswordDialogResult {

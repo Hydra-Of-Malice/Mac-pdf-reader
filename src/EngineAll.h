@@ -24,6 +24,8 @@ EngineBase* CreateEngineMobiFromFile(Str fileName);
 EngineBase* CreateEngineMobiFromData(Str data);
 Str ExtractPdfFromPrintReplicaFile(Str path);
 Str ExtractPdfFromPrintReplicaData(Str data);
+Str MobiToEpubConvert(Str path);
+Str ChmToEpubConvert(Str path);
 EngineBase* CreateEnginePdbFromFile(Str fileName);
 EngineBase* CreateEngineChmFromFile(Str fileName);
 EngineBase* CreateEngineHtmlFromFile(Str fileName);

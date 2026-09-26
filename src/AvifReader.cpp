@@ -5,7 +5,9 @@
 #include "base/Exif.h"
 #include "base/Pixmap.h"
 
+#if OS_WIN
 #include "base/GdiPlusUtil.h"
+#endif
 
 #ifndef NO_AVIF
 #include "heic.h"

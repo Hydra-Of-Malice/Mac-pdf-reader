@@ -1,0 +1,265 @@
+{
+  "comment": "Expectations for tests/mac/run-engine-tests.ts. Paths are relative to the repo root. expect: open | fail | any (any = must not crash or hang). target: false = format not planned for the mac port. Fixtures in tests/mac/fixtures are made by tests/mac/make-fixtures.ts; large-2000.pdf is generated at test time.",
+  "fixtures": [
+    {
+      "id": "pdf-text",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/text.pdf",
+      "expect": "open",
+      "pages": 3,
+      "search": "quokka",
+      "searchPage": 2,
+      "tocMin": 3,
+      "tocFirst": "Chapter One",
+      "links": [
+        { "kind": "page", "targetPage": 3 },
+        { "kind": "url", "value": "https://www.sumatrapdfreader.org/" }
+      ],
+      "props": { "Title": "SumatraPDF mac fixture" },
+      "lastPageLandscape": true
+    },
+    {
+      "id": "pdf-aes128",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/encrypted-aes128.pdf",
+      "expect": "open",
+      "password": "sumatra",
+      "prompts": 1,
+      "pages": 3,
+      "search": "quokka",
+      "searchPage": 2
+    },
+    {
+      "id": "pdf-aes256",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/encrypted-aes256.pdf",
+      "expect": "open",
+      "password": "sumatra",
+      "prompts": 1,
+      "pages": 3,
+      "search": "zebrafinch",
+      "searchPage": 3
+    },
+    {
+      "id": "pdf-password-retry",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/encrypted-aes256.pdf",
+      "expect": "open",
+      "password": "wrong,sumatra",
+      "prompts": 2,
+      "pages": 3
+    },
+    {
+      "id": "pdf-wrong-password",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/encrypted-aes128.pdf",
+      "expect": "fail",
+      "password": "wrong",
+      "prompts": 2
+    },
+    {
+      "id": "pdf-no-password",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/encrypted-aes128.pdf",
+      "expect": "fail",
+      "prompts": 1
+    },
+    { "id": "pdf-truncated", "format": "PDF", "path": "tests/mac/fixtures/truncated.pdf", "expect": "any" },
+    { "id": "pdf-header-only", "format": "PDF", "path": "tests/mac/fixtures/header-only.pdf", "expect": "fail" },
+    { "id": "pdf-empty", "format": "PDF", "path": "tests/mac/fixtures/empty.pdf", "expect": "fail" },
+    { "id": "pdf-garbage", "format": "PDF", "path": "tests/mac/fixtures/garbage.pdf", "expect": "fail" },
+    {
+      "id": "pdf-large-2000",
+      "format": "PDF",
+      "path": "tests/tmp/mac-fixtures/large-2000.pdf",
+      "generate": "large-pdf-2000",
+      "expect": "open",
+      "pages": 2000,
+      "search": "pangolin2000",
+      "searchPage": 2000,
+      "stress": 500,
+      "timeoutMs": 300000
+    },
+    { "id": "pdf-repo-6132", "format": "PDF", "path": "tests/issue-6132.pdf", "expect": "open", "minPages": 1 },
+    { "id": "pdf-repo-5873", "format": "PDF", "path": "tests/issue-5873.pdf", "expect": "open", "minPages": 1 },
+    {
+      "id": "pdf-repo-xmp",
+      "format": "PDF",
+      "path": "tests/xmp-visagesoft.pdf",
+      "expect": "open",
+      "minPages": 1
+    },
+    {
+      "id": "epub-sample",
+      "format": "EPUB",
+      "path": "tests/mac/fixtures/sample.epub",
+      "expect": "open",
+      "minPages": 2,
+      "search": "platypus",
+      "searchPage": 1,
+      "tocMin": 2,
+      "tocFirst": "Chapter One",
+      "links": [{ "kind": "page" }, { "kind": "url", "value": "https://www.sumatrapdfreader.org/" }]
+    },
+    { "id": "epub-repo-5846", "format": "EPUB", "path": "tests/issue-5846.epub", "expect": "open", "minPages": 1 },
+    { "id": "epub-repo-6095", "format": "EPUB", "path": "tests/issue-6095.epub", "expect": "open", "minPages": 2 },
+    { "id": "epub-corrupt", "format": "EPUB", "path": "tests/mac/fixtures/corrupt.epub", "expect": "any" },
+    { "id": "epub-empty", "format": "EPUB", "path": "tests/mac/fixtures/empty.epub", "expect": "fail" },
+    {
+      "id": "mobi-sample",
+      "format": "MOBI",
+      "path": "tests/mac/fixtures/sample.mobi",
+      "expect": "open",
+      "minPages": 2,
+      "search": "numbat",
+      "searchPage": 1
+    },
+    {
+      "id": "azw-uncompressed",
+      "format": "MOBI",
+      "path": "tests/mac/fixtures/uncompressed.azw",
+      "expect": "open",
+      "minPages": 1,
+      "search": "bilby",
+      "searchPage": 1
+    },
+    { "id": "azw3-repo-4315", "format": "MOBI", "path": "tests/issue-4315.azw3", "expect": "open", "pages": 2 },
+    { "id": "mobi-corrupt", "format": "MOBI", "path": "tests/mac/fixtures/corrupt.mobi", "expect": "any" },
+    { "id": "cbz-sample", "format": "CBZ", "path": "tests/mac/fixtures/sample.cbz", "expect": "open", "pages": 3 },
+    {
+      "id": "cbz-repo-1201",
+      "format": "CBZ",
+      "path": "tests/issue-1201.cbz",
+      "expect": "open",
+      "pages": 5,
+      "tocMin": 1
+    },
+    { "id": "cbz-corrupt", "format": "CBZ", "path": "tests/mac/fixtures/corrupt.cbz", "expect": "fail" },
+    { "id": "cbz-empty", "format": "CBZ", "path": "tests/mac/fixtures/empty.cbz", "expect": "fail" },
+    { "id": "cbr-rar4", "format": "CBR", "path": "tests/mac/fixtures/sample-rar4.cbr", "expect": "open", "pages": 3 },
+    { "id": "cbr-rar5", "format": "CBR", "path": "tests/mac/fixtures/sample-rar5.cbr", "expect": "open", "pages": 3 },
+    {
+      "id": "cbr-password",
+      "format": "CBR",
+      "path": "tests/mac/fixtures/password.cbr",
+      "expect": "open",
+      "password": "sumatra",
+      "pages": 3
+    },
+    { "id": "cbr-password-missing", "format": "CBR", "path": "tests/mac/fixtures/password.cbr", "expect": "any" },
+    { "id": "cbr-corrupt", "format": "CBR", "path": "tests/mac/fixtures/corrupt.cbr", "expect": "fail" },
+    { "id": "cb7-sample", "format": "CB7", "path": "tests/mac/fixtures/sample.cb7", "expect": "open", "pages": 3 },
+    { "id": "cbt-sample", "format": "CBT", "path": "tests/mac/fixtures/sample.cbt", "expect": "open", "pages": 3 },
+    {
+      "id": "fb2-sample",
+      "format": "FB2",
+      "path": "tests/mac/fixtures/sample.fb2",
+      "expect": "open",
+      "minPages": 1,
+      "search": "echidna",
+      "searchPage": 1,
+      "tocMin": 2
+    },
+    {
+      "id": "fbz-sample",
+      "format": "FB2",
+      "path": "tests/mac/fixtures/sample.fbz",
+      "expect": "open",
+      "minPages": 1,
+      "search": "dingo"
+    },
+    { "id": "fb2-repo-2254", "format": "FB2", "path": "tests/issue-2254.fb2", "expect": "open", "minPages": 1 },
+    { "id": "fb2-repo-5792", "format": "FB2", "path": "tests/issue-5792.fb2", "expect": "open", "minPages": 1 },
+    {
+      "id": "chm-repo-2737",
+      "format": "CHM",
+      "path": "tests/issue-2737.chm",
+      "expect": "open",
+      "minPages": 1,
+      "search": "regression"
+    },
+    { "id": "chm-repo-lzx-malformed", "format": "CHM", "path": "tests/issue-chm-lzx.chm", "expect": "any" },
+    {
+      "id": "xps-sample",
+      "format": "XPS",
+      "path": "tests/mac/fixtures/sample.xps",
+      "expect": "open",
+      "pages": 2,
+      "search": "kookaburra",
+      "searchPage": 1,
+      "tocMin": 2,
+      "links": [
+        { "kind": "page", "targetPage": 2 },
+        { "kind": "url", "value": "https://www.sumatrapdfreader.org/" }
+      ]
+    },
+    { "id": "xps-corrupt", "format": "XPS", "path": "tests/mac/fixtures/corrupt.xps", "expect": "fail" },
+    {
+      "id": "djvu-sample",
+      "format": "DjVu",
+      "path": "tests/mac/fixtures/sample.djvu",
+      "expect": "open",
+      "pages": 2,
+      "search": "wombat",
+      "searchPage": 1,
+      "tocMin": 2
+    },
+    { "id": "djvu-corrupt", "format": "DjVu", "path": "tests/mac/fixtures/corrupt.djvu", "expect": "fail" },
+    { "id": "png", "format": "Image", "path": "tests/mac/fixtures/sample.png", "expect": "open", "pages": 1 },
+    { "id": "bmp", "format": "Image", "path": "tests/mac/fixtures/sample.bmp", "expect": "open", "pages": 1 },
+    { "id": "tga", "format": "Image", "path": "tests/mac/fixtures/sample.tga", "expect": "open", "pages": 1 },
+    { "id": "jpeg", "format": "Image", "path": "tests/issue-6236.jpg", "expect": "open", "pages": 1 },
+    { "id": "gif", "format": "Image", "path": "tests/issue-6150.gif", "expect": "open", "minPages": 1 },
+    { "id": "webp", "format": "Image", "path": "tests/issue-6245-data/halves.webp", "expect": "open", "pages": 1 },
+    { "id": "jxl", "format": "Image", "path": "tests/issue-6245-data/keong_macan.jxl", "expect": "open", "pages": 1 },
+    { "id": "tiff-2-pages", "format": "TIFF", "path": "tests/mac/fixtures/sample.tif", "expect": "open", "pages": 2 },
+    {
+      "id": "txt",
+      "format": "Text",
+      "path": "tests/mac/fixtures/sample.txt",
+      "expect": "open",
+      "minPages": 1,
+      "search": "bandicoot"
+    },
+    {
+      "id": "markdown",
+      "format": "Markdown",
+      "path": "tests/mac/fixtures/sample.md",
+      "expect": "open",
+      "minPages": 1,
+      "search": "cassowary"
+    },
+    {
+      "id": "html",
+      "format": "HTML",
+      "path": "tests/mac/fixtures/sample.html",
+      "expect": "open",
+      "minPages": 1,
+      "search": "dugong",
+      "links": [{ "kind": "url", "value": "https://www.sumatrapdfreader.org/" }]
+    },
+    {
+      "id": "svg",
+      "format": "SVG",
+      "path": "tests/mac/fixtures/sample.svg",
+      "expect": "open",
+      "pages": 1,
+      "search": "koala"
+    },
+    {
+      "id": "palmdoc",
+      "format": "PalmDoc",
+      "path": "tests/mac/fixtures/sample.pdb",
+      "expect": "open",
+      "minPages": 1,
+      "search": "wallaby"
+    },
+    {
+      "id": "postscript",
+      "format": "PostScript",
+      "path": "tests/mac/fixtures/sample.ps",
+      "expect": "fail",
+      "target": false
+    }
+  ]
+}

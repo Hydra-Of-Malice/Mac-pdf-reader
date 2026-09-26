@@ -1,17 +1,21 @@
 /**
- * Run the macOS dependency build on the remote Mac checkout.
+ * Run the macOS build (cmd/build.ts -mac) for a pushed branch on a Mac, over ssh.
  *
- * Invoked by cmd/build.ts -mac-remote.
+ * Invoked by cmd/build.ts -mac-remote -branch <name>. The Mac is $SUMATRA_MAC_HOST (an ssh destination, e.g.
+ * user@mac.local) and its checkout is $SUMATRA_MAC_DIR (default: sumatrapdf, relative to the remote home). The
+ * checkout must be clean; it is switched to the branch for the build and restored afterwards, on success or failure.
  */
-
-const remoteHost = "kjk@macbook-pro-14";
-const remoteDir = "src/sumatrapdf";
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 export async function buildMacRemote(branch: string, buildArgs: string[]): Promise<void> {
+  const remoteHost = process.env.SUMATRA_MAC_HOST;
+  if (!remoteHost) {
+    throw new Error("-mac-remote needs SUMATRA_MAC_HOST set to the Mac's ssh destination (e.g. user@mac.local)");
+  }
+  const remoteDir = process.env.SUMATRA_MAC_DIR || "sumatrapdf";
   const quotedArgs = buildArgs.map(shellQuote).join(" ");
   const remoteScript = `
 set -euo pipefail
@@ -68,7 +72,7 @@ fi
 `;
   const remoteCmd = `/bin/bash -lc ${shellQuote(remoteScript)}`;
 
-  console.log(`> ssh ${remoteHost} ${remoteCmd}`);
+  console.log(`> ssh ${remoteHost} (in ${remoteDir}: bun cmd/build.ts -mac ${buildArgs.join(" ")})`);
   const proc = Bun.spawn(["ssh", remoteHost, remoteCmd], {
     stdout: "inherit",
     stderr: "inherit",

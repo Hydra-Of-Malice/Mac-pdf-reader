@@ -5,7 +5,9 @@
 #include "base/File.h"
 #include "base/StrQueue.h"
 
+#if OS_WIN
 #include "base/Win.h"
+#endif
 
 #include "base/DirScan.h"
 
@@ -18,7 +20,9 @@ DirIter::iterator::iterator(const DirIter* di, bool didFinish) {
     this->di = di;
     this->dirsToVisit.Append(di->dir);
     this->didFinish = didFinish;
+#if OS_WIN
     this->data.fd = &this->fd;
+#endif
     AdvanceDirIter(this, 1);
 }
 
@@ -36,8 +40,10 @@ DirIter::iterator& DirIter::iterator::operator=(const iterator& that) {
     this->dirsToVisit = that.dirsToVisit;
     this->currDir = that.currDir;
     this->data = that.data;
+#if OS_WIN
     this->fd = that.fd;
     this->data.fd = &this->fd;
+#endif
     return *this;
 }
 
@@ -117,6 +123,8 @@ void StartDirTraverseAsync(StrQueue* queue, Str dir, bool recurse) {
     RunAsync(fn, StrL("DirTraverseThread"));
 }
 
+// the POSIX CloseDirIter / AdvanceDirIter are in DirScan_posix.cpp
+#if OS_WIN
 static i64 GetWinFileSize(WIN32_FIND_DATAW* fd) {
     ULARGE_INTEGER ul;
     ul.HighPart = fd->nFileSizeHigh;
@@ -263,3 +271,4 @@ DidFinish:
     CloseDirIter(it);
     it->didFinish = true;
 }
+#endif

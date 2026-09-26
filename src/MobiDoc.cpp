@@ -5,6 +5,7 @@
 #include "base/ByteReaderWriter.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
+#include "base/Zip.h"
 
 #include "gui/UIModels.h"
 
@@ -1528,4 +1529,157 @@ Str ExtractPdfFromPrintReplicaData(Str data) {
     Str pdf = ExtractPdfFromPrintReplica(pdb);
     delete pdb;
     return pdf;
+}
+
+//--- MOBI -> in-memory EPUB, so MuPDF can show it where EngineMobi (GDI+) isn't built
+
+static void AppendXmlEscaped(str::Builder& out, Str s) {
+    for (int i = 0; i < len(s); i++) {
+        char c = s.s[i];
+        if (c == '&') {
+            out.Append(StrL("&amp;"));
+        } else if (c == '<') {
+            out.Append(StrL("&lt;"));
+        } else if (c == '"') {
+            out.Append(StrL("&quot;"));
+        } else {
+            out.AppendChar(c);
+        }
+    }
+}
+
+// Quoted or bare attribute value at the start of s; *used gets the bytes consumed.
+static Str AttrValueAt(Str s, int* used) {
+    int n = len(s);
+    if (n > 0 && (s.s[0] == '"' || s.s[0] == '\'')) {
+        int end = 1;
+        while (end < n && s.s[end] != s.s[0]) {
+            end++;
+        }
+        *used = end < n ? end + 1 : n;
+        return Str(s.s + 1, end - 1);
+    }
+    int end = 0;
+    while (end < n && !str::IsWs(s.s[end]) && s.s[end] != '>' && s.s[end] != '/') {
+        end++;
+    }
+    *used = end;
+    return Str(s.s, end);
+}
+
+static int SkipPastTagEnd(Str html, int i) {
+    while (i < len(html) && html.s[i] != '>') {
+        i++;
+    }
+    return i < len(html) ? i + 1 : i;
+}
+
+// <img recindex="00003"> and src="kindle:embed:0003?..." become src="img/3";
+// <mbp:pagebreak/> becomes a CSS page break, emitted only between content so
+// leading, doubled or trailing breaks don't make blank pages.
+static void AppendMobiHtmlForEpub(str::Builder& out, Str html) {
+    int n = len(html);
+    int i = 0;
+    bool inTag = false;
+    bool hasContent = false;
+    bool pendingBreak = false;
+    while (i < n) {
+        Str rest(html.s + i, n - i);
+        char c = html.s[i];
+        if (c == '<' && str::StartsWithI(rest, StrL("<mbp:pagebreak"))) {
+            pendingBreak = hasContent;
+            i = SkipPastTagEnd(html, i);
+            continue;
+        }
+        if (c == '<' && str::StartsWithI(rest, StrL("</mbp:pagebreak"))) {
+            i = SkipPastTagEnd(html, i);
+            continue;
+        }
+        bool isContent = (c == '<' && str::StartsWithI(rest, StrL("<img"))) || (!inTag && c != '<' && !str::IsWs(c));
+        if (isContent) {
+            if (pendingBreak) {
+                out.Append(StrL("<div style=\"page-break-before:always\"></div>"));
+                pendingBreak = false;
+            }
+            hasContent = true;
+        }
+        if (c == '<') {
+            inTag = true;
+        } else if (c == '>') {
+            inTag = false;
+        }
+        Str recindex = StrL("recindex=");
+        Str src = StrL("src=");
+        int used = 0;
+        if ((c == 'r' || c == 'R') && str::StartsWithI(rest, recindex)) {
+            Str v = AttrValueAt(Str(rest.s + len(recindex), len(rest) - len(recindex)), &used);
+            int recNo = atoi(CStrTemp(v));
+            out.Append(fmt("src=\"img/%d\"", recNo));
+            i += len(recindex) + used;
+            continue;
+        }
+        if ((c == 's' || c == 'S') && str::StartsWithI(rest, src)) {
+            Str v = AttrValueAt(Str(rest.s + len(src), len(rest) - len(src)), &used);
+            int recNo = KindleEmbedToRecIndex(v);
+            if (recNo > 0) {
+                out.Append(fmt("src=\"img/%d\"", recNo));
+                i += len(src) + used;
+                continue;
+            }
+        }
+        out.AppendChar(c);
+        i++;
+    }
+}
+
+static const char* kMobiEpubContainerXml =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\n"
+    "<rootfiles><rootfile full-path=\"content.opf\" media-type=\"application/oebps-package+xml\"/></rootfiles>\n"
+    "</container>\n";
+
+// Repackages a MOBI / AZW / AZW3 book (text + image records) as an EPUB. Empty on failure.
+Str MobiToEpubConvert(Str path) {
+    AutoDelete<MobiDoc> doc(MobiDoc::CreateFromFile(path));
+    if (!doc) {
+        return {};
+    }
+    Str html = doc->GetHtmlData();
+    if (len(html) == 0) {
+        return {};
+    }
+
+    str::Builder opf;
+    opf.Append(
+        StrL("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+             "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\" unique-identifier=\"id\">\n"
+             "<metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:identifier id=\"id\">mobi</dc:identifier>"
+             "<dc:title>"));
+    AppendXmlEscaped(opf, doc->GetPropertyTemp(DocProp::Title));
+    opf.Append(StrL("</dc:title><dc:creator>"));
+    AppendXmlEscaped(opf, doc->GetPropertyTemp(DocProp::Author));
+    opf.Append(
+        StrL("</dc:creator></metadata>\n"
+             "<manifest><item id=\"text\" href=\"index.html\" media-type=\"application/xhtml+xml\"/></manifest>\n"
+             "<spine><itemref idref=\"text\"/></spine>\n</package>\n"));
+
+    str::Builder text;
+    AppendMobiHtmlForEpub(text, html);
+
+    str::Builder zipData;
+    ZipCreator zc(zipData);
+    bool ok = zc.AddFileData(StrL("mimetype"), StrL("application/epub+zip"));
+    ok &= zc.AddFileData(StrL("META-INF/container.xml"), Str(kMobiEpubContainerXml));
+    ok &= zc.AddFileData(StrL("content.opf"), ToStrTemp(opf));
+    ok &= zc.AddFileData(StrL("index.html"), ToStrTemp(text));
+    for (int i = 1; ok && i <= doc->imagesCount; i++) {
+        Str img = doc->GetImage(i);
+        if (len(img) > 0) {
+            ok = zc.AddFileData(fmt("img/%d", i), img);
+        }
+    }
+    if (!ok || !zc.Finish()) {
+        return {};
+    }
+    return zipData.TakeStr();
 }

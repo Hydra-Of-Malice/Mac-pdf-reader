@@ -14,6 +14,34 @@
 #include "LitDoc.h"
 #include "ReaderModel.h"
 
+// MOBI and CHM engines (EngineEbook.cpp, ChmModel) need GDI+ / IE, so like LIT
+// they are converted to an in-memory EPUB that MuPDF lays out.
+static EngineBase* CreateEngineFromEpub(Str epub, Str path, PasswordUI* pwdUI) {
+    if (len(epub) == 0) {
+        return nullptr;
+    }
+    EngineBase* engine = CreateEngineMupdfFromData(epub, StrL("book.epub"), pwdUI);
+    str::Free(epub);
+    if (engine) {
+        engine->SetFilePath(path);
+    }
+    return engine;
+}
+
+static EngineBase* CreateMobiEngine(Str path, PasswordUI* pwdUI) {
+    // AZW4 / Kindle Print Replica is a PDF inside a MOBI wrapper
+    Str pdf = ExtractPdfFromPrintReplicaFile(path);
+    if (len(pdf) > 0) {
+        EngineBase* engine = CreateEngineMupdfFromData(pdf, StrL("file.pdf"), pwdUI);
+        str::Free(pdf);
+        if (engine) {
+            engine->SetFilePath(path);
+            return engine;
+        }
+    }
+    return CreateEngineFromEpub(MobiToEpubConvert(path), path, pwdUI);
+}
+
 static EngineBase* CreateReaderEngine(Str path, PasswordUI* pwdUI) {
     if (IsEngineImageDirSupportedFile(path)) {
         return CreateEngineImageDirFromFile(path);
@@ -31,6 +59,12 @@ static EngineBase* CreateReaderEngine(Str path, PasswordUI* pwdUI) {
     }
     if (kind == FileType::Lit) {
         return CreateEngineLitFromFile(path, pwdUI);
+    }
+    if (kind == FileType::Mobi) {
+        return CreateMobiEngine(path, pwdUI);
+    }
+    if (kind == FileType::Chm) {
+        return CreateEngineFromEpub(ChmToEpubConvert(path), path, pwdUI);
     }
     if (IsEngineMupdfSupportedFileType(kind)) {
         return CreateEngineMupdfFromFile(path, kind, 96, pwdUI);

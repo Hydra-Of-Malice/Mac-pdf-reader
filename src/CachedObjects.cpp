@@ -3,6 +3,12 @@
 
 #include "base/Base.h"
 #include "base/File.h"
+#if OS_MAC
+#include <mach/mach.h>
+#include <sys/sysctl.h>
+#elif OS_LINUX
+#include <unistd.h>
+#endif
 
 #include "gui/UIModels.h"
 #include "EngineBase.h"
@@ -166,6 +172,54 @@ static u64 FreeMatching(u64 wantBytes, bool aggressive, uintptr_t skipId) {
     return freed;
 }
 
+struct PhysicalMemory {
+    u64 total = 0;
+    u64 avail = 0;
+    int loadPercent = 0; // share of physical memory in use
+};
+
+static bool GetPhysicalMemory(PhysicalMemory* mem) {
+#if OS_WIN
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    if (!GlobalMemoryStatusEx(&ms)) {
+        return false;
+    }
+    mem->total = ms.ullTotalPhys;
+    mem->avail = ms.ullAvailPhys;
+    mem->loadPercent = (int)ms.dwMemoryLoad;
+    return true;
+#elif OS_MAC
+    u64 total = 0;
+    size_t n = sizeof(total);
+    vm_statistics64_data_t vm{};
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (sysctlbyname("hw.memsize", &total, &n, nullptr, 0) != 0 ||
+        host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm, &count) != KERN_SUCCESS) {
+        return false;
+    }
+    mem->total = total;
+    // inactive pages are reclaimable, like the Windows "available" count
+    mem->avail = ((u64)vm.free_count + (u64)vm.inactive_count) * (u64)vm_page_size;
+#else
+    long pageSize = sysconf(_SC_PAGESIZE);
+    long nPages = sysconf(_SC_PHYS_PAGES);
+    long nAvail = sysconf(_SC_AVPHYS_PAGES);
+    if (pageSize <= 0 || nPages <= 0 || nAvail < 0) {
+        return false;
+    }
+    mem->total = (u64)nPages * (u64)pageSize;
+    mem->avail = (u64)nAvail * (u64)pageSize;
+#endif
+#if !OS_WIN
+    if (mem->total == 0 || mem->avail > mem->total) {
+        return false;
+    }
+    mem->loadPercent = (int)((mem->total - mem->avail) * 100 / mem->total);
+    return true;
+#endif
+}
+
 static u64 BytesWeWantFreed(u64 newAllocationSize, bool aggressive) {
     if (aggressive) {
         return (u64)-1;
@@ -185,13 +239,12 @@ static u64 BytesWeWantFreed(u64 newAllocationSize, bool aggressive) {
         return (u64)-1;
     }
 
-    MEMORYSTATUSEX ms{};
-    ms.dwLength = sizeof(ms);
-    if (!GlobalMemoryStatusEx(&ms)) {
+    PhysicalMemory mem;
+    if (!GetPhysicalMemory(&mem)) {
         return newAllocationSize;
     }
+    u64 avail = mem.avail;
 
-    u64 avail = ms.ullAvailPhys;
     u64 cached = 0;
     {
         AutoUnlockRecursiveMutex scope(&gCachedObjectsLock);
@@ -200,7 +253,7 @@ static u64 BytesWeWantFreed(u64 newAllocationSize, bool aggressive) {
 
     // pressure rises with OS memory load and gSaveMemory.
     // 0 never reaches here; 100 already returned max.
-    int pressure = (int)ms.dwMemoryLoad + level - 100;
+    int pressure = mem.loadPercent + level - 100;
     if (newAllocationSize > 0 && avail < newAllocationSize * 2) {
         if (pressure < level) {
             pressure = level;
@@ -316,11 +369,10 @@ void SerializeCachedObjects(str::Builder& s) {
     }
 
     s.Append(fmt("Cached objects: %d  (%s)  SaveMemory %d", len(snap), FormatCachedSizeTemp(total), gSaveMemory));
-    MEMORYSTATUSEX ms{};
-    ms.dwLength = sizeof(ms);
-    if (GlobalMemoryStatusEx(&ms)) {
+    PhysicalMemory mem;
+    if (GetPhysicalMemory(&mem)) {
         const double gb = 1024.0 * 1024.0 * 1024.0;
-        s.Append(fmt("  Free Mem: %.2f GB of %.1f GB", ms.ullAvailPhys / gb, ms.ullTotalPhys / gb));
+        s.Append(fmt("  Free Mem: %.2f GB of %.1f GB", mem.avail / gb, mem.total / gb));
     }
     s.Append(StrL("\n\n"));
     s.Append(fmt("%s %-8s %10s %5s %7s  %s\n", StrL(" "), StrL("kind"), StrL("size"), StrL("page"), StrL("zoom"),

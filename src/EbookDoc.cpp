@@ -6,7 +6,14 @@
 #include "base/File.h"
 #include "base/GuessFileType.h"
 #include "base/HtmlTags.h"
+#if OS_WIN
 #include "base/Win.h"
+#else
+// MLang's code page detection is Windows-only
+static uint GuessTextCodepage(Str, uint defVal) {
+    return defVal;
+}
+#endif
 
 #include "DocProperties.h"
 #include "DocController.h"

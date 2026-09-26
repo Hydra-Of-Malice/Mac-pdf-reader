@@ -19,7 +19,7 @@ static Mutex gLogMutex;
 static bool gDestroyedLogging = false;
 
 void log(Str s) {
-    if (!s || gDestroyedLogging) {
+    if (len(s) == 0 || gDestroyedLogging) {
         return;
     }
 
@@ -29,8 +29,8 @@ void log(Str s) {
 
     if (!gLogBuf) {
         gLogAllocator = ArenaNew();
-        gLogBuf = new str::Builder(32 * 1024);
-        gLogBuf->a = gLogAllocator;
+        gLogBuf = new str::Builder(gLogAllocator);
+        gLogBuf->Reserve(32 * 1024);
     }
     gLogBuf->Append(s);
 
@@ -38,8 +38,8 @@ void log(Str s) {
         fwrite(s.s, 1, (size_t)s.len, stdout);
         fflush(stdout);
     }
-    if (gLogFilePath) {
-        FILE* f = fopen(gLogFilePath.s, "a");
+    if (len(gLogFilePath) > 0) {
+        FILE* f = fopen(CStrTemp(gLogFilePath), "a");
         if (f) {
             fwrite(s.s, 1, (size_t)s.len, f);
             fclose(f);
@@ -61,7 +61,7 @@ bool WriteCurrentLogToFile(Str path) {
         return false;
     }
     Str slice = ToStr(*gLogBuf);
-    if (!slice) {
+    if (len(slice) == 0) {
         return false;
     }
     return dir::CreateForFile(path) && file::WriteFile(path, slice);

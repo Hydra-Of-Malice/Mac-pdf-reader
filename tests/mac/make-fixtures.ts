@@ -1,0 +1,506 @@
+// Generates the synthetic fixtures in tests/mac/fixtures/ used by tests/mac/run-engine-tests.ts.
+//
+// Regenerate: bun tests/mac/make-fixtures.ts
+//
+// Most files are written by the tiny writers in tests/mac/fixture-lib.ts. A few need external tools
+// (looked up on PATH, plus FIXTURE_TOOLS_DIR if set); when a tool is missing the committed file is kept:
+//   - qpdf (encrypted PDFs), rar (RAR5 CBR), 7z (CB7), c44/cjb2/djvm/djvused (DjVu)
+// sample-rar4.cbr is written by makeRar4Store() (RAR 4.x, store method): rar 7.x can't create RAR4.
+// On Ubuntu without root the tools can be unpacked from the distro archive:
+//   apt-get download qpdf libqpdf29t64 rar 7zip djvulibre-bin libdjvulibre21
+//   for d in *.deb; do dpkg -x $d ~/tools; done
+//   FIXTURE_TOOLS_DIR=~/tools/usr/lib/7zip:~/tools/usr/bin LD_LIBRARY_PATH=~/tools/usr/lib/x86_64-linux-gnu \
+//     bun tests/mac/make-fixtures.ts
+// The fixtures committed in 2026-09 were made that way on Ubuntu 24.04 (qpdf 11.9.0, rar 7.00, 7-Zip 23.01,
+// DjVuLibre 3.5.28).
+
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import {
+  bytes,
+  concat,
+  makeBmp,
+  makeMobi,
+  makeRar4Store,
+  makePalmDoc,
+  makePbm,
+  makePdf,
+  makePng,
+  makePpm,
+  makeTar,
+  makeTga,
+  makeTiff,
+  makeZip,
+  patternPixels,
+  prng,
+  type Rgb,
+} from "./fixture-lib.ts";
+
+const outDir = join(import.meta.dir, "fixtures");
+const repoRoot = join(import.meta.dir, "..", "..");
+mkdirSync(outDir, { recursive: true });
+
+const written: string[] = [];
+const skipped: string[] = [];
+
+function save(name: string, data: Uint8Array | string) {
+  writeFileSync(join(outDir, name), typeof data === "string" ? bytes(data) : data);
+  written.push(name);
+}
+
+const red: Rgb = [220, 40, 40];
+const green: Rgb = [40, 180, 60];
+const blue: Rgb = [40, 70, 220];
+const smallPng = (c: Rgb) => makePng(48, 64, patternPixels(c));
+
+// ---- PDF ----
+
+const textPdf = makePdf({
+  title: "SumatraPDF mac fixture",
+  author: "tests/mac",
+  pages: [
+    { width: 612, height: 792, lines: ["Page one", "This document tests text, outline and links."] },
+    { width: 612, height: 792, lines: ["Page two", "The quokka is a small marsupial."] },
+    { width: 792, height: 612, lines: ["Page three (landscape)", "Zebrafinch appears only here."] },
+  ],
+  links: [
+    { page: 1, rect: [72, 600, 300, 630], toPage: 3, label: "Go to page three" },
+    { page: 1, rect: [72, 540, 300, 570], uri: "https://www.sumatrapdfreader.org/", label: "Visit the website" },
+  ],
+  outline: [
+    { title: "Chapter One", page: 1, children: [{ title: "Section Two", page: 2 }] },
+    { title: "Chapter Three", page: 3 },
+  ],
+});
+save("text.pdf", textPdf);
+save("truncated.pdf", textPdf.subarray(0, Math.floor(textPdf.length * 0.55)));
+save("header-only.pdf", "%PDF-1.7\n");
+save("empty.pdf", new Uint8Array(0));
+{
+  const rnd = prng(0x5eed);
+  const g = new Uint8Array(4096);
+  for (let i = 0; i < g.length; i++) g[i] = Math.floor(rnd() * 256);
+  save("garbage.pdf", g);
+}
+
+// ---- EPUB ----
+
+function makeEpub(): Uint8Array {
+  const xhtml = (title: string, body: string) =>
+    `<?xml version="1.0" encoding="utf-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml"><head><title>${title}</title></head><body>${body}</body></html>\n`;
+  const filler = Array.from(
+    { length: 12 },
+    (_, i) => `<p>Filler paragraph ${i + 1} keeps the chapter long enough.</p>`,
+  );
+  return makeZip([
+    { name: "mimetype", data: "application/epub+zip", store: true },
+    {
+      name: "META-INF/container.xml",
+      data: `<?xml version="1.0"?>\n<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>\n`,
+    },
+    {
+      name: "OEBPS/content.opf",
+      data: `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+ <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:identifier id="id">sumatra-mac-fixture-epub</dc:identifier>
+  <dc:title>EPUB mac fixture</dc:title>
+  <dc:creator>tests/mac</dc:creator>
+  <dc:language>en</dc:language>
+ </metadata>
+ <manifest>
+  <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+  <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+  <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+  <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+  <item id="img" href="img.png" media-type="image/png"/>
+ </manifest>
+ <spine toc="ncx"><itemref idref="ch1"/><itemref idref="ch2"/></spine>
+</package>
+`,
+    },
+    {
+      name: "OEBPS/toc.ncx",
+      data: `<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head/><docTitle><text>EPUB mac fixture</text></docTitle>
+<navMap>
+ <navPoint id="n1" playOrder="1"><navLabel><text>Chapter One</text></navLabel><content src="ch1.xhtml"/></navPoint>
+ <navPoint id="n2" playOrder="2"><navLabel><text>Chapter Two</text></navLabel><content src="ch2.xhtml#s2"/></navPoint>
+</navMap></ncx>
+`,
+    },
+    {
+      name: "OEBPS/nav.xhtml",
+      data: xhtml(
+        "Contents",
+        `<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="toc"><ol><li><a href="ch1.xhtml">Chapter One</a></li><li><a href="ch2.xhtml#s2">Chapter Two</a></li></ol></nav>`,
+      ),
+    },
+    {
+      name: "OEBPS/ch1.xhtml",
+      data: xhtml(
+        "Chapter One",
+        `<h1>Chapter One</h1><p>The platypus lays eggs.</p>` +
+          `<p><a href="ch2.xhtml#s2">Jump to chapter two</a></p>` +
+          `<p><a href="https://www.sumatrapdfreader.org/">Visit the website</a></p>` +
+          `<p><img src="img.png" alt="red pattern"/></p>` +
+          filler.join(""),
+      ),
+    },
+    {
+      name: "OEBPS/ch2.xhtml",
+      data: xhtml("Chapter Two", `<h1 id="s2">Chapter Two</h1><p>The kiwi cannot fly.</p>` + filler.join("")),
+    },
+    { name: "OEBPS/img.png", data: smallPng(red), store: true },
+  ]);
+}
+const epub = makeEpub();
+save("sample.epub", epub);
+save("corrupt.epub", epub.subarray(0, Math.floor(epub.length * 0.6)));
+save("empty.epub", new Uint8Array(0));
+
+// ---- FB2 / FBZ ----
+
+const fb2 = `<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+ <description>
+  <title-info>
+   <genre>prose</genre>
+   <author><first-name>Tests</first-name><last-name>Mac</last-name></author>
+   <book-title>FB2 mac fixture</book-title>
+   <lang>en</lang>
+  </title-info>
+ </description>
+ <body>
+  <section><title><p>Chapter One</p></title>
+   <p>The echidna is a spiny anteater.</p>
+   <image l:href="#pic1"/>
+  </section>
+  <section><title><p>Chapter Two</p></title>
+   <p>The dingo is a wild dog.</p>
+  </section>
+ </body>
+ <binary id="pic1" content-type="image/png">${Buffer.from(smallPng(green)).toString("base64")}</binary>
+</FictionBook>
+`;
+save("sample.fb2", fb2);
+save("sample.fbz", makeZip([{ name: "sample.fb2", data: fb2 }]));
+
+// ---- MOBI / AZW / PalmDoc ----
+
+{
+  const para = (s: string) => `<p>${s}</p>`;
+  const html =
+    `<html><head><guide></guide></head><body>` +
+    `<h1>Mobi Chapter One</h1>` +
+    para("The numbat eats termites.") +
+    `<p><img recindex="00001"/></p>` +
+    `<mbp:pagebreak/>` +
+    `<h1>Mobi Chapter Two</h1>` +
+    Array.from({ length: 150 }, (_, i) =>
+      para(`Line ${i + 1}: a long paragraph so the text spans several records.`),
+    ).join("") +
+    `</body></html>`;
+  save("sample.mobi", makeMobi("MOBI mac fixture", html, [smallPng(blue)], true));
+  const html2 = `<html><body><h1>Uncompressed</h1><p>The bilby has big ears.</p></body></html>`;
+  save("uncompressed.azw", makeMobi("AZW mac fixture", html2, [], false));
+  const bad = makeMobi("corrupt", html2, [], false);
+  const rnd = prng(42);
+  for (let i = 90; i < bad.length; i++) bad[i] = Math.floor(rnd() * 256);
+  save("corrupt.mobi", bad);
+}
+save(
+  "sample.pdb",
+  makePalmDoc(
+    "PalmDoc mac fixture",
+    "PalmDoc fixture\n\nThe wallaby hops.\n" + "Some more text to compress. ".repeat(40),
+    true,
+  ),
+);
+
+// ---- XPS ----
+
+function makeXps(): Uint8Array {
+  const ns = "http://schemas.microsoft.com/xps/2005/06";
+  const font = readFileSync(join(repoRoot, "ext/mupdf/resources/fonts/urw/NimbusSans-Regular.cff"));
+  const page = (n: number, word: string, extra: string) =>
+    `<FixedPage xmlns="${ns}" Width="816" Height="1056" xml:lang="en-US">
+ <Path Data="M 0,0 L 816,0 816,1056 0,1056 Z" Fill="#FFFFFFFF"/>
+ <Path Data="M 96,300 L 720,300 720,340 96,340 Z" Fill="#FF3366CC"/>
+ <Glyphs FontUri="/Resources/NimbusSans-Regular.cff" FontRenderingEmSize="32" OriginX="96" OriginY="140" Fill="#FF000000" UnicodeString="XPS page ${n}"/>
+ <Glyphs FontUri="/Resources/NimbusSans-Regular.cff" FontRenderingEmSize="20" OriginX="96" OriginY="200" Fill="#FF000000" UnicodeString="${word}"/>
+${extra}</FixedPage>
+`;
+  const link = (uri: string, y: number, label: string) =>
+    ` <Path FixedPage.NavigateUri="${uri}" Data="M 96,${y} L 500,${y} 500,${y + 36} 96,${y + 36} Z" Fill="#FFDDEEFF"/>
+ <Glyphs FontUri="/Resources/NimbusSans-Regular.cff" FontRenderingEmSize="18" OriginX="100" OriginY="${y + 26}" Fill="#FF0000CC" UnicodeString="${label}"/>
+`;
+  return makeZip([
+    {
+      name: "[Content_Types].xml",
+      data: `<?xml version="1.0" encoding="utf-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+ <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+ <Default Extension="fdseq" ContentType="application/vnd.ms-package.xps-fixeddocumentsequence+xml"/>
+ <Default Extension="fdoc" ContentType="application/vnd.ms-package.xps-fixeddocument+xml"/>
+ <Default Extension="fpage" ContentType="application/vnd.ms-package.xps-fixedpage+xml"/>
+ <Default Extension="struct" ContentType="application/vnd.ms-package.xps-documentstructure+xml"/>
+ <Default Extension="cff" ContentType="application/vnd.ms-opentype"/>
+</Types>
+`,
+    },
+    {
+      name: "_rels/.rels",
+      data: `<?xml version="1.0" encoding="utf-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Id="R0" Type="http://schemas.microsoft.com/xps/2005/06/fixedrepresentation" Target="/FixedDocumentSequence.fdseq"/>
+</Relationships>
+`,
+    },
+    {
+      name: "FixedDocumentSequence.fdseq",
+      data: `<FixedDocumentSequence xmlns="${ns}"><DocumentReference Source="/Documents/1/FixedDocument.fdoc"/></FixedDocumentSequence>\n`,
+    },
+    {
+      name: "Documents/1/FixedDocument.fdoc",
+      data: `<FixedDocument xmlns="${ns}">
+ <PageContent Source="Pages/1.fpage"><PageContent.LinkTargets><LinkTarget Name="p1"/></PageContent.LinkTargets></PageContent>
+ <PageContent Source="Pages/2.fpage"><PageContent.LinkTargets><LinkTarget Name="p2"/></PageContent.LinkTargets></PageContent>
+</FixedDocument>
+`,
+    },
+    {
+      name: "Documents/1/_rels/FixedDocument.fdoc.rels",
+      data: `<?xml version="1.0" encoding="utf-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Id="R1" Type="http://schemas.microsoft.com/xps/2005/06/documentstructure" Target="Structure/DocStructure.struct"/>
+</Relationships>
+`,
+    },
+    {
+      name: "Documents/1/Structure/DocStructure.struct",
+      data: `<DocumentStructure xmlns="http://schemas.microsoft.com/xps/2005/06/documentstructure">
+ <DocumentStructure.Outline><DocumentOutline xml:lang="en-US">
+  <OutlineEntry OutlineLevel="1" OutlineTarget="../FixedDocument.fdoc#p1" Description="First XPS page"/>
+  <OutlineEntry OutlineLevel="1" OutlineTarget="../FixedDocument.fdoc#p2" Description="Second XPS page"/>
+ </DocumentOutline></DocumentStructure.Outline>
+</DocumentStructure>
+`,
+    },
+    {
+      name: "Documents/1/Pages/1.fpage",
+      data: page(
+        1,
+        "The kookaburra laughs.",
+        link("#p2", 400, "Go to page two") + link("https://www.sumatrapdfreader.org/", 460, "Visit the website"),
+      ),
+    },
+    { name: "Documents/1/Pages/2.fpage", data: page(2, "The cassowary is shy.", "") },
+    { name: "Resources/NimbusSans-Regular.cff", data: new Uint8Array(font) },
+  ]);
+}
+save("sample.xps", makeXps());
+save("corrupt.xps", concat([bytes("PK\x03\x04"), new Uint8Array(200).fill(0x41)]));
+
+// ---- images ----
+
+save("sample.png", makePng(120, 160, patternPixels(red)));
+save("sample.bmp", makeBmp(64, 80, patternPixels(green)));
+save("sample.tga", makeTga(64, 80, patternPixels(blue)));
+save(
+  "sample.tif",
+  makeTiff([
+    { w: 60, h: 80, px: patternPixels(red) },
+    { w: 60, h: 80, px: patternPixels(blue) },
+  ]),
+);
+
+// ---- comic book archives ----
+
+const comicPages = [
+  { name: "page01.png", data: smallPng(red) },
+  { name: "page02.png", data: smallPng(green) },
+  { name: "page03.png", data: smallPng(blue) },
+];
+save("sample.cbz", makeZip(comicPages.map((p) => ({ ...p, store: true }))));
+save("sample.cbt", makeTar(comicPages));
+save("corrupt.cbz", concat([bytes("PK\x03\x04"), new Uint8Array(300).fill(0x5a)]));
+save("empty.cbz", new Uint8Array(0));
+save("sample-rar4.cbr", makeRar4Store(comicPages));
+save("corrupt.cbr", concat([bytes("Rar!\x1a\x07\x00"), new Uint8Array(300).fill(0x33)]));
+
+// ---- text-ish formats rendered by mupdf ----
+
+save("sample.txt", "Plain text fixture\n\nThe bandicoot digs.\n");
+save("sample.md", "# Markdown fixture\n\nThe **cassowary** runs.\n\n## Second heading\n\n- item one\n- item two\n");
+save(
+  "sample.html",
+  `<!DOCTYPE html><html><head><title>HTML fixture</title></head><body><h1>HTML fixture</h1><p>The dugong grazes.</p><p><a href="https://www.sumatrapdfreader.org/">Visit</a></p></body></html>\n`,
+);
+save(
+  "sample.svg",
+  `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300"><rect width="400" height="300" fill="#fff"/><circle cx="200" cy="150" r="100" fill="#c33"/><text x="40" y="40" font-size="24">koala</text></svg>\n`,
+);
+save(
+  "sample.ps",
+  "%!PS-Adobe-3.0\n/Helvetica findfont 24 scalefont setfont 72 700 moveto (PostScript fixture) show showpage\n",
+);
+
+// ---- fixtures made with external tools ----
+
+const toolDirs = [...(process.env.FIXTURE_TOOLS_DIR ?? "").split(":"), ...(process.env.PATH ?? "").split(":")].filter(
+  Boolean,
+);
+
+function findTool(name: string): string | null {
+  for (const d of toolDirs) {
+    const p = join(d, name);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+function run(args: string[], cwd: string, input?: string): boolean {
+  const r = Bun.spawnSync(args, {
+    cwd,
+    stdin: input !== undefined ? bytes(input) : "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (r.exitCode !== 0) {
+    console.error(
+      `  ${args.join(" ")} failed (${r.exitCode}): ${r.stderr.toString().trim()} ${r.stdout.toString().trim()}`,
+    );
+    return false;
+  }
+  return true;
+}
+
+function withTools(what: string, names: string[], fn: (tools: Record<string, string>, work: string) => void) {
+  const tools: Record<string, string> = {};
+  for (const n of names) {
+    const p = findTool(n);
+    if (!p) {
+      skipped.push(`${what} (missing ${n})`);
+      return;
+    }
+    tools[n] = p;
+  }
+  const work = join(tmpdir(), `sumatra-mac-fixtures-${what.replace(/\W+/g, "-")}`);
+  rmSync(work, { recursive: true, force: true });
+  mkdirSync(work, { recursive: true });
+  try {
+    fn(tools, work);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+const fixedTime = new Date("2026-01-01T00:00:00Z");
+
+function writeComicPages(work: string): string[] {
+  const names: string[] = [];
+  for (const p of comicPages) {
+    const f = join(work, p.name);
+    writeFileSync(f, p.data);
+    utimesSync(f, fixedTime, fixedTime);
+    names.push(p.name);
+  }
+  return names;
+}
+
+withTools("encrypted pdf", ["qpdf"], (t, work) => {
+  const src = join(work, "in.pdf");
+  writeFileSync(src, textPdf);
+  const variants: [string, string][] = [
+    ["encrypted-aes128.pdf", "128"],
+    ["encrypted-aes256.pdf", "256"],
+  ];
+  for (const [name, bits] of variants) {
+    const aes = bits === "128" ? ["--use-aes=y"] : [];
+    const dst = join(outDir, name);
+    const args = [
+      t.qpdf!,
+      "--static-id",
+      "--static-aes-iv",
+      "--encrypt",
+      "sumatra",
+      "owner-pw",
+      bits,
+      ...aes,
+      "--",
+      src,
+      dst,
+    ];
+    if (run(args, work)) written.push(name);
+  }
+});
+
+withTools("cbr", ["rar"], (t, work) => {
+  const names = writeComicPages(work);
+  const variants: [string, string[]][] = [
+    ["sample-rar5.cbr", ["-ma5"]],
+    ["password.cbr", ["-ma5", "-psumatra"]],
+  ];
+  for (const [name, opts] of variants) {
+    const dst = join(outDir, name);
+    rmSync(dst, { force: true });
+    if (run([t.rar!, "a", "-idq", "-ep", "-tl", ...opts, dst, ...names], work)) written.push(name);
+  }
+});
+
+withTools("cb7", ["7z"], (t, work) => {
+  const names = writeComicPages(work);
+  const dst = join(outDir, "sample.cb7");
+  rmSync(dst, { force: true });
+  if (run([t["7z"]!, "a", "-t7z", "-bd", "-mtm=off", "-mtc=off", "-mta=off", dst, ...names], work)) {
+    written.push("sample.cb7");
+  }
+});
+
+withTools("djvu", ["c44", "cjb2", "djvm", "djvused"], (t, work) => {
+  const w = 600;
+  const h = 800;
+  // page 1: color photo-like image (IW44), page 2: bitonal (JB2)
+  const gradient = (x: number, y: number): Rgb => [Math.floor((x * 255) / w), Math.floor((y * 255) / h), 140];
+  writeFileSync(join(work, "p1.ppm"), makePpm(w, h, gradient));
+  writeFileSync(
+    join(work, "p2.pbm"),
+    makePbm(w, h, (x, y) => x < 6 || y < 6 || x >= w - 6 || y >= h - 6 || (y > 100 && y < 130 && x > 60 && x < 540)),
+  );
+  const ok =
+    run([t.c44!, "-dpi", "100", "p1.ppm", "p1.djvu"], work) &&
+    run([t.cjb2!, "-dpi", "100", "p2.pbm", "p2.djvu"], work) &&
+    run([t.djvm!, "-c", "sample.djvu", "p1.djvu", "p2.djvu"], work);
+  if (!ok) return;
+  // hidden text layer (for search) + outline; DjVu coordinates have a bottom-left origin
+  const script = `select 1
+set-txt
+(page 0 0 ${w} ${h} (line 60 680 540 720 (word 60 680 260 720 "Wombat") (word 280 680 540 720 "burrows")))
+.
+select 2
+set-txt
+(page 0 0 ${w} ${h} (line 60 670 540 700 (word 60 670 300 700 "Second") (word 320 670 540 700 "page")))
+.
+select
+set-outline
+(bookmarks ("First DjVu page" "#1") ("Second DjVu page" "#2"))
+.
+set-meta
+title "DjVu mac fixture"
+.
+save
+`;
+  if (!run([t.djvused!, "sample.djvu", "-f", "/dev/stdin"], work, script)) return;
+  writeFileSync(join(outDir, "sample.djvu"), readFileSync(join(work, "sample.djvu")));
+  written.push("sample.djvu");
+});
+save("corrupt.djvu", concat([bytes("AT&TFORM\x00\x00\x10\x00DJVU"), new Uint8Array(400).fill(0x11)]));
+
+console.log(`wrote ${written.length} fixtures to ${outDir}`);
+for (const n of written) console.log(`  ${n}`);
+if (skipped.length > 0) {
+  console.log("skipped (kept committed file):");
+  for (const s of skipped) console.log(`  ${s}`);
+}

@@ -28,7 +28,11 @@ static void OutputDebugString(Str s) {
     if (str::IsNull(s)) {
         return;
     }
+#if OS_WIN
     OutputDebugStringA(CStrTemp(s));
+#else
+    fprintf(stderr, "%.*s", s.len, s.s);
+#endif
 }
 
 static void OutputDebugString(const char* s) {
@@ -72,9 +76,11 @@ void utassert_func(bool ok, Str exprStr, Str file, int lineNo) {
         fflush(stdout);
         return;
     }
+#if OS_WIN
     if (IsDebuggerPresent()) {
         DebugBreak();
     }
+#endif
 }
 
 int utassert_print_results() {

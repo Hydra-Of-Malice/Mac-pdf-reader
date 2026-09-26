@@ -1,6 +1,8 @@
 /* Copyright 2026 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD */
 
+// dbghelp.dll only exists on Windows; POSIX builds get no symbolized callstacks
+
 #include "base/Base.h"
 #include "base/DbgHelpDyn.h"
 
@@ -19,7 +21,8 @@ void GetAddressInfo(str::Builder& s, DWORD64 addr, bool /*compact*/) {
     s.Append(fmt("%p\n", p));
 }
 
-void WriteMiniDump(WStr /*crashDumpFilePath*/, MINIDUMP_EXCEPTION_INFORMATION* /*mei*/, bool /*fullDump*/) {}
+void WriteMiniDump(WStr /*crashDumpFilePath*/, MINIDUMP_EXCEPTION_INFORMATION* /*mei*/, bool /*fullDump*/,
+                   Str /*comment*/) {}
 
 void GetThreadCallstack(str::Builder& /*s*/, ThreadId /*threadId*/) {}
 
@@ -31,23 +34,11 @@ bool GetCurrentThreadCallstack(str::Builder& /*s*/) {
     return false;
 }
 
-void LogCallstack() {}
-
-void RememberCallstackLogs() {}
-
 TempStr GetCurrentThreadCallstackTemp() {
-    return "";
-}
-
-void FreeCallstackLogs() {}
-
-Str GetCallstacks() {
     return {};
 }
 
 void GetAllThreadsCallstacks(str::Builder& /*s*/) {}
-
-void GetAllThreadsCallstacksExcept(str::Builder& /*s*/, ThreadId /*skipThreadId*/) {}
 
 void GetExceptionInfo(str::Builder& /*s*/, EXCEPTION_POINTERS* /*excPointers*/) {}
 

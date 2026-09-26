@@ -6,6 +6,7 @@
 #include "base/ByteReaderWriter.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
+#include "base/Zip.h"
 
 #include "base/HtmlTags.h"
 #include "GumboHtmlParser.h"
@@ -366,9 +367,11 @@ bool ChmFile::Load(Str path) {
     FixPathCodepage(homePath, fileCodepage);
     FixPathCodepage(tocPath, fileCodepage);
     FixPathCodepage(indexPath, fileCodepage);
+#if OS_WIN
     if (GetACP() == codepage) {
         codepage = CP_ACP;
     }
+#endif
 
     if (!HasData(homePath)) {
         Str pathsToTest[] = {StrL("/index.htm"), StrL("/index.html"), StrL("/default.htm"), StrL("/default.html")};
@@ -671,12 +674,26 @@ static int ChmEntityByte(WCHAR c) {
     }
     // CP-1252 places a few chars (€ ‚ ƒ … Š Œ Ž ' ' " " – — Ÿ ...) above U+00FF
     // at bytes 0x80-0x9F; recover those too
+#if OS_WIN
     char b = 0;
     BOOL defUsed = FALSE;
     int n = WideCharToMultiByte(1252, WC_NO_BEST_FIT_CHARS, &c, 1, &b, 1, nullptr, &defUsed);
     if (n == 1 && !defUsed) {
         return (u8)b;
     }
+#else
+    // CP-1252 bytes 0x80-0x9F (0 = unassigned)
+    static const u16 kCp1252High[32] = {
+        0x20AC, 0,      0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+        0x2039, 0x0152, 0,      0x017D, 0,      0,      0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+        0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0,      0x017E, 0x0178,
+    };
+    for (int i = 0; i < dimofi(kCp1252High); i++) {
+        if (kCp1252High[i] == c) {
+            return 0x80 + i;
+        }
+    }
+#endif
     return -1;
 }
 
@@ -690,7 +707,11 @@ static int ChmEntityByte(WCHAR c) {
 // non-Latin bytes already converted by SmartToUtf8Temp) are left untouched, as
 // are pure-ASCII labels (issue #842).
 static TempStr FixChmTocEntitiesTemp(Str s, uint codepage) {
+#if OS_WIN
     uint cp = (codepage == CP_ACP) ? GetACP() : codepage;
+#else
+    uint cp = codepage;
+#endif
     if (len(s) == 0 || !ChmTocNeedsEntityRemap(cp)) {
         return s;
     }
@@ -795,4 +816,171 @@ ChmFile* ChmFile::CreateFromFile(Str path) {
         return nullptr;
     }
     return chmFile;
+}
+
+//--- CHM -> in-memory EPUB, so MuPDF can show it where ChmModel (IE) and EngineChm (GDI+) aren't built
+
+struct ChmTocCollector : EbookTocVisitor {
+    StrVec titles;
+    StrVec urls;
+    Vec<int> levels;
+
+    void Visit(Str name, Str url, int level) override {
+        titles.Append(name);
+        urls.Append(url);
+        VecAppend(levels, level);
+    }
+};
+
+static void AppendXmlEscapedChm(str::Builder& out, Str s) {
+    for (int i = 0; i < len(s); i++) {
+        char c = s.s[i];
+        if (c == '&') {
+            out.Append(StrL("&amp;"));
+        } else if (c == '<') {
+            out.Append(StrL("&lt;"));
+        } else if (c == '"') {
+            out.Append(StrL("&quot;"));
+        } else {
+            out.AppendChar(c);
+        }
+    }
+}
+
+static bool IsChmHtmlPath(Str path) {
+    return str::EndsWithI(path, StrL(".htm")) || str::EndsWithI(path, StrL(".html"));
+}
+
+static Str StripLeadingSlash(Str path) {
+    return (len(path) > 0 && path.s[0] == '/') ? Str(path.s + 1, len(path) - 1) : path;
+}
+
+// adds url's page (without #fragment) to pages unless it's there already
+static void AddChmPage(const ChmFile* doc, StrVec& pages, Str url) {
+    if (len(url) == 0 || url::IsAbsolute(url)) {
+        return;
+    }
+    TempStr path = url::GetFullPathTemp(StripLeadingSlash(url));
+    if (len(path) == 0 || pages.FindI(path) != -1 || !doc->HasData(path)) {
+        return;
+    }
+    pages.Append(path);
+}
+
+// NCX navMap from the CHM ToC; entries without a page link to the next one that has one
+static void AppendChmNavMap(str::Builder& ncx, const ChmTocCollector& toc, Str firstPage) {
+    int n = len(toc.titles);
+    Vec<int> openLevels;
+    for (int i = 0; i < n; i++) {
+        Str href;
+        for (int j = i; j < n && len(href) == 0; j++) {
+            if (len(toc.urls.At(j)) > 0 && !url::IsAbsolute(toc.urls.At(j))) {
+                href = StripLeadingSlash(toc.urls.At(j));
+            }
+        }
+        if (len(href) == 0) {
+            href = firstPage;
+        }
+        int level = toc.levels[i];
+        while (len(openLevels) > 0 && VecLast(openLevels) >= level) {
+            ncx.Append(StrL("</navPoint>\n"));
+            VecPop(openLevels);
+        }
+        ncx.Append(fmt("<navPoint id=\"n%d\" playOrder=\"%d\"><navLabel><text>", i + 1, i + 1));
+        AppendXmlEscapedChm(ncx, toc.titles.At(i));
+        ncx.Append(StrL("</text></navLabel><content src=\""));
+        AppendXmlEscapedChm(ncx, href);
+        ncx.Append(StrL("\"/>\n"));
+        VecAppend(openLevels, level);
+    }
+    while (len(openLevels) > 0) {
+        ncx.Append(StrL("</navPoint>\n"));
+        VecPop(openLevels);
+    }
+}
+
+// Pages in reading order: home page, ToC order, then the remaining HTML files
+// (same order as EngineChm). Every other file (images, CSS) is copied as is.
+// Pages without a charset declaration are converted from the CHM's codepage to UTF-8.
+Str ChmToEpubConvert(Str path) {
+    AutoDelete<ChmFile> doc(ChmFile::CreateFromFile(path));
+    if (!doc) {
+        return {};
+    }
+    StrVec pages;
+    TempStr home = ToUtf8Temp(strconv::StrCPToWStrTemp(doc->GetHomePath(), doc->codepage));
+    AddChmPage(doc, pages, home);
+    ChmTocCollector toc;
+    doc->ParseToc(&toc);
+    for (Str url : toc.urls) {
+        AddChmPage(doc, pages, url);
+    }
+    StrVec allPaths;
+    doc->GetAllPaths(&allPaths);
+    for (Str p : allPaths) {
+        if (IsChmHtmlPath(p)) {
+            AddChmPage(doc, pages, p);
+        }
+    }
+    if (len(pages) == 0) {
+        return {};
+    }
+
+    str::Builder opf;
+    opf.Append(
+        StrL("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+             "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\" unique-identifier=\"id\">\n"
+             "<metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:identifier id=\"id\">chm</dc:identifier>"
+             "<dc:title>"));
+    AppendXmlEscapedChm(opf, doc->GetPropertyTemp(DocProp::Title));
+    opf.Append(
+        StrL("</dc:title></metadata>\n<manifest>\n"
+             "<item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n"));
+    for (int i = 0; i < len(pages); i++) {
+        opf.Append(fmt("<item id=\"p%d\" href=\"", i));
+        AppendXmlEscapedChm(opf, pages.At(i));
+        opf.Append(StrL("\" media-type=\"application/xhtml+xml\"/>\n"));
+    }
+    opf.Append(StrL("</manifest>\n<spine toc=\"ncx\">\n"));
+    for (int i = 0; i < len(pages); i++) {
+        opf.Append(fmt("<itemref idref=\"p%d\"/>\n", i));
+    }
+    opf.Append(StrL("</spine>\n</package>\n"));
+
+    str::Builder ncx;
+    ncx.Append(
+        StrL("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+             "<ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" version=\"2005-1\"><head/><navMap>\n"));
+    AppendChmNavMap(ncx, toc, pages.At(0));
+    ncx.Append(StrL("</navMap></ncx>\n"));
+
+    str::Builder zipData;
+    ZipCreator zc(zipData);
+    bool ok = zc.AddFileData(StrL("mimetype"), StrL("application/epub+zip"));
+    ok &= zc.AddFileData(StrL("META-INF/container.xml"),
+                         StrL("<?xml version=\"1.0\"?>\n<container version=\"1.0\" "
+                              "xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\"><rootfiles>"
+                              "<rootfile full-path=\"content.opf\" media-type=\"application/oebps-package+xml\"/>"
+                              "</rootfiles></container>\n"));
+    ok &= zc.AddFileData(StrL("content.opf"), ToStrTemp(opf));
+    ok &= zc.AddFileData(StrL("toc.ncx"), ToStrTemp(ncx));
+    for (Str p : allPaths) {
+        Str name = StripLeadingSlash(p);
+        // skip CHM system files (#SYSTEM, $FIftiMain, ...)
+        if (!ok || len(name) == 0 || name.s[0] == '#' || name.s[0] == '$') {
+            continue;
+        }
+        TempStr data = doc->GetDataTemp(name);
+        if (IsChmHtmlPath(name)) {
+            Str head = Str(data.s, std::min(len(data), 1024));
+            if (!str::ContainsI(head, StrL("charset="))) {
+                data = SmartToUtf8Temp(data, doc->codepage);
+            }
+        }
+        ok = zc.AddFileData(name, data);
+    }
+    if (!ok || !zc.Finish()) {
+        return {};
+    }
+    return zipData.TakeStr();
 }

@@ -1,6 +1,8 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
+// POSIX (macOS, Linux) versions of the OS-specific parts of File.cpp
+
 #include "base/Base.h"
 
 #include <dirent.h>
@@ -10,18 +12,21 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
-#if OS_DARWIN
+#if OS_MAC
 #include <mach-o/dyld.h>
 #endif
 
 #include "base/File.h"
+
+// we pad data read with 3 zeros for convenience, like File.cpp
+constexpr int kZeroPaddingCount = 3;
 
 static char* PathZTemp(Str path) {
     return CStrTemp(path);
 }
 
 static bool StatPath(Str path, struct stat& st) {
-    if (!path) {
+    if (len(path) == 0) {
         return false;
     }
     return stat(PathZTemp(path), &st) == 0;
@@ -39,7 +44,7 @@ static u64 FileTimeToNs(FILETIME ft) {
     return ((u64)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
 }
 
-#if defined(__APPLE__)
+#if OS_MAC
 static timespec StatAccessTime(const struct stat& st) {
     return st.st_atimespec;
 }
@@ -104,7 +109,7 @@ DWORD GetCachedAttributes(Str path) {
 TempStr NormalizeTemp(Str path) {
     char resolved[PATH_MAX];
     if (realpath(PathZTemp(path), resolved)) {
-        return str::DupTemp(resolved);
+        return str::DupTemp(Str(resolved));
     }
     if (IsAbsolute(path)) {
         return str::DupTemp(path);
@@ -157,14 +162,14 @@ bool IsOnFixedDrive(Str /*path*/) {
 }
 
 bool IsOnAvailableDrive(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return false;
     }
     if (file::Exists(path) || dir::Exists(path)) {
         return true;
     }
     TempStr dir = path::GetDirTemp(path);
-    if (!dir || str::Eq(dir, path)) {
+    if (len(dir) == 0 || str::Eq(dir, path)) {
         return false;
     }
     return dir::Exists(dir);
@@ -175,7 +180,7 @@ bool SupportsChangeNotifications(Str /*path*/) {
 }
 
 bool IsAbsolute(Str path) {
-    return path && IsSep(path.s[0]);
+    return len(path) > 0 && IsSep(path.s[0]);
 }
 
 TempStr GetNonVirtualTemp(Str virtualPath) {
@@ -189,8 +194,8 @@ TempStr GetTempFilePathTemp(Str filePrefix) {
     if (!tmpDir || !tmpDir[0]) {
         tmpDir = "/tmp";
     }
-    if (!filePrefix) {
-        return str::DupTemp(tmpDir);
+    if (len(filePrefix) == 0) {
+        return str::DupTemp(Str(tmpDir));
     }
 
     TempStr name = fmt("%sXXXXXX", filePrefix);
@@ -206,7 +211,7 @@ TempStr GetTempFilePathTemp(Str filePrefix) {
 
 // Path of this process image (exe or DLL that contains this code).
 TempStr GetSelfExePathTemp() {
-#if OS_DARWIN
+#if OS_MAC
     char buf[PATH_MAX];
     uint32_t size = sizeof(buf);
     if (_NSGetExecutablePath(buf, &size) != 0) {
@@ -214,9 +219,9 @@ TempStr GetSelfExePathTemp() {
     }
     char resolved[PATH_MAX];
     if (realpath(buf, resolved)) {
-        return str::DupTemp(resolved);
+        return str::DupTemp(Str(resolved));
     }
-    return str::DupTemp(buf);
+    return str::DupTemp(Str(buf));
 #else
     char buf[PATH_MAX];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -224,14 +229,14 @@ TempStr GetSelfExePathTemp() {
         return {};
     }
     buf[n] = 0;
-    return str::DupTemp(buf);
+    return str::DupTemp(Str(buf));
 #endif
 }
 
 // Directory containing GetSelfExePathTemp().
 TempStr GetSelfExeDirTemp() {
     TempStr path = GetSelfExePathTemp();
-    if (!path) {
+    if (len(path) == 0) {
         return {};
     }
     return path::GetDirTemp(path);
@@ -239,7 +244,7 @@ TempStr GetSelfExeDirTemp() {
 
 TempStr GetPathInExeDirTemp(Str fileName) {
     TempStr dir = GetSelfExeDirTemp();
-    if (!dir) {
+    if (len(dir) == 0) {
         char cwd[PATH_MAX];
         if (!getcwd(cwd, sizeof(cwd))) {
             return fileName;
@@ -252,8 +257,8 @@ TempStr GetPathInExeDirTemp(Str fileName) {
 namespace file {
 
 FILE* OpenFILE(Str path) {
-    ReportIf(!path);
-    if (!path) {
+    ReportIf(len(path) == 0);
+    if (len(path) == 0) {
         return nullptr;
     }
     return fopen(PathZTemp(path), "rb");
@@ -263,85 +268,17 @@ FileHandle OpenReadOnly(Str path) {
     return open(PathZTemp(path), O_RDONLY);
 }
 
-// Opens path for reading and writing, creating it when createIfMissing.
-FileHandle OpenReadWrite(Str path, bool createIfMissing) {
-    int flags = O_RDWR | (createIfMissing ? O_CREAT : 0);
-    return open(PathZTemp(path), flags, 0666);
-}
-
 void Close(FileHandle h) {
     if (h != kInvalidFileHandle) {
         close(h);
     }
 }
 
-// Moves the file position to the end and returns it, i.e. the current file
-// size, or -1 on failure. That offset is where the next write lands.
-i64 SeekEnd(FileHandle h) {
-    off_t pos = lseek(h, 0, SEEK_END);
-    if (pos < 0) {
-        return -1;
-    }
-    return (i64)pos;
-}
-
-// Writes all of data at the current file position, looping over partial writes.
-bool WriteAll(FileHandle h, Str data) {
-    const char* d = data.s;
-    size_t left = (size_t)data.len;
-    while (left > 0) {
-        ssize_t n = write(h, d, left);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return false;
-        }
-        d += n;
-        left -= (size_t)n;
-    }
-    return true;
-}
-
-// Reads exactly size bytes at offset; a short read (e.g. hitting the end of
-// the file) is a failure. pread() doesn't move the file position, but the
-// Windows implementation does, so callers must not rely on either.
-bool ReadAt(FileHandle h, i64 offset, void* buf, int size) {
-    char* d = (char*)buf;
-    int left = size;
-    while (left > 0) {
-        ssize_t n = pread(h, d, (size_t)left, (off_t)offset);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return false;
-        }
-        if (n == 0) {
-            return false;
-        }
-        d += n;
-        offset += n;
-        left -= (int)n;
-    }
-    return true;
-}
-
 bool Flush(FileHandle h) {
     return fsync(h) == 0;
 }
 
-// Text of the error left behind by the last failed call, for error messages.
-TempStr LastErrorTemp() {
-    return str::DupTemp(Str(strerror(errno)));
-}
-
-bool Exists(Str path) {
-    struct stat st;
-    return StatPath(path, st) && S_ISREG(st.st_mode);
-}
-
-i64 GetSize(FileHandle h) {
+static i64 GetSizeFromHandle(FileHandle h) {
     if (h == kInvalidFileHandle) {
         return -1;
     }
@@ -352,8 +289,63 @@ i64 GetSize(FileHandle h) {
     return (i64)st.st_size;
 }
 
+Str ReadFileWithArena(Str filePath, Arena* a) {
+    ReportIf(len(filePath) == 0);
+    int fd = OpenReadOnly(filePath);
+    if (fd < 0) {
+        return {};
+    }
+    AutoCall closeFile(close, fd);
+
+    i64 fileSize = GetSizeFromHandle(fd);
+    if (fileSize < 0 || fileSize > (i64)(INT_MAX - kZeroPaddingCount)) {
+        return {};
+    }
+    int size = (int)fileSize;
+    char* d = (char*)Alloc(a, (size_t)size + kZeroPaddingCount);
+    if (!d) {
+        return {};
+    }
+    memset(d + size, 0, kZeroPaddingCount);
+
+    int nTotal = 0;
+    while (nTotal < size) {
+        ssize_t n = read(fd, d + nTotal, (size_t)(size - nTotal));
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            logf("ReadFileWithArena: read() failed, path: '%s', size: %d, nRead: %d, errno: %d\n", filePath, size,
+                 nTotal, errno);
+            Free(a, (void*)d);
+            return {};
+        }
+        nTotal += (int)n;
+    }
+    return Str(d, size);
+}
+
+int ReadN(Str path, u8* buf, size_t toRead) {
+    FILE* fp = OpenFILE(path);
+    if (!fp) {
+        return -1;
+    }
+    AutoCall closeFile(fclose, fp);
+    ZeroMemory(buf, toRead);
+    size_t nRead = fread((void*)buf, 1, toRead, fp);
+    if (nRead == 0 && ferror(fp)) {
+        return -1;
+    }
+    return (int)nRead;
+}
+
+bool Exists(Str path) {
+    struct stat st;
+    return StatPath(path, st) && S_ISREG(st.st_mode);
+}
+
 i64 GetSize(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return -1;
     }
     struct stat st;
@@ -375,7 +367,7 @@ bool MemoryMap(Str path, Mapping* res) {
     if (fd < 0) {
         return false;
     }
-    i64 size = GetSize(fd);
+    i64 size = GetSizeFromHandle(fd);
     if (size <= 0) {
         close(fd);
         return false;
@@ -422,7 +414,7 @@ bool WriteFile(Str path, Str d) {
 }
 
 bool Delete(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return false;
     }
     if (unlink(PathZTemp(path)) == 0) {
@@ -493,14 +485,6 @@ bool Copy(Str dst, Str src, bool dontOverwrite, const CopyProgressCb& cbProgress
     }
 }
 
-FILETIME GetAccessTime(Str path) {
-    struct stat st;
-    if (!StatPath(path, st)) {
-        return {};
-    }
-    return FileTimeFromTimespec(StatAccessTime(st));
-}
-
 bool SetAccessTime(Str path, FILETIME accessTime) {
     struct stat st;
     if (!StatPath(path, st)) {
@@ -556,7 +540,7 @@ bool DeleteZoneIdentifier(Str /*path*/) {
 }
 
 bool Rename(Str newPath, Str oldPath) {
-    if (!newPath || !oldPath) {
+    if (len(newPath) == 0 || len(oldPath) == 0) {
         return false;
     }
     return rename(PathZTemp(oldPath), PathZTemp(newPath)) == 0;
@@ -568,7 +552,7 @@ bool RenameReplace(Str newPath, Str oldPath) {
 }
 
 bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
-    if (!dst || !src) {
+    if (len(dst) == 0 || len(src) == 0) {
         return false;
     }
 
@@ -611,16 +595,6 @@ int FileTimeDiffInSecs(const FILETIME& ft1, const FILETIME& ft2) {
 
 namespace dir {
 
-bool Exists(WStr dir) {
-    TempStr dirUtf8 = ToUtf8Temp(dir);
-    return Exists(dirUtf8);
-}
-
-bool Exists(Str dir) {
-    struct stat st;
-    return StatPath(dir, st) && S_ISDIR(st.st_mode);
-}
-
 bool Create(Str dir) {
     if (mkdir(PathZTemp(dir), 0777) == 0) {
         return true;
@@ -633,14 +607,14 @@ bool CreateAll(Str dir, int* errOut) {
     if (errOut) {
         *errOut = 0;
     }
-    if (!dir) {
+    if (len(dir) == 0) {
         return false;
     }
     if (Exists(dir)) {
         return true;
     }
     TempStr parent = path::GetDirTemp(dir);
-    if (!str::Eq(parent, dir) && parent && !str::Eq(parent, StrL("."))) {
+    if (!str::Eq(parent, dir) && len(parent) > 0 && !str::Eq(parent, StrL("."))) {
         if (!Exists(parent) && !CreateAll(parent, errOut)) {
             return false;
         }
@@ -706,7 +680,7 @@ bool Empty(Str dir) {
 }
 
 bool HasWriteAccess(Str dir) {
-    if (!dir) {
+    if (len(dir) == 0) {
         return false;
     }
     TempStr path = path::JoinTemp(dir, StrL("__sumatra_write_test__.tmp"));
@@ -720,23 +694,3 @@ bool HasWriteAccess(Str dir) {
 }
 
 } // namespace dir
-
-TempStr GetHomeDirTemp() {
-    const char* home = getenv("HOME");
-    if (!home || !home[0]) {
-        return {};
-    }
-    return str::DupTemp(home);
-}
-
-TempStr ExpandEnvVarTemp(Str varName) {
-    const char* val = getenv(CStrTemp(varName));
-    if (!val) {
-        return {};
-    }
-    return str::DupTemp(val);
-}
-
-TempStr ToAbsolutePathTemp(Str path) {
-    return path::NormalizeTemp(path);
-}

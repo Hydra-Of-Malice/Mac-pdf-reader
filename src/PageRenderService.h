@@ -17,6 +17,7 @@ struct PageRenderService {
     static PageRenderService* Create(EngineBase* engine, const Func0& onPageReady, i64 maxBytes = 96LL * 1024 * 1024);
 
     void NewGeneration();
+    void CancelRequests();
     void Request(PageRenderKey key, PageRenderPriority priority);
     Pixmap* CopyPage(PageRenderKey key);
     bool DrawPage(Gfx* gfx, PageRenderKey key, const Rect& target);

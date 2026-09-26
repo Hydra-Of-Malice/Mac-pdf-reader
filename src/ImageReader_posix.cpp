@@ -1,32 +1,64 @@
 /* Copyright 2026 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
+// POSIX (macOS, Linux) image decoding: MuPDF first, then our own decoders for
+// the formats it doesn't handle. Windows (GDI+ / WIC) is in ImageReader.cpp.
+
 #include "base/Base.h"
+#include "base/GuessFileType.h"
 #include "base/Pixmap.h"
+#include "base/TgaReader.h"
+
+#include "AvifReader.h"
+#include "JxlReader.h"
+#include "WebpReader.h"
 
 #include "ImageReader.h"
 
+static Pixmap* PixmapFromOwnDecoders(Str d, FileType kind) {
+    switch (kind) {
+        case FileType::Tga:
+            return tga::PixmapFromData(d);
+        case FileType::Webp:
+            return webp::PixmapFromData(d);
+        case FileType::Jxl:
+            return jxl::PixmapFromData(d);
+        case FileType::Heic:
+        case FileType::Avif:
+            return PixmapFromAvifData(d);
+        default:
+            return nullptr;
+    }
+}
+
 // Decode image bytes to a single (first-frame) Pixmap. Caller owns it (FreePixmap).
-// Windows: JPEG→turbo, WebP→libwebp, JXL→jxldec; HEIC/AVIF→heicdec then WIC in
-// Debug, WIC then heicdec in Release; else TGA/GDI+/WIC. POSIX: MuPDF for now.
 Pixmap* PixmapFromData(Str bmpData) {
     if (ImageDecodedPixmapWouldBeHuge(bmpData)) {
         return nullptr;
     }
-    return PixmapFromDataFz(bmpData);
+    FileType kind = GuessFileTypeFromData(bmpData);
+    Pixmap* px = PixmapFromDataFz(bmpData);
+    if (!px) {
+        return PixmapFromOwnDecoders(bmpData, kind);
+    }
+    // mupdf doesn't apply a WebP's EXIF orientation
+    if (kind == FileType::Webp) {
+        px = PixmapApplyExifOrientation(px, WebpExifOrientation(bmpData));
+    }
+    return px;
 }
 
-// One Pixmap per frame (multi-page TIFF / animated GIF yield >1); caller owns each.
+// One Pixmap per frame; only the first frame of multi-frame TIFF / GIF for now.
 Vec<Pixmap*> PixmapsFromData(Str bmpData) {
     Vec<Pixmap*> res;
     Pixmap* px = PixmapFromData(bmpData);
     if (px) {
-        res.Append(px);
+        VecAppend(res, px);
     }
     return res;
 }
 
-// Load path into a RenderedBitmap (Windows); nullptr on POSIX for now.
-RenderedBitmap* LoadRenderedBitmap(Str /*path*/) {
+// RenderedBitmap wraps a GDI HBITMAP, which POSIX doesn't have
+RenderedBitmap* LoadRenderedBitmap(Str) {
     return nullptr;
 }

@@ -1,4 +1,4 @@
-This is a C++ program for Windows, using mostly win32 windows API functions. It is Windows-only: the macOS and Linux ports (`src/mac/`, `src/linux/`, their GUI backends and their CI) were removed.
+This is a C++ program for Windows, using mostly win32 windows API functions. There is also a native macOS (AppKit) port that reuses the portable engine code; see **macOS port** below. The Linux port was removed.
 
 We don't use STL but our own string / helper / container functions implemented in src\base directory
 
@@ -41,6 +41,16 @@ Never commit changes automatically. Always wait for explicit command to commit c
 When committing a fix for a GitHub issue, end the commit message's **first line** with `(fixes #<issue-no>)`, e.g. `fix crash on committing an empty zoom value (fixes #5909)`. That is the line GitHub shows everywhere, so the link belongs there, not buried in the body.
 
 When committing work done with AI assistance, append the user prompt(s) that produced the change at the very end of the commit message as a single line: `prompt: ...`. If there were multiple prompts, squash them into one concise line. Record the substantive request only — omit meta-instructions such as "commit", "push", "check work", or "verify".
+
+## macOS port
+
+Code: `src/mac/` (Cocoa app `SumatraMac.mm`, plain-C bridge `SumatraMacEngine.*`, settings `MacPrefs.*`), `src/gui/mac/` (Cocoa implementations of portable GUI interfaces), `*_posix.cpp` (POSIX implementations, e.g. `src/base/File_posix.cpp`), bundle resources in `src/mac/Resources/`. Docs: `docs/mac/README.md`.
+
+- Build on a Mac: `bun cmd/build.ts -mac -dbg` (or `-rel` / `-asan`). It builds the deps, runs `test_util -for-ai`, builds `test_engines` and `out/mac-dbg64/SumatraPDF.app`, and packages it; see `docs/mac/BUILDING.md`. From Windows, `bun cmd/build.ts -mac-remote -branch <branch> -dbg` builds a pushed branch on the remote Mac (pushing needs the user's permission).
+- Cocoa / Objective-C code goes in `.mm` files, which must **not** include `base/Base.h` or other Sumatra headers (Apple headers clash, e.g. `Size`). They reach C++ only through plain-C bridge headers such as `src/mac/SumatraMacEngine.h`.
+- Platform suffixes: `_posix` for code shared by Unix-like targets, `_mac` for macOS-only; keep portable code in unsuffixed files. Add new mac sources to `MAC_APP_SOURCES` in `cmd/helper/mac-build.ts`.
+- Keep the Windows build working: don't let `premake5.files.lua` pick up `*_posix.cpp`, `*_mac.cpp` or `src/mac/`, and check `bun cmd/build.ts -dbg` after touching shared code.
+- Document types and bundle metadata: `src/mac/Resources/Info.plist`; icon: `bun cmd/gen-mac-icon.ts`. A new library linked into the app needs a license entry in `cmd/helper/mac-bundle.ts` (the build fails without one).
 
 # Generic coding rules
 

@@ -18,9 +18,9 @@ bool ShowPasswordDialog(const PasswordDialogArgs& args, PasswordDialogResult* re
     result->showPassword = args.showPassword;
     char* password = nullptr;
     int passwordLen = 0;
-    result->accepted = MacGuiShowPasswordDialog(args.parent, args.fileName.s, len(args.fileName), args.canRemember,
-                                                args.rememberPassword, args.showPassword, &result->rememberPassword,
-                                                &result->showPassword, &password, &passwordLen);
+    result->accepted = MacGuiShowPasswordDialog(
+        args.parent, args.fileName.s, len(args.fileName), args.isRetry, args.canRemember, args.rememberPassword,
+        args.showPassword, &result->rememberPassword, &result->showPassword, &password, &passwordLen);
     if (result->accepted) {
         result->password = Str(password, passwordLen);
     } else {

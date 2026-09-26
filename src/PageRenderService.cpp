@@ -237,6 +237,14 @@ void PageRenderService::NewGeneration() {
     }
 }
 
+// Drops queued requests (e.g. pages scrolled out of view); keeps the render
+// in progress and the cache.
+void PageRenderService::CancelRequests() {
+    auto* serviceData = ServiceData(this);
+    AutoUnlockMutex lock(&serviceData->mutex);
+    VecReset(serviceData->requests);
+}
+
 void PageRenderService::Request(PageRenderKey key, PageRenderPriority priority) {
     auto* serviceData = ServiceData(this);
     AutoUnlockMutex lock(&serviceData->mutex);

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+ <description>
+  <title-info>
+   <genre>prose</genre>
+   <author><first-name>Tests</first-name><last-name>Mac</last-name></author>
+   <book-title>FB2 mac fixture</book-title>
+   <lang>en</lang>
+  </title-info>
+ </description>
+ <body>
+  <section><title><p>Chapter One</p></title>
+   <p>The echidna is a spiny anteater.</p>
+   <image l:href="#pic1"/>
+  </section>
+  <section><title><p>Chapter Two</p></title>
+   <p>The dingo is a wild dog.</p>
+  </section>
+ </body>
+ <binary id="pic1" content-type="image/png">iVBORw0KGgoAAAANSUhEUgAAADAAAABACAIAAADTQmMRAAAA4ElEQVR4nO3ZMQ6EIBCFYettvMY23sBje0A7iw3swAwzz+JPaDVfHgi8uH2O/VVjkwsARRL6Xuf48D1lvsQJStI4QXkaDyhVMw3K1syBCjQToBrNKKhMMwSq1NigYo0Bqtf8A0k0XZBK0wYJNQ2QVvMLkmvaIKGmAdJq/Be0JE3oCpuhWQNaG3AUtHy6Q6CMxUcNsgKmBlmLjxpEDYpuWtQga+OmBvkSogb1E5JfZ6lBswmpZsp52mdrqEEDAVODrMVHDbI+TGqQtWlRg6hB0cOOGhS5fvA3qJ8QNeh8srgBdS+gv/88if0AAAAASUVORK5CYII=</binary>
+</FictionBook>

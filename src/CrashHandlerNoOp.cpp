@@ -8,7 +8,9 @@ void CrashHandlerSetSettings(Str) {}
 
 void _uploadDebugReport(Str /*condStr*/, Str /*fileLine*/, bool /*isCrash*/) {
     // outside of SumatraPDF binary, this only breaks if running under debugger
+#if OS_WIN
     if (IsDebuggerPresent()) {
         DebugBreak();
     }
+#endif
 }

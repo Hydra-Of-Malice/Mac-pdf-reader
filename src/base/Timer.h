@@ -12,6 +12,7 @@
 // A single tick is well under a microsecond, so printing TimeSinceInMs()
 // with 3 decimals (microseconds) is meaningful.
 
+#if OS_WIN
 using TimeStamp = LARGE_INTEGER;
 
 inline TimeStamp TimeGet() {
@@ -29,3 +30,17 @@ inline double TimeSinceInMs(TimeStamp start) {
     LARGE_INTEGER t = TimeGet();
     return (double)(t.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
 }
+#else
+// POSIX: CLOCK_MONOTONIC in nanoseconds
+using TimeStamp = i64;
+
+inline TimeStamp TimeGet() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((i64)ts.tv_sec * 1000000000) + ts.tv_nsec;
+}
+
+inline double TimeSinceInMs(TimeStamp start) {
+    return (double)(TimeGet() - start) / 1000000.0;
+}
+#endif

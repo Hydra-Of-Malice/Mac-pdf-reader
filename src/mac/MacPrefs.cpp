@@ -3,15 +3,40 @@
 
 #include "base/Base.h"
 #include "base/File.h"
+#include "base/SettingsUtil.h"
 
+#define INCLUDE_SETTINGSSTRUCTS_METADATA
 #include "Settings.h"
 #include "DisplayMode.h"
-#include "GlobalPrefs.h"
 #include "mac/MacPrefs.h"
 
+// the Windows app's settings file format (Settings.h), without AppSettings.cpp
+// and the Win32 UI it depends on
+static Settings* gGlobalPrefs = nullptr;
 static Str gSettingsPath;
 static Str gPreviousSettings;
 static SessionData* gBuildingSession = nullptr;
+
+static FileState* NewFileState(Str filePath) {
+    auto* fs = (FileState*)DeserializeStruct(&gFileStateInfo, {});
+    str::ReplaceWithCopy(&fs->filePath, filePath);
+    return fs;
+}
+
+static Favorite* NewFavorite(int pageNo) {
+    auto* fav = (Favorite*)DeserializeStruct(&gFavoriteInfo, {});
+    str::ReplaceWithCopy(&fav->pageNo, fmt("%d", pageNo));
+    return fav;
+}
+
+// FileState / TabState / Favorite PageNo: a page number, or "bm:<bookmark>"
+// written by the Windows app for chaptered documents
+static int PageNoFromStored(Str stored) {
+    if (str::StartsWith(stored, StrL("bm:"))) {
+        return 1;
+    }
+    return std::max(ParseInt(stored), 1);
+}
 
 static char* CopyCString(Str value) {
     char* result = (char*)malloc((size_t)len(value) + 1);
@@ -35,9 +60,9 @@ static FileState* FindFileState(Str path) {
 }
 
 static void MoveFileStateToFront(FileState* state) {
-    Vec<FileState*>* states = gGlobalPrefs->fileStates;
-    states->Remove(state);
-    states->InsertAt(0, state);
+    Vec<FileState*>& states = *gGlobalPrefs->fileStates;
+    VecRemove(states, state);
+    VecInsertAt(states, 0, state);
 }
 
 static void StateFromFileState(FileState* fileState, MacPrefsViewState* state) {
@@ -50,7 +75,7 @@ static void StateFromFileState(FileState* fileState, MacPrefsViewState* state) {
     state->continuous = IsContinuous(mode);
     state->zoomVirtual = ZoomFromString(fileState->zoom, kZoomFitWidth);
     state->rotation = fileState->rotation;
-    state->pageNo = fileState->pageNo;
+    state->pageNo = PageNoFromStored(fileState->pageNo);
 }
 
 static void SaveState(FileState* fileState, const MacPrefsViewState* state) {
@@ -60,7 +85,7 @@ static void SaveState(FileState* fileState, const MacPrefsViewState* state) {
     fileState->useDefaultState = false;
     DisplayMode mode = state->continuous ? DisplayMode::Continuous : DisplayMode::SinglePage;
     str::ReplaceWithCopy(&fileState->displayMode, DisplayModeToString(mode));
-    fileState->pageNo = state->pageNo;
+    str::ReplaceWithCopy(&fileState->pageNo, fmt("%d", state->pageNo));
     ZoomToString(&fileState->zoom, (float)state->zoomVirtual, fileState);
     fileState->rotation = state->rotation;
 }
@@ -79,19 +104,21 @@ void MacPrefsInit(const char* settingsPath) {
     }
     gSettingsPath = str::Dup(Str((char*)settingsPath));
     gPreviousSettings = file::ReadFile(gSettingsPath);
-    gGlobalPrefs = NewGlobalPrefs(gPreviousSettings);
+    gGlobalPrefs = (Settings*)DeserializeStruct(&gSettingsInfo, gPreviousSettings);
 }
 
 void MacPrefsShutdown() {
     if (gGlobalPrefs && gSettingsPath) {
-        Str serialized = SerializeGlobalPrefs(gGlobalPrefs, gPreviousSettings);
+        Str serialized = SerializeStruct(&gSettingsInfo, gGlobalPrefs, gPreviousSettings);
         if (dir::CreateForFile(gSettingsPath) && file::WriteFile(gSettingsPath, serialized)) {
             str::Free(gPreviousSettings);
             gPreviousSettings = str::Dup(serialized);
         }
         str::Free(serialized);
     }
-    DeleteGlobalPrefs(gGlobalPrefs);
+    if (gGlobalPrefs) {
+        FreeStruct(&gSettingsInfo, gGlobalPrefs);
+    }
     gGlobalPrefs = nullptr;
     str::Free(gPreviousSettings);
     str::Free(gSettingsPath);
@@ -136,13 +163,16 @@ void MacPrefsBeginSession() {
     if (!gGlobalPrefs || !gGlobalPrefs->sessionData) {
         return;
     }
-    FreeSessionDataVec(gGlobalPrefs->sessionData);
+    for (SessionData* data : *gGlobalPrefs->sessionData) {
+        FreeStruct(&gSessionDataInfo, data);
+    }
+    VecReset(*gGlobalPrefs->sessionData);
     gBuildingSession = nullptr;
     if (!gGlobalPrefs->rememberOpenedFiles) {
         return;
     }
-    gBuildingSession = NewSessionData();
-    gGlobalPrefs->sessionData->Append(gBuildingSession);
+    gBuildingSession = (SessionData*)DeserializeStruct(&gSessionDataInfo, {});
+    VecAppend(*gGlobalPrefs->sessionData, gBuildingSession);
 }
 
 void MacPrefsAppendSession(const char* path, const MacPrefsViewState* state) {
@@ -154,7 +184,13 @@ void MacPrefsAppendSession(const char* path, const MacPrefsViewState* state) {
     if (!fileState) {
         return;
     }
-    gBuildingSession->tabStates->Append(NewTabState(fileState));
+    auto* tab = (TabState*)DeserializeStruct(&gTabStateInfo, {});
+    str::ReplaceWithCopy(&tab->filePath, fileState->filePath);
+    str::ReplaceWithCopy(&tab->displayMode, fileState->displayMode);
+    str::ReplaceWithCopy(&tab->pageNo, fileState->pageNo);
+    str::ReplaceWithCopy(&tab->zoom, fileState->zoom);
+    tab->rotation = fileState->rotation;
+    VecAppend(*gBuildingSession->tabStates, tab);
 }
 
 void MacPrefsFinishSession(int activeTab) {
@@ -162,8 +198,8 @@ void MacPrefsFinishSession(int activeTab) {
         return;
     }
     if (len(*gBuildingSession->tabStates) == 0) {
-        gGlobalPrefs->sessionData->Remove(gBuildingSession);
-        FreeSessionData(gBuildingSession);
+        VecRemove(*gGlobalPrefs->sessionData, gBuildingSession);
+        FreeStruct(&gSessionDataInfo, gBuildingSession);
     } else {
         gBuildingSession->tabIndex = limitValue(activeTab + 1, 1, len(*gBuildingSession->tabStates));
     }
@@ -191,7 +227,7 @@ char* MacPrefsCopySessionTab(int index, MacPrefsViewState* state) {
         state->continuous = IsContinuous(DisplayModeFromString(tab->displayMode, DisplayMode::Continuous));
         state->zoomVirtual = ZoomFromString(tab->zoom, kZoomFitWidth);
         state->rotation = tab->rotation;
-        state->pageNo = tab->pageNo;
+        state->pageNo = PageNoFromStored(tab->pageNo);
     }
     return CopyCString(tab->filePath);
 }
@@ -207,7 +243,7 @@ int MacPrefsRecentCount() {
     }
     int count = 0;
     for (FileState* state : *gGlobalPrefs->fileStates) {
-        if (!state->isMissing && state->filePath && ++count == 10) {
+        if (!state->isMissing && len(state->filePath) > 0 && ++count == 10) {
             break;
         }
     }
@@ -219,7 +255,7 @@ char* MacPrefsCopyRecentPath(int index) {
         return nullptr;
     }
     for (FileState* state : *gGlobalPrefs->fileStates) {
-        if (state->isMissing || !state->filePath) {
+        if (state->isMissing || len(state->filePath) == 0) {
             continue;
         }
         if (index-- == 0) {
@@ -234,7 +270,7 @@ static Favorite* FindFavorite(FileState* state, int pageNo) {
         return nullptr;
     }
     for (Favorite* favorite : *state->favorites) {
-        if (!favorite->isTemporary && favorite->pageNo == pageNo) {
+        if (!favorite->isTemporary && PageNoFromStored(favorite->pageNo) == pageNo) {
             return favorite;
         }
     }
@@ -254,7 +290,7 @@ bool MacPrefsAddFavorite(const char* path, int pageNo) {
     if (FindFavorite(state, pageNo)) {
         return false;
     }
-    state->favorites->Append(NewFavorite(pageNo, {}, {}));
+    VecAppend(*state->favorites, NewFavorite(pageNo));
     return true;
 }
 
@@ -264,8 +300,8 @@ bool MacPrefsRemoveFavorite(const char* path, int pageNo) {
     if (!favorite) {
         return false;
     }
-    state->favorites->Remove(favorite);
-    DeleteFavorite(favorite);
+    VecRemove(*state->favorites, favorite);
+    FreeStruct(&gFavoriteInfo, favorite);
     return true;
 }
 
@@ -317,5 +353,5 @@ char* MacPrefsCopyFavoritePath(int index) {
 int MacPrefsFavoritePage(int index) {
     FileState* state = nullptr;
     Favorite* favorite = FavoriteAt(index, &state);
-    return favorite ? favorite->pageNo : 0;
+    return favorite ? PageNoFromStored(favorite->pageNo) : 0;
 }

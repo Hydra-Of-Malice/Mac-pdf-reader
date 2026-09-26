@@ -2,7 +2,9 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
+#if OS_WIN
 #include "base/AutoWin.h"
+#endif
 
 #include "base/File.h"
 
@@ -30,6 +32,8 @@ bool FileTimeEq(const FILETIME& a, const FILETIME& b) {
     return a.dwLowDateTime == b.dwLowDateTime && a.dwHighDateTime == b.dwHighDateTime;
 }
 
+// the POSIX versions of the OS-specific functions are in File_posix.cpp
+#if OS_WIN
 // Defined in Win.cpp; avoid pulling all of Win.h into this file.
 void LogLastError(DWORD err = 0);
 Str GetLastErrorAsStr(Arena* arena);
@@ -122,6 +126,7 @@ int FileTimeDiffInSecs(const FILETIME& ft1, const FILETIME& ft2) {
     diff = diff / (LONGLONG)10000000L;
     return (int)diff;
 }
+#endif
 
 namespace path {
 
@@ -196,7 +201,7 @@ TempStr JoinTemp(Str dir, Str name, Str name2) {
 }
 
 TempWStr JoinTemp(WStr dir, WStr name, WStr name2) {
-    return JoinTempT(dir, name, name2, WStrL(L"\\"));
+    return JoinTempT(dir, name, name2, WStr(kPathSepWStr));
 }
 
 Str Join(Arena* a, Str dir, Str name) {
@@ -250,7 +255,11 @@ TempStr GetPathNoExtTemp(Str path) {
 }
 
 TempStr ToOSTemp(Str path) {
+#if OS_WIN
     return str::ReplaceTemp(path, StrL("/"), StrL("\\"));
+#else
+    return str::ReplaceTemp(path, StrL("\\"), StrL("/"));
+#endif
 }
 
 static Str AdvanceUntilWildcardMatch(Str fileName, Str filter);
@@ -355,6 +364,7 @@ TempStr WindowsToWslMountTemp(Str path) {
     return fmt("/mnt/%c/%s", drive, rest);
 }
 
+#if OS_WIN
 Type GetType(Str path) {
     DWORD attrs = GetCachedAttributes(path);
     if (attrs == INVALID_FILE_ATTRIBUTES) {
@@ -1086,6 +1096,7 @@ TempStr GetNonVirtualTemp(Str virtualPath) {
     str::TrimPrefix(res, StrL("\\\\?\\"));
     return res;
 }
+#endif
 
 } // namespace path
 
@@ -1108,6 +1119,7 @@ bool StartsWith(Str path, Str s) {
     return MemEq(buf, s.s, s.len);
 }
 
+#if OS_WIN
 FILE* OpenFILE(Str path) {
     ReportIf(len(path) == 0);
     if (len(path) == 0) {
@@ -1525,6 +1537,7 @@ bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
     Delete(tempPath);
     return false;
 }
+#endif
 
 } // namespace file
 
@@ -1546,6 +1559,7 @@ bool Exists(Str dir) {
     return path::IsDirectory(dir);
 }
 
+#if OS_WIN
 bool Create(Str dir) {
     BOOL ok = CreateDirectoryW(CWStrTemp(dir), nullptr);
     if (ok) {
@@ -1645,5 +1659,7 @@ bool HasWriteAccess(Str dir) {
     CloseHandle(h);
     return true;
 }
+
+#endif
 
 } // namespace dir

@@ -3,11 +3,15 @@
 
 #include "base/Base.h"
 #include "base/Archive.h"
+#if OS_WIN
 #include "base/AutoWin.h"
+#endif
 #include "base/File.h"
 #include "base/GuessFileType.h"
 #include "base/Pixmap.h"
+#if OS_WIN
 #include "base/Win.h"
+#endif
 #include "base/Timer.h"
 #include "base/UITask.h"
 
@@ -836,10 +840,17 @@ static fz_stream* FzOpenOrReadFile(fz_context* ctx, Str path) {
             return stm;
         }
     }
+#if OS_WIN
     WCHAR* pathW = CWStrTemp(path);
     fz_try(ctx) {
         stm = fz_open_file_w(ctx, pathW);
     }
+#else
+    char* pathZ = CStrTemp(path);
+    fz_try(ctx) {
+        stm = fz_open_file(ctx, pathZ);
+    }
+#endif
     fz_catch(ctx) {
         stm = nullptr;
         fz_report_error(ctx);
@@ -1646,6 +1657,7 @@ static LinkRectList* LinkifyText(Utf8PageText pageText, Rect* coords) {
     return list;
 }
 
+#if OS_WIN
 // try to produce an 8-bit palette for saving some memory
 static RenderedBitmap* TryRenderAsPaletteImage(fz_pixmap* pixmap) {
     int w = pixmap->w;
@@ -1752,6 +1764,7 @@ static RenderedBitmap* TryRenderAsPaletteImage(fz_pixmap* pixmap) {
     }
     return new RenderedBitmap(hbmp, Size(w, h), hMap);
 }
+#endif
 
 // had to create a copy of fz_convert_pixmap to ensure we always get the alpha
 static fz_pixmap* FzConvertPixmap2(fz_context* ctx, fz_pixmap* pix, fz_colorspace* ds, fz_colorspace* prf,
@@ -1785,6 +1798,7 @@ static fz_pixmap* FzConvertPixmap2(fz_context* ctx, fz_pixmap* pix, fz_colorspac
     return cvt;
 }
 
+#if OS_WIN
 // preserveAlpha: palettizing drops the alpha channel, so skip it when the
 // caller needs transparent holes to composite over the canvas (issue #1809).
 static RenderedBitmap* NewRenderedFzPixmap(fz_context* ctx, fz_pixmap* pixmap, bool preserveAlpha = false) {
@@ -1868,6 +1882,40 @@ static RenderedBitmap* NewRenderedFzPixmap(fz_context* ctx, fz_pixmap* pixmap, b
 static Pixmap* NewPixmapFromFzPixmap(fz_context* ctx, fz_pixmap* pixmap, bool preserveAlpha = false) {
     return PixmapFromRenderedBitmap(NewRenderedFzPixmap(ctx, pixmap, preserveAlpha));
 }
+#else
+// POSIX: a heap BGRA8 copy; flags as for the Windows DIB (see MarkTransparentBackdropPixmap)
+static Pixmap* NewPixmapFromFzPixmap(fz_context* ctx, fz_pixmap* pixmap, bool = false) {
+    if (!pixmap) {
+        return nullptr;
+    }
+    fz_pixmap* bgrPixmap = nullptr;
+    fz_var(bgrPixmap);
+    fz_try(ctx) {
+        bgrPixmap = FzConvertPixmap2(ctx, pixmap, fz_device_bgr(ctx), nullptr, nullptr, fz_default_color_params, 1);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        return nullptr;
+    }
+    if (!bgrPixmap || !bgrPixmap->samples) {
+        fz_drop_pixmap(ctx, bgrPixmap);
+        return nullptr;
+    }
+
+    Pixmap* res = AllocPixmap(bgrPixmap->w, bgrPixmap->h, PixmapFormat::BGRA8, false);
+    if (res) {
+        res->xres = (float)bgrPixmap->xres;
+        res->yres = (float)bgrPixmap->yres;
+        size_t rowBytes = (size_t)bgrPixmap->w * 4;
+        for (int y = 0; y < bgrPixmap->h; y++) {
+            memcpy(res->data + ((size_t)y * res->stride), bgrPixmap->samples + ((size_t)y * bgrPixmap->stride),
+                   rowBytes);
+        }
+    }
+    fz_drop_pixmap(ctx, bgrPixmap);
+    return res;
+}
+#endif
 
 static TocItem* NewTocItemWithDestination(Arena* arena, TocItem* parent, Str title, IPageDestination* dest) {
     auto* res = AllocTocItem(arena, title, 0);
@@ -3641,7 +3689,9 @@ EngineMupdf::EngineMupdf() {
     }
     InstallFitzErrorCallbacks(this, _ctx);
 
+#if OS_WIN
     install_load_windows_font_funcs(_ctx);
+#endif
     InstallEmbeddedFontLoader();
     fz_register_document_handlers(_ctx);
 }
@@ -4409,7 +4459,9 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
     }
     // a 3rd-party DLL might have unmasked fp exceptions on this thread, which
     // would crash mupdf on benign NaN comparisons e.g. in pdf_resolve_link_dest()
+#if OS_WIN
     MaskFpExceptions();
+#endif
     auto* ctx = Ctx();
 
 #if 0
@@ -4578,6 +4630,8 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
         ok = fz_authenticate_password(ctx, _doc, pwdA.s);
         // according to the spec (1.7 ExtensionLevel 3), the password
         // for crypt revisions 5 and above are in SASLprep normalization
+        // (NormalizeString and the ANSI code page are Win32)
+#if OS_WIN
         if (!ok) {
             // TODO: this is only part of SASLprep
             TempStr normalized = NormalizeString(pwd, 5 /* NormalizationKC */);
@@ -4594,6 +4648,7 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
             pwdA = ToUtf8Temp(pwdCp1252);
             ok = fz_authenticate_password(ctx, _doc, pwdA.s);
         }
+#endif
         if (ok) {
             str::ReplaceWithCopy(&pdfPassword, pwdA);
         }
@@ -5238,7 +5293,12 @@ static NO_INLINE IPageDestination* DestFromAttachment(EngineMupdf* engine, fz_ou
 
 static bool HasAlnumW(const WStr& ws) {
     for (int i = 0; i < ws.len; i++) {
-        if (IsCharAlphaNumericW(ws.s[i])) {
+#if OS_WIN
+        bool isAlnum = IsCharAlphaNumericW(ws.s[i]);
+#else
+        bool isAlnum = iswalnum((wint_t)ws.s[i]);
+#endif
+        if (isAlnum) {
             return true;
         }
     }
@@ -7737,7 +7797,11 @@ static fz_pixmap* FzOrientPixmap(fz_context* ctx, fz_pixmap* src, fz_matrix ctm)
     return dst;
 }
 
+// RenderedBitmap is a GDI bitmap; POSIX has no image copy / save yet
 RenderedBitmap* EngineMupdf::GetPageImage(int pageNo, RectF rect, int imageIdx) {
+#if !OS_WIN
+    return nullptr;
+#else
     auto* ctx = Ctx();
 
     FzPageInfo* pageInfo = GetFzPageInfo(pageNo, false);
@@ -7826,6 +7890,7 @@ RenderedBitmap* EngineMupdf::GetPageImage(int pageNo, RectF rect, int imageIdx) 
     }
 
     return bmp;
+#endif
 }
 
 static PageText ExtractPageTextLocked(EngineMupdf* e, FzPageInfo* pageInfo) {
@@ -8037,12 +8102,16 @@ TempStr EngineMupdf::ExtractFontListTemp() {
         }
 
         info.Reset();
+#if OS_WIN
         if (name.s[0] < 0 && MultiByteToWideChar(936, MB_ERR_INVALID_CHARS, name.s, -1, nullptr, 0)) {
             TempStr s = strconv::ToMultiByteTemp(name, 936, CP_UTF8);
             info.Append(s);
         } else {
             info.Append(name);
         }
+#else
+        info.Append(name);
+#endif
         if (len(encoding) > 0 || len(type) > 0 || embedded) {
             info.Append(StrL(" ("));
             if (len(type) > 0) {
@@ -8224,7 +8293,11 @@ static TempStr FormatUnixTimeTemp(int64_t unixSecs) {
     }
     time_t t = (time_t)unixSecs;
     struct tm tm;
+#if OS_WIN
     gmtime_s(&tm, &t);
+#else
+    gmtime_r(&t, &tm);
+#endif
     char buf[64];
     strftime(buf, sizeof buf, "%Y/%m/%d %H:%M:%S UTC", &tm);
     return str::DupTemp(Str(buf));
@@ -8384,6 +8457,8 @@ static int PageNoForSigField(fz_context* ctx, pdf_document* pdfdoc, pdf_obj* fie
     return n >= 0 ? n + 1 : 0;
 }
 
+// signature details come from the Win32 CryptoAPI (src/mupdf/pkcs7-windows.c)
+#if OS_WIN
 static void AppendSignatureFieldInfo(fz_context* ctx, str::Builder& s, pdf_pkcs7_verifier* verifier,
                                      pdf_document* pdfdoc, pdf_obj* sigObj, int sigNo, int pageNo, bool docHasDss,
                                      bool docHasDocTs) {
@@ -8639,6 +8714,24 @@ static TempStr GetSignatures(EngineMupdf* e) {
     }
     return len(sigs) > 0 ? str::DupTemp(ToStr(sigs)) : TempStr{};
 }
+#else
+PdfSigCert::~PdfSigCert() {
+    str::Free(label);
+    str::Free(der);
+}
+
+PdfSigCert* EngineMupdfGetSignatureCerts(EngineBase*) {
+    return nullptr;
+}
+
+void FreePdfSigCerts(PdfSigCert* certs) {
+    ListDelete(certs);
+}
+
+static TempStr GetSignatures(EngineMupdf*) {
+    return {};
+}
+#endif
 
 void EngineMupdf::GetProperties(Props& propsOut) {
     EngineBase::GetProperties(propsOut);

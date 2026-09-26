@@ -290,6 +290,7 @@ Rect ToRect(const RectF& r) {
 }
 
 // conversions to and from the Win32 / GDI+ geometry types; see Geom.h
+#if OS_WIN
 POINT ToPOINT(const Point& p) {
     return {p.x, p.y};
 }
@@ -330,6 +331,7 @@ Gdiplus::Rect ToGdipRect(const RectF& r) {
 Gdiplus::RectF ToGdipRectF(const RectF& r) {
     return {r.x, r.y, r.dx, r.dy};
 }
+#endif
 
 int NormalizeRotation(int rotation) {
     while (rotation < 0) {
@@ -349,6 +351,7 @@ int NormalizeRotation(int rotation) {
 
 #include "base/WinDynCalls.h"
 
+#if OS_WIN
 // Names the thread for debuggers; only Windows 10 1607+ has the API.
 void SetThreadName(Str threadName, ThreadId threadId) {
     if (len(threadName) == 0 || !DynSetThreadDescription) {
@@ -397,6 +400,7 @@ void SleepInMs(int ms) {
     }
     Sleep((DWORD)ms);
 }
+#endif
 
 AtomicInt gDangerousThreadCount = 0;
 
@@ -418,6 +422,7 @@ static u64 ArenaAlignPow2(u64 value, u64 align) {
     return (value + align - 1) & ~(align - 1);
 }
 
+#if OS_WIN
 static u64 ArenaPageSize() {
     static u64 pageSize = 0;
     if (pageSize == 0) {
@@ -435,8 +440,23 @@ static bool ArenaCommit(void* base, u64 size) {
     return VirtualAlloc(base, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE) != nullptr;
 }
 
+static void* ArenaReserve(u64 size) {
+    return VirtualAlloc(nullptr, (SIZE_T)size, MEM_RESERVE, PAGE_READWRITE);
+}
+
+static void ArenaReleaseMemory(void* base, u64) {
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+#else
+// in Arena_posix.cpp
+u64 ArenaPageSize();
+bool ArenaCommit(void* base, u64 size);
+void* ArenaReserve(u64 size);
+void ArenaReleaseMemory(void* base, u64 size);
+#endif
+
 static void ArenaRelease(Arena* arena) {
-    VirtualFree(arena, 0, MEM_RELEASE);
+    ArenaReleaseMemory(arena, arena->reserved);
 }
 
 static void* ArenaPushLocked(Arena* arena, u64 size, u64 align, bool zero) {
@@ -525,12 +545,12 @@ Arena* ArenaNew(const ArenaParams& params) {
     reserveSize = ArenaAlignPow2(std::max(reserveSize, kArenaHeaderSize), pageSize);
     commitSize = std::min(ArenaAlignPow2(std::max(commitSize, kArenaHeaderSize), pageSize), reserveSize);
 
-    void* base = VirtualAlloc(nullptr, (SIZE_T)reserveSize, MEM_RESERVE, PAGE_READWRITE);
+    void* base = ArenaReserve(reserveSize);
     if (!base) {
         return nullptr;
     }
     if (!ArenaCommit(base, commitSize)) {
-        VirtualFree(base, 0, MEM_RELEASE);
+        ArenaReleaseMemory(base, reserveSize);
         return nullptr;
     }
 
@@ -1284,6 +1304,25 @@ int NormalizeWSInPlace(WStr s) {
 // StrArena: u32 handle from ArenaPtrCompress. Arena layout is unsigned LEB128
 // length, length bytes of payload, trailing 0 for C APIs. 0 is the null handle.
 
+#if !OS_WIN
+// Latin-1, Cyrillic and Greek capitals, then towlower() (which is locale dependent)
+static wchar_t WCharToLowerPosix(wchar_t c) {
+    if (c >= 0x00C0 && c <= 0x00DE && c != 0x00D7) {
+        return c + 32;
+    }
+    if (c >= 0x0410 && c <= 0x042F) {
+        return c + 32;
+    }
+    if (c == 0x0401) {
+        return 0x0451;
+    }
+    if ((c >= 0x0391 && c <= 0x03A1) || (c >= 0x03A3 && c <= 0x03AB)) {
+        return c + 32;
+    }
+    return (wchar_t)towlower((wint_t)c);
+}
+#endif
+
 // Unicode lowercase for one BMP code unit. ASCII is a fast path; Windows uses
 // CharLowerW, other platforms a Latin/Cyrillic/Greek table then towlower.
 wchar_t WCharToLower(wchar_t c) {
@@ -1293,7 +1332,11 @@ wchar_t WCharToLower(wchar_t c) {
         }
         return c;
     }
+#if OS_WIN
     return (wchar_t)(uintptr_t)CharLowerW((LPWSTR)(uintptr_t)c);
+#else
+    return WCharToLowerPosix(c);
+#endif
 }
 
 // locale-independent lowercase of a codepoint for case-insensitive matching
@@ -1334,6 +1377,7 @@ static const struct {
         }
     }
 
+#if OS_WIN
     // 'é' -> 'e' + U+0301
     WCHAR w = (WCHAR)c;
     WCHAR decomposed[8];
@@ -1342,11 +1386,28 @@ static const struct {
         return decomposed[0];
     }
     return c;
+#else
+    // base letters of U+00C0..U+017F that decompose into letter + combining mark
+    static const char kLatinBase[] =
+        "AAAAAA.CEEEEIIII.NOOOOO..UUUUY..aaaaaa.ceeeeiiii.nooooo..uuuuy.y"
+        "AaAaAaCcCcCcCcDd..EeEeEeEeEeGgGgGgGgHh..IiIiIiIiI...JjKk.LlLlLl."
+        "...NnNnNn...OoOoOo..RrRrRrSsSsSsSsTtTt..UuUuUuUuUuUuWwYyYZzZzZz.";
+    if (c >= 0xC0 && c <= 0x17F && kLatinBase[c - 0xC0] != '.') {
+        return kLatinBase[c - 0xC0];
+    }
+    return c;
+#endif
 }
 
 // Locale-independent Unicode lowercase folding for case-insensitive matching.
 static void FoldCaseWInPlace(WStr s) {
+#if OS_WIN
     CharLowerBuffW(s.s, (DWORD)s.len);
+#else
+    for (int i = 0; i < s.len; i++) {
+        s.s[i] = WCharToLower(s.s[i]);
+    }
+#endif
     for (int i = 0; i < s.len; i++) {
         if (s.s[i] == 0x0130) {
             s.s[i] = L'i';
@@ -3230,6 +3291,18 @@ int CompareProgramVersion(Str ver1, Str ver2) {
 // ascii version that doesn't handle UTF-8
 // IsTextRtl is optimized version of checking if a string is rtl
 // we look at max first 40 chars and
+#if !OS_WIN
+static bool IsRtlCodepoint(wchar_t c) {
+    return (c >= 0x0590 && c <= 0x08ff) || (c >= 0xfb1d && c <= 0xfdff) || (c >= 0xfe70 && c <= 0xfeff) ||
+           (c >= 0x10800 && c <= 0x10fff) || (c >= 0x1e800 && c <= 0x1edff);
+}
+
+static bool IsLtrCodepoint(wchar_t c) {
+    return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || (c >= 0x00c0 && c <= 0x02af) ||
+           (c >= 0x0370 && c <= 0x052f) || (c >= 0x1e00 && c <= 0x1fff);
+}
+#endif
+
 bool IsTextRtl(WStr s) {
     if (len(s) == 0) {
         return false;
@@ -3237,6 +3310,7 @@ bool IsTextRtl(WStr s) {
     int n = s.len > 40 ? 40 : s.len;
     int nRtl = 0;
     int nLtr = 0;
+#if OS_WIN
     WORD* charTypes = AllocArrayTemp<WORD>(n + 1);
     if (!GetStringTypeExW(LOCALE_INVARIANT, CT_CTYPE2, s.s, n, charTypes)) {
         return false; // API failure
@@ -3249,6 +3323,16 @@ bool IsTextRtl(WStr s) {
             nRtl++;
         }
     }
+#else
+    for (int i = 0; i < n; i++) {
+        wchar_t c = s.s[i];
+        if (IsRtlCodepoint(c)) {
+            nRtl++;
+        } else if (IsLtrCodepoint(c)) {
+            nLtr++;
+        }
+    }
+#endif
     return nRtl > nLtr;
 }
 
@@ -4703,11 +4787,17 @@ Str ParseArgs(Str str, const char* fmt, const ParseArg* args, int nArgs) {
 // format a number with a given thousand separator e.g. it turns 1234 into "1,234"
 // Caller needs to free() the result.
 TempStr FormatNumWithThousandSepTemp(i64 num, LCID locale) {
+#if OS_WIN
     WCHAR thousandSepW[4]{};
     if (!GetLocaleInfoW(locale, LOCALE_STHOUSAND, thousandSepW, dimof(thousandSepW))) {
         str::BufSet(thousandSepW, dimof(thousandSepW), StrL(","));
     }
     TempStr thousandSep = ToUtf8Temp(thousandSepW);
+#else
+    (void)locale;
+    const lconv* lc = localeconv();
+    TempStr thousandSep = Str(lc && lc->thousands_sep && lc->thousands_sep[0] ? lc->thousands_sep : ",");
+#endif
     TempStr buf = str::FormatTemp("%d", num);
 
     // i64 with thousand seps is well under 48 bytes (e.g. "9,223,372,036,854,775,807").
@@ -4732,6 +4822,7 @@ TempStr FormatFloatWithThousandSepTemp(double number, LCID locale, bool stripTra
     i64 num = (i64)llround(number * 100);
 
     TempStr tmp = FormatNumWithThousandSepTemp(num / 100, locale);
+#if OS_WIN
     WCHAR decimalW[4] = {};
     if (!GetLocaleInfoW(locale, LOCALE_SDECIMAL, decimalW, dimof(decimalW))) {
         decimalW[0] = '.';
@@ -4742,6 +4833,10 @@ TempStr FormatFloatWithThousandSepTemp(double number, LCID locale, bool stripTra
     for (WCHAR c : decimalW) {
         decimal[i++] = (char)c;
     }
+#else
+    const lconv* lc = localeconv();
+    const char* decimal = lc && lc->decimal_point && lc->decimal_point[0] ? lc->decimal_point : ".";
+#endif
 
     // add between one and two decimals after the point
     TempStr buf = str::FormatTemp("%s%s%02d", tmp, Str(decimal), num % 100);
@@ -5628,6 +5723,7 @@ TempStr JoinTemp(StrVec* v, Str sep) {
 
 namespace strconv {
 
+#if OS_WIN
 // null in => null out; empty in => allocated empty out
 WStr CodePageToWStr(uint codePage, Str s, Arena* a) {
     if (str::IsNull(s)) {
@@ -5659,6 +5755,7 @@ Str WStrToCodePage(uint codePage, WStr s, Arena* a) {
     }
     return Str(res, cb);
 }
+#endif
 
 // caller needs to free() the result
 WStr StrCPToWStr(Str src, uint codePage) {
@@ -5786,11 +5883,13 @@ void UnpackColor(Color c, u8& r, u8& g, u8& b) {
     UnpackColor(c, r, g, b, a);
 }
 
+#if OS_WIN
 Gdiplus::Color GdiRgbFromColor(Color c) {
     u8 r, g, b;
     UnpackColor(c, r, g, b);
     return {r, g, b};
 }
+#endif
 
 TempStr SerializeColorTemp(Color c) {
     u8 r, g, b, a;
@@ -6052,6 +6151,8 @@ u8 GetAlpha(Color rgb) {
     return (u8)rgb;
 }
 
+// the POSIX versions are in Base_posix.cpp
+#if OS_WIN
 bool AtomicBoolGet(AtomicBool* p) {
     return InterlockedOr(p, 0) != 0;
 }
@@ -6088,3 +6189,4 @@ int AtomicIntDec(AtomicInt* p) {
 void* AtomicPtrExchange(AtomicPtr* p, void* v) {
     return InterlockedExchangePointer(p, v);
 }
+#endif

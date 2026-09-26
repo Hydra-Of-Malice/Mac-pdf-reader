@@ -1,50 +1,117 @@
+/* Copyright 2026 the SumatraPDF project authors (see AUTHORS file).
+   License: GPLv3 */
+
+// The Cocoa application shell: window, tabs, toolbar, menus, sidebar, find,
+// printing and document lifecycle. Manual retain/release (no ARC); AppKit is
+// only touched on the main thread. Engine access goes through the plain C
+// bridge (SumatraMacEngine.h); see docs/mac/architecture.md.
+
 #import <Cocoa/Cocoa.h>
 
 #include <fcntl.h>
+#include <math.h>
 #include <unistd.h>
 
 #include "mac/SumatraMacEngine.h"
 #include "mac/MacPrefs.h"
-#include "gui/mac/KeyboardHelpMacBridge.h"
+#import "mac/MacDocumentView.h"
+#import "mac/MacPanels.h"
+#import "mac/MacSidebar.h"
 
-// The website / manual URL opened from the Help menu.
 static NSString* const kWebsiteURL = @"https://www.sumatrapdfreader.org";
-static const CGFloat kCocoaPointsPerInch = 72.0;
+static NSString* const kManualURL = @"https://www.sumatrapdfreader.org/manual";
 
-static void ReleaseCopiedPixels(void* info, const void*, size_t) {
-    free(info);
+// zoom is a factor (1 = actual size) or one of the fit modes below; the fit
+// values match DocumentLayoutParams::zoomVirtual (kZoomFitPage, kZoomFitWidth)
+static const CGFloat kMacZoomFitPage = -1.0;
+static const CGFloat kMacZoomFitWidth = -2.0;
+static const CGFloat kZoomMin = 0.1;
+static const CGFloat kZoomMax = 8.0;
+static const CGFloat kZoomLevels[] = {0.1,  0.125, 0.25, 0.3333, 0.5, 0.6667, 0.75, 1.0,
+                                      1.25, 1.5,   2.0,  3.0,    4.0, 6.0,    8.0};
+
+static const CGFloat kLineScroll = 40.0;
+static const CGFloat kPageTopGap = 8.0;
+static const CGFloat kPrintMargin = 18.0;
+static const double kReloadDelay = 0.5;
+static const double kWheelFlipInterval = 0.3;
+static const NSUInteger kMaxClosedTabs = 10;
+static const NSUInteger kMaxHistory = 50;
+static const NSInteger kTabMenuSeparatorTag = 7001;
+static const NSUInteger kMaxTabLabelChars = 24;
+
+static const CGFloat kSidebarDefaultWidth = 220;
+static const CGFloat kSidebarMinWidth = 140;
+static const CGFloat kSidebarMaxWidth = 480;
+static const CGFloat kDocumentMinWidth = 240;
+
+static NSString* const kDefSidebarVisible = @"SidebarVisible";
+static NSString* const kDefSidebarWidth = @"SidebarWidth";
+static NSString* const kDefSidebarMode = @"SidebarMode";
+
+static NSString* const kToolbarIdentifier = @"sumatra.toolbar.v2";
+static NSString* const kToolbarSidebar = @"sumatra.toolbar.sidebar";
+static NSString* const kToolbarOpen = @"sumatra.toolbar.open";
+static NSString* const kToolbarTabs = @"sumatra.toolbar.tabs";
+static NSString* const kToolbarPrevPage = @"sumatra.toolbar.prev-page";
+static NSString* const kToolbarNextPage = @"sumatra.toolbar.next-page";
+static NSString* const kToolbarPage = @"sumatra.toolbar.page";
+static NSString* const kToolbarZoomOut = @"sumatra.toolbar.zoom-out";
+static NSString* const kToolbarZoomActual = @"sumatra.toolbar.zoom-actual";
+static NSString* const kToolbarZoomIn = @"sumatra.toolbar.zoom-in";
+static NSString* const kToolbarFitPage = @"sumatra.toolbar.fit-page";
+static NSString* const kToolbarFitWidth = @"sumatra.toolbar.fit-width";
+static NSString* const kToolbarRotateLeft = @"sumatra.toolbar.rotate-left";
+static NSString* const kToolbarRotateRight = @"sumatra.toolbar.rotate-right";
+static NSString* const kToolbarSearch = @"sumatra.toolbar.search";
+
+enum class PagePosition {
+    Top,
+    Bottom,
+};
+
+enum class Highlight {
+    Find,
+    Selection,
+};
+
+// A point of the view expressed relative to a page, so it can be kept in
+// place across zoom, rotation and resize relayouts.
+struct ViewAnchor {
+    int pageNo;
+    double fx;
+    double fy;
+    NSPoint clipPoint;
+};
+
+#pragma mark - Helpers
+
+static const char* FsPath(NSString* path) {
+    if ([path length] == 0) {
+        return nullptr;
+    }
+    return [path fileSystemRepresentation];
 }
 
-static CGImageRef CreateImageFromRenderedPage(const MacRenderedPage* page) {
-    if (!page || !page->data || page->width <= 0 || page->height <= 0 || page->stride <= 0) {
-        return nullptr;
+static NSString* StringFromFs(const char* s) {
+    if (!s || !s[0]) {
+        return nil;
     }
-
-    size_t nBytes = (size_t)page->stride * (size_t)page->height;
-    void* pixels = malloc(nBytes);
-    if (!pixels) {
-        return nullptr;
-    }
-    memcpy(pixels, page->data, nBytes);
-
-    CGDataProviderRef provider = CGDataProviderCreateWithData(pixels, pixels, nBytes, ReleaseCopiedPixels);
-    if (!provider) {
-        free(pixels);
-        return nullptr;
-    }
-
-    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-    CGBitmapInfo bitmapInfo = kCGBitmapByteOrder32Little |
-                              (page->premultiplied ? kCGImageAlphaPremultipliedFirst : kCGImageAlphaFirst);
-    CGImageRef image = CGImageCreate((size_t)page->width, (size_t)page->height, 8, 32, (size_t)page->stride,
-                                     colorSpace, bitmapInfo, provider, nullptr, false,
-                                     kCGRenderingIntentDefault);
-    CGColorSpaceRelease(colorSpace);
-    CGDataProviderRelease(provider);
-    return image;
+    return [[NSFileManager defaultManager] stringWithFileSystemRepresentation:s length:strlen(s)];
 }
 
-static NSString* ExistingPath(NSArray<NSString*>* candidates) {
+static NSString* StringFromUtf8(const char* s) {
+    if (!s) {
+        return nil;
+    }
+    return [NSString stringWithUTF8String:s];
+}
+
+static NSString* CanonicalPath(NSString* path) {
+    return [[path stringByStandardizingPath] stringByResolvingSymlinksInPath];
+}
+
+static NSString* ExistingPath(NSArray* candidates) {
     NSFileManager* fileManager = [NSFileManager defaultManager];
     for (NSString* candidate in candidates) {
         if ([fileManager fileExistsAtPath:candidate]) {
@@ -54,143 +121,198 @@ static NSString* ExistingPath(NSArray<NSString*>* candidates) {
     return [candidates count] ? [candidates objectAtIndex:0] : @"";
 }
 
+// Relative command-line paths: the shell's directory, then the repository
+// root for a development build (out/<config>/SumatraPDF.app).
 static NSString* ResolveDocumentPath(NSString* path) {
     path = [path stringByStandardizingPath];
     if ([path isAbsolutePath]) {
         return path;
     }
-
-    NSMutableArray<NSString*>* candidates = [NSMutableArray arrayWithObject:path];
-
+    NSMutableArray* candidates = [NSMutableArray arrayWithObject:path];
     NSString* pwd = [[[NSProcessInfo processInfo] environment] objectForKey:@"PWD"];
     if ([pwd length] > 0) {
         [candidates addObject:[[pwd stringByAppendingPathComponent:path] stringByStandardizingPath]];
     }
-
+    NSString* cwd = [[NSFileManager defaultManager] currentDirectoryPath];
+    if ([cwd length] > 0) {
+        [candidates addObject:[[cwd stringByAppendingPathComponent:path] stringByStandardizingPath]];
+    }
     NSString* bundlePath = [[NSBundle mainBundle] bundlePath];
-    NSString* repoRoot = [[[[bundlePath stringByDeletingLastPathComponent] stringByDeletingLastPathComponent]
-        stringByDeletingLastPathComponent] stringByStandardizingPath];
-    [candidates addObject:[repoRoot stringByAppendingPathComponent:path]];
-
+    NSString* repoRoot = [[[bundlePath stringByDeletingLastPathComponent] stringByDeletingLastPathComponent]
+        stringByDeletingLastPathComponent];
+    [candidates addObject:[[repoRoot stringByAppendingPathComponent:path] stringByStandardizingPath]];
     return ExistingPath(candidates);
 }
 
-// zoom presets
-static const CGFloat kZoomMin = 0.125;
-static const CGFloat kZoomMax = 8.0;
-static const CGFloat kZoomStep = 1.25;
-static const CGFloat kMacZoomFitPage = -1.0;
-static const CGFloat kMacZoomFitWidth = -2.0;
-
-static NSString* const kToolbarOpen = @"sumatra.toolbar.open";
-static NSString* const kToolbarTabs = @"sumatra.toolbar.tabs";
-static NSString* const kToolbarPrevPage = @"sumatra.toolbar.prev-page";
-static NSString* const kToolbarNextPage = @"sumatra.toolbar.next-page";
-static NSString* const kToolbarPageStatus = @"sumatra.toolbar.page-status";
-static NSString* const kToolbarZoomOut = @"sumatra.toolbar.zoom-out";
-static NSString* const kToolbarZoomActual = @"sumatra.toolbar.zoom-actual";
-static NSString* const kToolbarZoomIn = @"sumatra.toolbar.zoom-in";
-static NSString* const kToolbarFitPage = @"sumatra.toolbar.fit-page";
-static NSString* const kToolbarFitWidth = @"sumatra.toolbar.fit-width";
-static NSString* const kToolbarRotateLeft = @"sumatra.toolbar.rotate-left";
-static NSString* const kToolbarRotateRight = @"sumatra.toolbar.rotate-right";
-
-@class SumatraAppDelegate;
-
-@protocol SumatraDocumentViewOwner
-- (void*)documentHandle;
-- (int)documentRotation;
-- (void)activateLinkAtPage:(int)pageNo x:(double)x y:(double)y zoom:(double)zoom;
-- (void)selectionChanged;
-- (IBAction)goToNextPage:(id)sender;
-- (IBAction)goToPrevPage:(id)sender;
-- (IBAction)goToFirstPage:(id)sender;
-- (IBAction)goToLastPage:(id)sender;
-- (IBAction)zoomIn:(id)sender;
-- (IBAction)zoomOut:(id)sender;
-- (IBAction)zoomActualSize:(id)sender;
-- (IBAction)showKeyboardShortcuts:(id)sender;
-@end
-
-@interface SumatraPageImage : NSObject
-@property(nonatomic) int pageNo;
-@property(nonatomic) NSRect frame;
-@property(nonatomic) double layoutZoom;
-@property(nonatomic) CGImageRef image;
-@property(nonatomic, retain) NSArray* highlights;
-@end
-
-@implementation SumatraPageImage
-
-- (void)dealloc {
-    if (_image) {
-        CGImageRelease(_image);
+// Document paths from argv. Launch Services may add -psn_*; AppKit treats
+// -NS*/-Apple* as user-default overrides that take a value.
+static NSArray* CommandLinePaths() {
+    NSArray* args = [[NSProcessInfo processInfo] arguments];
+    NSMutableArray* paths = [NSMutableArray array];
+    for (NSUInteger i = 1; i < [args count]; i++) {
+        NSString* arg = [args objectAtIndex:i];
+        if ([arg hasPrefix:@"-psn_"]) {
+            continue;
+        }
+        if ([arg hasPrefix:@"-NS"] || [arg hasPrefix:@"-Apple"]) {
+            i++;
+            continue;
+        }
+        if ([arg length] == 0 || [arg hasPrefix:@"-"]) {
+            continue;
+        }
+        [paths addObject:arg];
     }
-    [_highlights release];
-    [super dealloc];
+    return paths;
 }
 
-- (void)setImage:(CGImageRef)image {
-    if (_image == image) {
-        return;
-    }
-    if (_image) {
-        CGImageRelease(_image);
-    }
-    _image = image ? CGImageRetain(image) : nullptr;
+static NSDate* ModificationDate(NSString* path) {
+    NSDictionary* attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    return [attrs objectForKey:NSFileModificationDate];
 }
 
-@end
+static NSString* ShortTabLabel(NSString* name) {
+    if ([name length] <= kMaxTabLabelChars) {
+        return name ?: @"";
+    }
+    NSUInteger half = (kMaxTabLabelChars - 1) / 2;
+    return [NSString
+        stringWithFormat:@"%@…%@", [name substringToIndex:half], [name substringFromIndex:[name length] - half]];
+}
+
+static NSImage* TextImage(NSString* text) {
+    NSDictionary* attrs = @{
+        NSFontAttributeName : [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold],
+        NSForegroundColorAttributeName : [NSColor blackColor],
+    };
+    NSSize textSize = [text sizeWithAttributes:attrs];
+    NSSize size = NSMakeSize(ceil(textSize.width) + 2, 18);
+    NSImage* image = [NSImage imageWithSize:size
+                                    flipped:NO
+                             drawingHandler:^BOOL(NSRect rect) {
+                               (void)rect;
+                               [text drawAtPoint:NSMakePoint(1, floor((18 - textSize.height) / 2.0))
+                                   withAttributes:attrs];
+                               return YES;
+                             }];
+    [image setTemplate:YES];
+    return image;
+}
+
+// SF Symbol (macOS 11+) or a small text fallback.
+static NSImage* ToolbarImage(NSString* symbolName, NSString* description, NSString* fallbackText) {
+    NSImage* image = nil;
+    if ([NSImage respondsToSelector:@selector(imageWithSystemSymbolName:accessibilityDescription:)]) {
+        image = [NSImage imageWithSystemSymbolName:symbolName accessibilityDescription:description];
+    }
+    if (!image) {
+        return TextImage(fallbackText);
+    }
+    [image setTemplate:YES];
+    return image;
+}
+
+static NSString* KeyString(unichar c) {
+    return [NSString stringWithCharacters:&c length:1];
+}
+
+static NSMenuItem* AddItem(NSMenu* menu, NSString* title, SEL action, id target, NSString* key,
+                           NSEventModifierFlags modifiers) {
+    NSMenuItem* item = [[[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key ?: @""] autorelease];
+    [item setTarget:target];
+    if ([key length] > 0) {
+        [item setKeyEquivalentModifierMask:modifiers];
+    }
+    [menu addItem:item];
+    return item;
+}
+
+static NSMenu* AddSubmenu(NSMenu* parent, NSString* title) {
+    NSMenuItem* holder = [[[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""] autorelease];
+    NSMenu* menu = [[[NSMenu alloc] initWithTitle:title] autorelease];
+    [holder setSubmenu:menu];
+    [parent addItem:holder];
+    return menu;
+}
+
+// Files a document link must never launch: programs, installers, scripts.
+static BOOL IsRiskyLinkTarget(NSString* path) {
+    static NSArray* risky = nil;
+    if (!risky) {
+        risky = [@[
+            @"app",     @"command", @"tool",    @"terminal",    @"sh",       @"bash",   @"zsh",    @"csh",
+            @"ksh",     @"py",      @"pl",      @"rb",          @"php",      @"jar",    @"pkg",    @"mpkg",
+            @"dmg",     @"scpt",    @"scptd",   @"applescript", @"workflow", @"action", @"osax",   @"prefpane",
+            @"fileloc", @"webloc",  @"inetloc", @"url",         @"kext",     @"plugin", @"bundle", @"service",
+        ] retain];
+    }
+    if ([risky containsObject:[[path pathExtension] lowercaseString]]) {
+        return YES;
+    }
+    BOOL isDir = NO;
+    NSFileManager* fm = [NSFileManager defaultManager];
+    if ([fm fileExistsAtPath:path isDirectory:&isDir] && isDir) {
+        return [[NSWorkspace sharedWorkspace] isFilePackageAtPath:path];
+    }
+    return [fm isExecutableFileAtPath:path];
+}
+
+#pragma mark - Tab state
 
 @interface SumatraTabState : NSObject
-@property(nonatomic) void* document;
+@property(nonatomic) void* document; // owned; closed with MacCloseDocument
 @property(nonatomic, copy) NSString* path;
+@property(nonatomic, copy) NSString* canonicalPath;
 @property(nonatomic) int pageCount;
 @property(nonatomic) int currentPage;
 @property(nonatomic) int rotation;
 @property(nonatomic) CGFloat zoom;
 @property(nonatomic) BOOL continuous;
 @property(nonatomic) NSPoint scrollOrigin;
+@property(nonatomic) BOOL hasScrollOrigin;
+@property(nonatomic) BOOL needsInitialScroll;
+@property(nonatomic) int findToken;
+@property(nonatomic) int historyIndex;
+@property(nonatomic, retain) NSMutableArray* history; // NSNumber page numbers
+@property(nonatomic, retain) NSDate* modificationDate;
 @end
 
 @implementation SumatraTabState
 
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _history = [[NSMutableArray alloc] init];
+        _zoom = kMacZoomFitPage;
+        _continuous = YES;
+        _currentPage = 1;
+    }
+    return self;
+}
+
 - (void)dealloc {
     [_path release];
+    [_canonicalPath release];
+    [_history release];
+    [_modificationDate release];
     [super dealloc];
 }
 
 @end
 
-// A view that draws a single rendered page. In fit modes it scales the image to
-// its bounds; when zoomed it is sized to the image's pixels and scrolls inside
-// an NSScrollView. It owns keyboard navigation for the document.
-@interface SumatraDocumentView : NSView
-@property(nonatomic) CGImageRef image;
-@property(nonatomic) NSSize imageSize;
-@property(nonatomic, retain) NSArray* pages;
-@property(nonatomic, copy) NSString* message;
-@property(nonatomic) BOOL scaleToFit;
-@property(nonatomic) BOOL selectingText;
-@property(nonatomic, assign) id<SumatraDocumentViewOwner> owner;
+// A page image of the active document, kept while the page is (nearly) visible.
+@interface SumatraCachedImage : NSObject
+@property(nonatomic) CGImageRef image; // retained
+@property(nonatomic) float renderZoom;
+@property(nonatomic) int rotation;
 @end
 
-@implementation SumatraDocumentView
-
-- (BOOL)isFlipped {
-    return YES;
-}
-
-- (BOOL)acceptsFirstResponder {
-    return YES;
-}
+@implementation SumatraCachedImage
 
 - (void)dealloc {
     if (_image) {
         CGImageRelease(_image);
     }
-    [_pages release];
-    [_message release];
     [super dealloc];
 }
 
@@ -198,420 +320,1579 @@ static NSString* const kToolbarRotateRight = @"sumatra.toolbar.rotate-right";
     if (_image == image) {
         return;
     }
+    if (image) {
+        CGImageRetain(image);
+    }
     if (_image) {
         CGImageRelease(_image);
     }
-    _image = image ? CGImageRetain(image) : nullptr;
-    [self setNeedsDisplay:YES];
+    _image = image;
 }
 
-- (void)setPages:(NSArray*)pages {
-    if (_pages == pages) {
-        return;
+@end
+
+#pragma mark - Drop target
+
+// Window content view; accepts files dropped anywhere on the window.
+@interface SumatraDropView : NSView
+@property(nonatomic, assign) id dropTarget; // receives -openPaths:
+@end
+
+@implementation SumatraDropView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        [self registerForDraggedTypes:@[ NSPasteboardTypeFileURL ]];
     }
-    [_pages release];
-    _pages = [pages retain];
-    [self setNeedsDisplay:YES];
+    return self;
 }
 
-- (void)drawPageImage:(CGImageRef)image inRect:(NSRect)drawRect bounds:(NSRect)bounds {
-    if (!image) {
-        return;
-    }
-    CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
-    CGContextSaveGState(ctx);
-    CGContextTranslateCTM(ctx, 0, bounds.size.height);
-    CGContextScaleCTM(ctx, 1, -1);
-    CGRect cgDrawRect = CGRectMake(drawRect.origin.x, bounds.size.height - drawRect.origin.y - drawRect.size.height,
-                                   drawRect.size.width, drawRect.size.height);
-    CGContextDrawImage(ctx, cgDrawRect, image);
-    CGContextRestoreGState(ctx);
-}
-
-- (void)drawRect:(NSRect)dirtyRect {
-    [[NSColor colorWithCalibratedWhite:0.18 alpha:1.0] setFill];
-    NSRectFill(dirtyRect);
-
-    if ([_pages count] > 0) {
-        NSRect bounds = [self bounds];
-        for (SumatraPageImage* page in _pages) {
-            NSRect drawRect = [page frame];
-            if (!NSIntersectsRect(drawRect, dirtyRect)) {
-                continue;
-            }
-            [[NSColor colorWithCalibratedWhite:0.92 alpha:1.0] setFill];
-            NSRectFill(NSRectFromCGRect(CGRectInset(NSRectToCGRect(drawRect), -1, -1)));
-            if ([page image]) {
-                [self drawPageImage:[page image] inRect:drawRect bounds:bounds];
-            } else {
-                NSDictionary* attrs = @{
-                    NSFontAttributeName : [NSFont systemFontOfSize:13],
-                    NSForegroundColorAttributeName : [NSColor colorWithCalibratedWhite:0.45 alpha:1.0],
-                };
-                NSString* text = [NSString stringWithFormat:@"Page %d", [page pageNo]];
-                NSSize size = [text sizeWithAttributes:attrs];
-                NSPoint p = NSMakePoint(NSMidX(drawRect) - (size.width / 2.0), NSMidY(drawRect) - (size.height / 2.0));
-                [text drawAtPoint:p withAttributes:attrs];
-            }
-            if ([[page highlights] count] > 0) {
-                [[NSColor colorWithCalibratedRed:1.0 green:0.82 blue:0.1 alpha:0.45] setFill];
-                for (NSValue* value in [page highlights]) {
-                    NSRectFillUsingOperation([value rectValue], NSCompositingOperationSourceOver);
-                }
-            }
+- (NSArray*)droppedPaths:(id<NSDraggingInfo>)info {
+    NSDictionary* options = @{NSPasteboardURLReadingFileURLsOnlyKey : [NSNumber numberWithBool:YES]};
+    NSArray* urls = [[info draggingPasteboard] readObjectsForClasses:@[ [NSURL class] ] options:options];
+    NSMutableArray* paths = [NSMutableArray array];
+    for (NSURL* url in urls) {
+        if ([url isFileURL] && [url path]) {
+            [paths addObject:[url path]];
         }
+    }
+    return paths;
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    return [[self droppedPaths:sender] count] > 0 ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+    return [[self droppedPaths:sender] count] > 0 ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender {
+    return [[self droppedPaths:sender] count] > 0;
+}
+
+// Opening can show a password prompt, so it runs after the drag session ends.
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSArray* paths = [self droppedPaths:sender];
+    if ([paths count] == 0 || !_dropTarget) {
+        return NO;
+    }
+    [_dropTarget performSelector:@selector(openPaths:) withObject:paths afterDelay:0];
+    return YES;
+}
+
+@end
+
+#pragma mark - App delegate
+
+@interface SumatraAppDelegate : NSObject <NSApplicationDelegate,
+                                          NSWindowDelegate,
+                                          NSToolbarDelegate,
+                                          NSTextFieldDelegate,
+                                          NSSplitViewDelegate,
+                                          NSMenuDelegate,
+                                          SumatraDocumentViewOwner,
+                                          SumatraSidebarHost>
+- (void)installMainMenu;
+- (void)openPaths:(NSArray*)paths;
+- (void)pageRenderReady;
+- (void)findFinishedForDocument:(void*)document token:(int)token found:(BOOL)found;
+@end
+
+typedef void (^SumatraAlertDone)(NSModalResponse response);
+
+// Called by PageRenderService on the main queue; the service drops the call
+// once its document is closed.
+static void PageRenderReady(void* context) {
+    SumatraAppDelegate* delegate = (SumatraAppDelegate*)context;
+    if ([NSThread isMainThread]) {
+        [delegate pageRenderReady];
         return;
     }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [delegate pageRenderReady];
+    });
+}
 
-    if (!_image) {
-        NSDictionary* attrs = @{
-            NSFontAttributeName : [NSFont systemFontOfSize:15],
-            NSForegroundColorAttributeName : [NSColor colorWithCalibratedWhite:0.88 alpha:1.0],
-        };
-        NSString* text = _message ?: @"Open a document with File → Open (⌘O).";
-        NSSize size = [text sizeWithAttributes:attrs];
-        NSRect bounds = [self bounds];
-        NSPoint p = NSMakePoint(MAX(24.0, (bounds.size.width - size.width) / 2.0),
-                                MAX(24.0, (bounds.size.height - size.height) / 2.0));
-        [text drawAtPoint:p withAttributes:attrs];
-        return;
-    }
+// Called on the main queue; may arrive after the document was closed, so the
+// delegate matches document and token against its tabs before using either.
+static void FindDone(void* context, void* document, int token, bool found) {
+    [(SumatraAppDelegate*)context findFinishedForDocument:document token:token found:found ? YES : NO];
+}
 
-    NSRect bounds = [self bounds];
-    CGFloat imageW = (CGFloat)CGImageGetWidth(_image);
-    CGFloat imageH = (CGFloat)CGImageGetHeight(_image);
-    NSSize imageSize = _imageSize;
-    if (imageSize.width <= 0 || imageSize.height <= 0) {
-        imageSize = NSMakeSize(imageW, imageH);
-    }
+@implementation SumatraAppDelegate {
+    NSWindow* _window;
+    NSSplitView* _splitView;
+    NSScrollView* _scrollView;
+    SumatraDocumentView* _documentView;
+    SumatraSidebar* _sidebar;
+    NSToolbar* _toolbar;
+    NSSegmentedControl* _tabSelector;
+    NSTextField* _pageField;
+    NSTextField* _pageCountLabel;
+    NSSearchField* _searchField;
+    NSProgressIndicator* _findSpinner;
+    NSTextField* _findStatus;
+    NSMenu* _recentMenu;
+    NSMenu* _bookmarksMenu;
+    NSMenu* _windowMenu;
 
-    NSRect drawRect;
-    if (_scaleToFit) {
-        CGFloat margin = 8.0;
-        CGFloat scale =
-            MIN((bounds.size.width - (2 * margin)) / imageSize.width, (bounds.size.height - (2 * margin)) / imageSize.height);
-        if (!isfinite(scale) || scale <= 0) {
-            scale = 1;
-        }
-        scale = MIN(scale, 1.0);
-        CGSize drawSize = CGSizeMake(floor(imageSize.width * scale), floor(imageSize.height * scale));
-        drawRect = NSMakeRect(floor((bounds.size.width - drawSize.width) / 2.0),
-                              floor((bounds.size.height - drawSize.height) / 2.0), drawSize.width, drawSize.height);
+    NSMutableArray* _tabs;
+    SumatraTabState* _active; // element of _tabs, not retained separately
+    NSMutableArray* _closedPaths;
+    NSMutableArray* _pendingOpen;
+    NSMutableArray* _alertQueue;
+    NSMutableDictionary* _imageCache; // NSNumber page -> SumatraCachedImage, active tab only
+    NSString* _findText;
+
+    dispatch_source_t _fileWatcher;
+    NSString* _watchedPath;
+    id _keyMonitor;
+
+    BOOL _launched;
+    BOOL _alertShowing;
+    BOOL _inLayout;
+    BOOL _layoutAgain;
+    BOOL _refreshScheduled;
+    BOOL _liveMagnify;
+    BOOL _programmaticScroll;
+    BOOL _pinnedPage;
+    BOOL _sidebarVisible;
+    BOOL _adjustingSidebar;
+    CGFloat _sidebarWidth;
+    CGFloat _smartZoomReturn;
+    double _currentLayoutZoom;
+    double _lastWheelFlip;
+    int _lastNotifiedPage;
+    int _openDepth;
+    void* _printingDocument;
+}
+
+#pragma mark - Launch and shutdown
+
+- (void)applicationWillFinishLaunching:(NSNotification*)notification {
+    (void)notification;
+    NSArray* supportDirs = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+    NSString* supportDir = [supportDirs count] ? [supportDirs objectAtIndex:0] : NSTemporaryDirectory();
+    NSString* settingsPath = [[supportDir stringByAppendingPathComponent:@"SumatraPDF"]
+        stringByAppendingPathComponent:@"SumatraPDF-settings.txt"];
+    MacPrefsInit([settingsPath fileSystemRepresentation]);
+
+    _tabs = [[NSMutableArray alloc] init];
+    _closedPaths = [[NSMutableArray alloc] init];
+    _pendingOpen = [[NSMutableArray alloc] init];
+    _alertQueue = [[NSMutableArray alloc] init];
+    _imageCache = [[NSMutableDictionary alloc] init];
+
+    NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+    [defaults registerDefaults:@{
+        kDefSidebarVisible : [NSNumber numberWithBool:NO],
+        kDefSidebarWidth : [NSNumber numberWithDouble:kSidebarDefaultWidth],
+        kDefSidebarMode : [NSNumber numberWithInteger:SumatraSidebarModeOutline],
+    }];
+    _sidebarVisible = [defaults boolForKey:kDefSidebarVisible];
+    _sidebarWidth = MAX(kSidebarMinWidth, MIN(kSidebarMaxWidth, (CGFloat)[defaults doubleForKey:kDefSidebarWidth]));
+
+    // tabs are our own (toolbar selector + Window menu), not NSWindow tabbing
+    [NSWindow setAllowsAutomaticWindowTabbing:NO];
+    [self createMainWindow];
+    [self installKeyMonitor];
+}
+
+- (void)applicationDidFinishLaunching:(NSNotification*)notification {
+    (void)notification;
+    _launched = YES;
+    [_window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+
+    NSMutableArray* paths = [NSMutableArray arrayWithArray:CommandLinePaths()];
+    [paths addObjectsFromArray:_pendingOpen];
+    [_pendingOpen removeAllObjects];
+    if ([paths count] > 0) {
+        [self openPaths:paths];
     } else {
-        drawRect = NSMakeRect(floor(MAX(0, (bounds.size.width - imageSize.width) / 2.0)),
-                              floor(MAX(0, (bounds.size.height - imageSize.height) / 2.0)), imageSize.width,
-                              imageSize.height);
+        [self restoreSession];
     }
-
-    [[NSColor colorWithCalibratedWhite:0.92 alpha:1.0] setFill];
-    NSRectFill(NSRectFromCGRect(CGRectInset(NSRectToCGRect(drawRect), -1, -1)));
-
-    [self drawPageImage:_image inRect:drawRect bounds:bounds];
 }
 
-- (SumatraPageImage*)pageAtPoint:(NSPoint)point {
-    for (SumatraPageImage* page in _pages) {
-        if (NSPointInRect(point, [page frame])) {
-            return page;
+- (void)application:(NSApplication*)application openURLs:(NSArray*)urls {
+    (void)application;
+    NSMutableArray* paths = [NSMutableArray array];
+    for (NSURL* url in urls) {
+        if ([url isFileURL] && [url path]) {
+            [paths addObject:[url path]];
         }
     }
-    return nil;
+    [self openPaths:paths];
 }
 
-- (void)mouseDown:(NSEvent*)event {
-    SumatraPageImage* page = [self pageAtPoint:[self convertPoint:[event locationInWindow] fromView:nil]];
-    void* document = [_owner documentHandle];
-    if (!page || !document) {
-        [super mouseDown:event];
-        return;
-    }
-    NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
-    NSRect frame = [page frame];
-    double x = point.x - frame.origin.x;
-    double y = point.y - frame.origin.y;
-    MacLink link = {};
-    if (MacLinkAtPoint(document, [page pageNo], x, y, [page layoutZoom], [_owner documentRotation], &link)) {
-        MacFreeLink(&link);
-        [_owner activateLinkAtPage:[page pageNo] x:x y:y zoom:[page layoutZoom]];
-        return;
-    }
-    _selectingText = MacStartSelection(document, [page pageNo], x, y, [page layoutZoom], [_owner documentRotation]);
-    if (_selectingText) {
-        [_owner selectionChanged];
-        return;
-    }
-    [super mouseDown:event];
+- (void)application:(NSApplication*)sender openFiles:(NSArray*)filenames {
+    [self openPaths:filenames];
+    [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 
-- (void)mouseDragged:(NSEvent*)event {
-    if (!_selectingText) {
-        [super mouseDragged:event];
-        return;
+- (BOOL)application:(NSApplication*)sender openFile:(NSString*)filename {
+    (void)sender;
+    [self openPaths:@[ filename ]];
+    return YES;
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication*)sender hasVisibleWindows:(BOOL)flag {
+    (void)sender;
+    if (!flag) {
+        [_window makeKeyAndOrderFront:nil];
     }
-    NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
-    SumatraPageImage* page = [self pageAtPoint:point];
-    if (!page) {
-        return;
+    return YES;
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender {
+    (void)sender;
+    return YES;
+}
+
+- (BOOL)applicationSupportsSecureRestorableState:(NSApplication*)app {
+    (void)app;
+    return YES;
+}
+
+- (void)applicationWillTerminate:(NSNotification*)notification {
+    (void)notification;
+    [self stopWatching];
+    if (_keyMonitor) {
+        [NSEvent removeMonitor:_keyMonitor];
+        [_keyMonitor release];
+        _keyMonitor = nil;
     }
-    NSRect frame = [page frame];
-    if (MacUpdateSelection([_owner documentHandle], [page pageNo], point.x - frame.origin.x, point.y - frame.origin.y,
-                           [page layoutZoom], [_owner documentRotation])) {
-        [_owner selectionChanged];
+
+    NSInteger activeIndex = [self activeIndex];
+    if (_active) {
+        _active.scrollOrigin = [[_scrollView contentView] bounds].origin;
+    }
+    MacPrefsBeginSession();
+    for (SumatraTabState* tab in _tabs) {
+        MacPrefsViewState state = [self prefsStateForTab:tab];
+        MacPrefsAppendSession(FsPath(tab.path), &state);
+    }
+    MacPrefsFinishSession((int)MAX(activeIndex, (NSInteger)0));
+
+    [self deactivateActiveTab];
+    for (SumatraTabState* tab in _tabs) {
+        [self saveTabState:tab];
+        void* doc = tab.document;
+        tab.document = nullptr;
+        [_sidebar documentWillClose:doc];
+        MacCloseDocument(doc);
+    }
+    [_tabs removeAllObjects];
+    [_sidebar shutdown];
+    MacPrefsShutdown();
+    MacShutdown();
+}
+
+- (void)restoreSession {
+    int count = MacPrefsSessionCount();
+    int activeIndex = MacPrefsSessionActiveTab();
+    NSString* activePath = nil;
+    NSMutableArray* paths = [NSMutableArray array];
+    for (int i = 0; i < count; i++) {
+        MacPrefsViewState state = {};
+        char* pathFs = MacPrefsCopySessionTab(i, &state);
+        NSString* path = StringFromFs(pathFs);
+        MacFreeString(pathFs);
+        // silently skip documents that were moved or deleted since
+        if (!path || ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            continue;
+        }
+        if (i == activeIndex) {
+            activePath = path;
+        }
+        [paths addObject:path];
+    }
+    [self openPaths:paths];
+    int idx = activePath ? [self tabIndexForPath:activePath] : -1;
+    if (idx >= 0) {
+        [self activateTabAtIndex:idx];
     }
 }
 
-- (void)mouseUp:(NSEvent*)event {
-    if (_selectingText) {
-        _selectingText = NO;
-        [_owner selectionChanged];
-        return;
-    }
-    [super mouseUp:event];
+- (void)createMainWindow {
+    NSRect frame = NSMakeRect(0, 0, 1000, 820);
+    NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable |
+                       NSWindowStyleMaskResizable;
+    _window = [[NSWindow alloc] initWithContentRect:frame styleMask:style backing:NSBackingStoreBuffered defer:NO];
+    [_window setReleasedWhenClosed:NO];
+    [_window setTitle:@"SumatraPDF"];
+    [_window setDelegate:self];
+    [_window setMinSize:NSMakeSize(480, 360)];
+    [_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
+    [_window setAcceptsMouseMovedEvents:YES];
+
+    SumatraDropView* content = [[[SumatraDropView alloc] initWithFrame:frame] autorelease];
+    [content setDropTarget:self];
+    [_window setContentView:content];
+    NSRect bounds = [content bounds];
+
+    _splitView = [[NSSplitView alloc] initWithFrame:bounds];
+    [_splitView setVertical:YES];
+    [_splitView setDividerStyle:NSSplitViewDividerStyleThin];
+    [_splitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [_splitView setDelegate:self];
+
+    _sidebar = [[SumatraSidebar alloc] initWithHost:self];
+    NSView* sidebarView = [_sidebar view];
+    [sidebarView setFrame:NSMakeRect(0, 0, _sidebarWidth, bounds.size.height)];
+    NSInteger mode = [[NSUserDefaults standardUserDefaults] integerForKey:kDefSidebarMode];
+    [_sidebar setMode:mode == SumatraSidebarModeThumbnails ? SumatraSidebarModeThumbnails : SumatraSidebarModeOutline];
+
+    NSRect scrollFrame =
+        NSMakeRect(0, 0, MAX(kDocumentMinWidth, bounds.size.width - _sidebarWidth), bounds.size.height);
+    _scrollView = [[NSScrollView alloc] initWithFrame:scrollFrame];
+    [_scrollView setHasVerticalScroller:YES];
+    [_scrollView setHasHorizontalScroller:YES];
+    [_scrollView setAutohidesScrollers:YES];
+    [_scrollView setBorderType:NSNoBorder];
+    [_scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [_scrollView setDrawsBackground:YES];
+    [_scrollView setBackgroundColor:[NSColor colorWithCalibratedWhite:0.18 alpha:1.0]];
+
+    _documentView = [[SumatraDocumentView alloc] initWithFrame:[[_scrollView contentView] bounds]];
+    [_documentView setOwner:self];
+    [_scrollView setDocumentView:_documentView];
+
+    NSClipView* clip = [_scrollView contentView];
+    [clip setPostsBoundsChangedNotifications:YES];
+    [clip setPostsFrameChangedNotifications:YES];
+    NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+    [center addObserver:self selector:@selector(clipBoundsChanged:) name:NSViewBoundsDidChangeNotification object:clip];
+    [center addObserver:self selector:@selector(clipFrameChanged:) name:NSViewFrameDidChangeNotification object:clip];
+
+    [_splitView addSubview:sidebarView];
+    [_splitView addSubview:_scrollView];
+    [content addSubview:_splitView];
+    [self setSidebarVisible:_sidebarVisible];
+
+    [self installToolbar];
+    [_window center];
+    [_window setFrameAutosaveName:@"SumatraPDFMainWindow"];
+    [self showEmptyState];
+    [_window makeFirstResponder:_documentView];
 }
 
-// Page navigation and zoom via the keyboard. Menu items provide the ⌘-modified
-// equivalents; bare keys are handled here so arrows/space/page keys just work.
-- (void)keyDown:(NSEvent*)event {
-    NSString* chars = [event charactersIgnoringModifiers];
-    unichar c = [chars length] ? [chars characterAtIndex:0] : 0;
-    id<SumatraDocumentViewOwner> owner = _owner;
-    if (!owner) {
-        [super keyDown:event];
+// Keys that menus can't bind reliably: ⌃⇥ / ⌃⇧⇥ (tab switching, otherwise
+// eaten by the key view loop) and ⌘= (zoom in without shift).
+- (void)installKeyMonitor {
+    _keyMonitor = [[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                                         handler:^NSEvent*(NSEvent* event) {
+                                                           return [self handleMonitoredKey:event];
+                                                         }] retain];
+}
+
+- (NSEvent*)handleMonitoredKey:(NSEvent*)event {
+    if ([event window] != _window) {
+        return event;
+    }
+    NSEventModifierFlags mods = [event modifierFlags] & (NSEventModifierFlagShift | NSEventModifierFlagControl |
+                                                         NSEventModifierFlagOption | NSEventModifierFlagCommand);
+    const unsigned short kTabKeyCode = 48;
+    if ([event keyCode] == kTabKeyCode && (mods & NSEventModifierFlagControl) &&
+        !(mods & (NSEventModifierFlagCommand | NSEventModifierFlagOption))) {
+        [self selectRelativeTab:(mods & NSEventModifierFlagShift) ? -1 : 1];
+        return nil;
+    }
+    if (mods == NSEventModifierFlagCommand && [[event charactersIgnoringModifiers] isEqualToString:@"="] && _active) {
+        [self zoomIn:nil];
+        return nil;
+    }
+    return event;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self];
+    [self stopWatching];
+    [_window setDelegate:nil];
+    [_toolbar setDelegate:nil];
+    [_splitView setDelegate:nil];
+    [_documentView setOwner:nil];
+    [_window release];
+    [_splitView release];
+    [_scrollView release];
+    [_documentView release];
+    [_sidebar release];
+    [_toolbar release];
+    [_tabSelector release];
+    [_pageField release];
+    [_pageCountLabel release];
+    [_searchField release];
+    [_findSpinner release];
+    [_findStatus release];
+    [_tabs release];
+    [_closedPaths release];
+    [_pendingOpen release];
+    [_alertQueue release];
+    [_imageCache release];
+    [_findText release];
+    [super dealloc];
+}
+
+#pragma mark - Alerts
+
+// Sheets on the main window, one at a time; alerts arriving meanwhile queue up.
+- (void)presentAlert:(NSAlert*)alert completion:(SumatraAlertDone)done {
+    SumatraAlertDone copied = nil;
+    if (done) {
+        copied = [[done copy] autorelease];
+    }
+    if (![_window isVisible]) {
+        NSModalResponse response = [alert runModal];
+        if (copied) {
+            copied(response);
+        }
         return;
     }
+    if (_alertShowing || [_window attachedSheet]) {
+        [_alertQueue addObject:@[ alert, copied ? (id)copied : (id)[NSNull null] ]];
+        return;
+    }
+    _alertShowing = YES;
+    [alert beginSheetModalForWindow:_window
+                  completionHandler:^(NSModalResponse response) {
+                    _alertShowing = NO;
+                    if (copied) {
+                        copied(response);
+                    }
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                      [self presentNextAlert];
+                    });
+                  }];
+}
 
-    switch (c) {
-        case NSRightArrowFunctionKey:
-        case NSDownArrowFunctionKey:
-        case NSPageDownFunctionKey:
-        case ' ':
-            [owner goToNextPage:nil];
-            return;
-        case NSLeftArrowFunctionKey:
-        case NSUpArrowFunctionKey:
-        case NSPageUpFunctionKey:
-            [owner goToPrevPage:nil];
-            return;
-        case NSHomeFunctionKey:
-            [owner goToFirstPage:nil];
-            return;
-        case NSEndFunctionKey:
-            [owner goToLastPage:nil];
-            return;
-        case '+':
-        case '=':
-            [owner zoomIn:nil];
-            return;
-        case '-':
-        case '_':
-            [owner zoomOut:nil];
-            return;
-        case '0':
-            [owner zoomActualSize:nil];
-            return;
-        case '?':
-            [owner showKeyboardShortcuts:nil];
-            return;
-        default:
+- (void)presentNextAlert {
+    if (_alertShowing || [_alertQueue count] == 0) {
+        return;
+    }
+    NSArray* entry = [[[_alertQueue objectAtIndex:0] retain] autorelease];
+    [_alertQueue removeObjectAtIndex:0];
+    id stored = [entry objectAtIndex:1];
+    SumatraAlertDone done = nil;
+    if (stored != [NSNull null]) {
+        done = (SumatraAlertDone)stored;
+    }
+    [self presentAlert:[entry objectAtIndex:0] completion:done];
+}
+
+- (void)showAlertWithMessage:(NSString*)message info:(NSString*)info style:(NSAlertStyle)style {
+    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
+    [alert setAlertStyle:style];
+    [alert setMessageText:message];
+    if ([info length] > 0) {
+        [alert setInformativeText:info];
+    }
+    [self presentAlert:alert completion:nil];
+}
+
+- (void)reportOpenError:(MacOpenError)err path:(NSString*)path {
+    NSString* name = [[NSFileManager defaultManager] displayNameAtPath:path];
+    if ([name length] == 0) {
+        name = [path lastPathComponent];
+    }
+    NSString* message = nil;
+    NSString* info = nil;
+    NSAlertStyle style = NSAlertStyleWarning;
+    switch (err) {
+        case MacOpenError::NotFound:
+            message = [NSString stringWithFormat:@"“%@” could not be found.", name];
+            info = [path stringByAbbreviatingWithTildeInPath];
+            break;
+        case MacOpenError::Unreadable:
+            message = [NSString stringWithFormat:@"“%@” could not be read.", name];
+            info = @"Check that you have permission to read the file.";
+            break;
+        case MacOpenError::Unsupported: {
+            char* formats = MacCopySupportedFormats();
+            NSString* list = StringFromUtf8(formats);
+            MacFreeString(formats);
+            message = [NSString stringWithFormat:@"“%@” is not a document SumatraPDF can open.", name];
+            info = list ? [NSString stringWithFormat:@"Supported formats: %@.", list] : nil;
+            break;
+        }
+        case MacOpenError::PasswordCancelled:
+            message = [NSString stringWithFormat:@"“%@” was not opened.", name];
+            info = @"The document is protected by a password and no valid password was entered.";
+            style = NSAlertStyleInformational;
+            break;
+        case MacOpenError::RendererFailed:
+            message = [NSString stringWithFormat:@"“%@” could not be displayed.", name];
+            info = @"The page renderer could not be started.";
+            break;
+        case MacOpenError::Damaged:
+        case MacOpenError::None:
+            message = [NSString stringWithFormat:@"“%@” could not be opened.", name];
+            info = @"The file may be damaged, or it is not a valid document of its type.";
             break;
     }
-    [super keyDown:event];
-}
-
-@end
-
-@interface SumatraPrintView : NSView
-@property(nonatomic) void* document;
-@property(nonatomic) int pageCount;
-@property(nonatomic) int pageNo;
-@property(nonatomic) int rotation;
-@end
-
-@implementation SumatraPrintView
-
-- (BOOL)isFlipped {
-    return YES;
-}
-
-- (BOOL)knowsPageRange:(NSRangePointer)range {
-    range->location = 1;
-    range->length = (NSUInteger)_pageCount;
-    return YES;
-}
-
-- (NSRect)rectForPage:(NSInteger)page {
-    _pageNo = (int)page;
-    double width = 612, height = 792;
-    MacPageSize(_document, _pageNo, &width, &height);
-    if (_rotation == 90 || _rotation == 270) {
-        double value = width;
-        width = height;
-        height = value;
+    if (!_active) {
+        [_documentView setMessage:message];
     }
-    return NSMakeRect(0, 0, width, height);
+    [self showAlertWithMessage:message info:info style:style];
 }
 
-- (void)drawRect:(NSRect)dirtyRect {
-    (void)dirtyRect;
-    double dpi = MacFileDPI(_document);
-    float zoom = (float)(2.0 * kCocoaPointsPerInch / (dpi > 0 ? dpi : 96.0));
+#pragma mark - Opening documents
+
+- (void)openPaths:(NSArray*)paths {
+    if (!_launched) {
+        [_pendingOpen addObjectsFromArray:paths];
+        return;
+    }
+    NSMutableSet* seen = [NSMutableSet set];
+    for (NSString* path in paths) {
+        if (![path isKindOfClass:[NSString class]] || [path length] == 0) {
+            continue;
+        }
+        NSString* canonical = CanonicalPath(ResolveDocumentPath(path));
+        if ([seen containsObject:canonical]) {
+            continue;
+        }
+        [seen addObject:canonical];
+        [self openPath:path];
+    }
+}
+
+- (int)tabIndexForPath:(NSString*)path {
+    NSString* canonical = CanonicalPath(path);
+    for (NSUInteger i = 0; i < [_tabs count]; i++) {
+        SumatraTabState* tab = [_tabs objectAtIndex:i];
+        if ([tab.canonicalPath isEqualToString:canonical]) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+- (BOOL)openPath:(NSString*)path {
+    path = ResolveDocumentPath(path);
+    if ([path length] == 0) {
+        return NO;
+    }
+    int existing = [self tabIndexForPath:path];
+    if (existing >= 0) {
+        [self activateTabAtIndex:existing];
+        return YES;
+    }
+
+    MacOpenError err = MacOpenError::None;
+    _openDepth++;
+    void* doc = MacOpenDocumentEx((void*)_window, FsPath(path), PageRenderReady, self, &err);
+    _openDepth--;
+    if (!doc) {
+        [self reportOpenError:err path:path];
+        return NO;
+    }
+    // a password prompt runs a modal loop; the same file may have been opened meanwhile
+    existing = [self tabIndexForPath:path];
+    if (existing >= 0) {
+        [_sidebar documentWillClose:doc];
+        MacCloseDocument(doc);
+        [self activateTabAtIndex:existing];
+        return YES;
+    }
+
+    SumatraTabState* tab = [[[SumatraTabState alloc] init] autorelease];
+    tab.document = doc;
+    tab.path = path;
+    tab.canonicalPath = CanonicalPath(path);
+    tab.pageCount = MacPageCount(doc);
+    tab.modificationDate = ModificationDate(path);
+    tab.needsInitialScroll = YES;
+    MacPrefsViewState state = {};
+    if (MacPrefsOpenDocument(FsPath(path), &state) && state.valid) {
+        tab.continuous = state.continuous ? YES : NO;
+        tab.rotation = ((state.rotation % 360) + 360) % 360 / 90 * 90;
+        tab.currentPage = MAX(1, MIN(tab.pageCount, state.pageNo));
+        if (state.zoomVirtual > 0) {
+            tab.zoom = MAX(kZoomMin, MIN(kZoomMax, (CGFloat)(state.zoomVirtual / 100.0)));
+        } else {
+            tab.zoom = state.zoomVirtual == kMacZoomFitWidth ? kMacZoomFitWidth : kMacZoomFitPage;
+        }
+    }
+    [_tabs addObject:tab];
+    [self activateTabAtIndex:(int)[_tabs count] - 1];
+    [_window makeKeyAndOrderFront:nil];
+    return YES;
+}
+
+- (MacPrefsViewState)prefsStateForTab:(SumatraTabState*)tab {
+    MacPrefsViewState state = {};
+    state.valid = true;
+    state.continuous = tab.continuous;
+    state.zoomVirtual = tab.zoom > 0 ? tab.zoom * 100.0 : tab.zoom;
+    state.rotation = tab.rotation;
+    state.pageNo = tab.currentPage;
+    return state;
+}
+
+- (void)saveTabState:(SumatraTabState*)tab {
+    if (!tab.path) {
+        return;
+    }
+    MacPrefsViewState state = [self prefsStateForTab:tab];
+    MacPrefsSaveDocument(FsPath(tab.path), &state);
+}
+
+#pragma mark - Tabs
+
+- (NSInteger)activeIndex {
+    if (!_active) {
+        return -1;
+    }
+    NSUInteger idx = [_tabs indexOfObjectIdenticalTo:_active];
+    return idx == NSNotFound ? -1 : (NSInteger)idx;
+}
+
+- (void)refreshTabSelector {
+    NSInteger count = (NSInteger)[_tabs count];
+    [_tabSelector setSegmentCount:count];
+    for (NSInteger i = 0; i < count; i++) {
+        SumatraTabState* tab = [_tabs objectAtIndex:(NSUInteger)i];
+        [_tabSelector setLabel:ShortTabLabel([tab.path lastPathComponent]) forSegment:i];
+        [_tabSelector setToolTip:tab.path forSegment:i];
+    }
+    NSInteger active = [self activeIndex];
+    if (active >= 0) {
+        [_tabSelector setSelectedSegment:active];
+    }
+    [_tabSelector setEnabled:count > 0];
+}
+
+// Frees the render cache of the tab being left: only the active document keeps
+// rendered pages, so memory stays bounded with many tabs.
+- (void)deactivateActiveTab {
+    SumatraTabState* tab = _active;
+    if (!tab) {
+        return;
+    }
+    tab.scrollOrigin = [[_scrollView contentView] bounds].origin;
+    tab.hasScrollOrigin = YES;
+    tab.findToken = 0;
+    [self stopWatching];
+    MacFindCancel(tab.document);
+    MacCancelPendingRenders(tab.document);
+    MacResetRenderer(tab.document);
+    _active = nil;
+    [_imageCache removeAllObjects];
+    [self setFindBusy:NO];
+    [self showFindStatus:nil];
+}
+
+- (void)activateTabAtIndex:(int)index {
+    if (index < 0 || index >= (int)[_tabs count]) {
+        return;
+    }
+    SumatraTabState* tab = [_tabs objectAtIndex:(NSUInteger)index];
+    if (tab == _active) {
+        [self refreshTabSelector];
+        return;
+    }
+    [self deactivateActiveTab];
+    _active = tab;
+    _pinnedPage = NO;
+    _smartZoomReturn = 0;
+    _lastNotifiedPage = 0;
+    [_documentView setMessage:nil];
+
+    // documents in background tabs aren't watched; catch up on activation
+    NSDate* date = ModificationDate(tab.path);
+    if (tab.modificationDate && date && ![date isEqualToDate:tab.modificationDate]) {
+        [self reloadTab:tab];
+        if (_active != tab) {
+            return;
+        }
+    }
+
+    [_sidebar documentChanged];
+    [self restoreViewForActiveTab];
+    [self startWatchingActiveTab];
+    [self refreshTabSelector];
+    [self updateWindowTitle];
+    [self updatePageControls];
+    [_window makeFirstResponder:_documentView];
+}
+
+- (void)restoreViewForActiveTab {
+    SumatraTabState* tab = _active;
+    [self updateLayout];
+    if (tab.needsInitialScroll || !tab.hasScrollOrigin) {
+        tab.needsInitialScroll = NO;
+        [self showPage:tab.currentPage position:PagePosition::Top];
+        return;
+    }
+    [self scrollToOrigin:tab.scrollOrigin];
+    [self updateLayout];
+}
+
+- (void)closeTabAtIndex:(int)index {
+    if (index < 0 || index >= (int)[_tabs count]) {
+        return;
+    }
+    SumatraTabState* tab = [[[_tabs objectAtIndex:(NSUInteger)index] retain] autorelease];
+    if (tab.document && tab.document == _printingDocument) {
+        NSBeep();
+        return;
+    }
+    BOOL wasActive = tab == _active;
+    if (wasActive) {
+        [self deactivateActiveTab];
+    }
+    [self saveTabState:tab];
+    if (tab.path) {
+        [_closedPaths removeObject:tab.path];
+        [_closedPaths addObject:tab.path];
+        while ([_closedPaths count] > kMaxClosedTabs) {
+            [_closedPaths removeObjectAtIndex:0];
+        }
+    }
+    [_tabs removeObjectAtIndex:(NSUInteger)index];
+    void* doc = tab.document;
+    tab.document = nullptr;
+    [_sidebar documentWillClose:doc];
+    MacCloseDocument(doc);
+
+    if (!wasActive) {
+        [self refreshTabSelector];
+        return;
+    }
+    if ([_tabs count] > 0) {
+        [self activateTabAtIndex:MIN(index, (int)[_tabs count] - 1)];
+        return;
+    }
+    [_sidebar documentChanged];
+    [self refreshTabSelector];
+    [self showEmptyState];
+}
+
+- (void)selectRelativeTab:(int)direction {
+    int count = (int)[_tabs count];
+    if (count < 2) {
+        return;
+    }
+    int current = (int)MAX([self activeIndex], (NSInteger)0);
+    [self activateTabAtIndex:(current + direction + count) % count];
+}
+
+- (void)showEmptyState {
+    [_documentView setPages:nil];
+    [_documentView setFrameSize:[[_scrollView contentView] bounds].size];
+    [self updateWindowTitle];
+    [self updatePageControls];
+    [self refreshTabSelector];
+}
+
+- (void)updateWindowTitle {
+    NSString* path = _active.path;
+    if (!path) {
+        [_window setTitle:@"SumatraPDF"];
+        [_window setRepresentedURL:nil];
+        return;
+    }
+    [_window setRepresentedURL:[NSURL fileURLWithPath:path]];
+    NSString* name = [[NSFileManager defaultManager] displayNameAtPath:path];
+    [_window setTitle:[name length] ? name : [path lastPathComponent]];
+}
+
+- (void)updatePageControls {
+    SumatraTabState* tab = _active;
+    BOOL has = tab != nil;
+    if ([_pageField currentEditor] == nil) {
+        [_pageField setStringValue:has ? [NSString stringWithFormat:@"%d", tab.currentPage] : @""];
+    }
+    [_pageField setEnabled:has];
+    [_pageCountLabel setStringValue:has ? [NSString stringWithFormat:@"of %d", tab.pageCount] : @""];
+    [_searchField setEnabled:has];
+    NSString* subtitle = has ? [NSString stringWithFormat:@"Page %d of %d", tab.currentPage, tab.pageCount] : @"";
+    if ([_window respondsToSelector:@selector(setSubtitle:)]) {
+        [_window performSelector:@selector(setSubtitle:) withObject:subtitle];
+    }
+    [_toolbar validateVisibleItems];
+}
+
+- (void)pageStateChanged {
+    [self updatePageControls];
+    int page = _active ? _active.currentPage : 0;
+    if (page == _lastNotifiedPage) {
+        return;
+    }
+    _lastNotifiedPage = page;
+    if (page > 0) {
+        [_sidebar currentPageChanged:page];
+    }
+    NSAccessibilityPostNotification(_documentView, NSAccessibilityValueChangedNotification);
+}
+
+#pragma mark - File watching
+
+- (void)stopWatching {
+    if (_fileWatcher) {
+        dispatch_source_cancel(_fileWatcher);
+        dispatch_release(_fileWatcher);
+        _fileWatcher = nullptr;
+    }
+    [_watchedPath release];
+    _watchedPath = nil;
+}
+
+// Reloads the active document after writes or an atomic replace (e.g. a
+// LaTeX build), debounced so a half-written file isn't opened.
+- (void)startWatchingActiveTab {
+    [self stopWatching];
+    NSString* path = _active.path;
+    if (!path) {
+        return;
+    }
+    int fd = open(FsPath(path), O_EVTONLY);
+    if (fd < 0) {
+        return;
+    }
+    unsigned long mask = DISPATCH_VNODE_WRITE | DISPATCH_VNODE_EXTEND | DISPATCH_VNODE_DELETE | DISPATCH_VNODE_RENAME;
+    dispatch_source_t source =
+        dispatch_source_create(DISPATCH_SOURCE_TYPE_VNODE, (uintptr_t)fd, mask, dispatch_get_main_queue());
+    if (!source) {
+        close(fd);
+        return;
+    }
+    NSString* watched = [[path copy] autorelease];
+    dispatch_source_set_event_handler(source, ^{
+      [self fileChangedOnDisk:watched];
+    });
+    dispatch_source_set_cancel_handler(source, ^{
+      close(fd);
+    });
+    dispatch_resume(source);
+    _fileWatcher = source;
+    _watchedPath = [watched retain];
+}
+
+- (void)fileChangedOnDisk:(NSString*)path {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reloadIfChanged:) object:path];
+    [self performSelector:@selector(reloadIfChanged:) withObject:path afterDelay:kReloadDelay];
+}
+
+- (void)reloadIfChanged:(NSString*)path {
+    SumatraTabState* tab = _active;
+    if (!tab || ![tab.path isEqualToString:path]) {
+        return;
+    }
+    // never replace a document under a modal loop (password prompt, printing)
+    if (_openDepth > 0 || [NSApp modalWindow] || (_printingDocument && tab.document == _printingDocument)) {
+        [self performSelector:@selector(reloadIfChanged:) withObject:path afterDelay:1.0];
+        return;
+    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        return;
+    }
+    [self reloadTab:tab];
+}
+
+// Replaces the tab's document with a fresh copy; keeps the old one if the new
+// file can't be opened (e.g. still being written).
+- (void)reloadTab:(SumatraTabState*)tab {
+    MacOpenError err = MacOpenError::None;
+    _openDepth++;
+    void* doc = MacOpenDocumentEx((void*)_window, FsPath(tab.path), PageRenderReady, self, &err);
+    _openDepth--;
+    BOOL isActive = tab == _active;
+    if (!doc) {
+        if (isActive) {
+            [self startWatchingActiveTab];
+        }
+        return;
+    }
+    NSPoint origin = [[_scrollView contentView] bounds].origin;
+    void* old = tab.document;
+    MacFindCancel(old);
+    [_sidebar documentWillClose:old];
+    MacCloseDocument(old);
+    tab.document = doc;
+    tab.pageCount = MacPageCount(doc);
+    tab.currentPage = MAX(1, MIN(tab.pageCount, tab.currentPage));
+    tab.modificationDate = ModificationDate(tab.path);
+    tab.findToken = 0;
+    [tab.history removeAllObjects];
+    tab.historyIndex = 0;
+    if (!isActive) {
+        return;
+    }
+    [_imageCache removeAllObjects];
+    [self setFindBusy:NO];
+    [_sidebar documentChanged];
+    [self updateLayout];
+    [self scrollToOrigin:origin];
+    [self updateLayout];
+    [self startWatchingActiveTab];
+}
+
+#pragma mark - Layout and rendering
+
+- (CGFloat)backingScale {
+    CGFloat scale = [_window backingScaleFactor];
+    return scale > 0 ? scale : 1.0;
+}
+
+- (BOOL)buildLayout:(MacDocumentLayout*)layout {
+    SumatraTabState* tab = _active;
+    if (!tab || !tab.document) {
+        return NO;
+    }
+    NSRect visible = [[_scrollView contentView] bounds];
+    MacLayoutParams params = {};
+    params.continuous = tab.continuous;
+    params.startPage = MAX(1, tab.currentPage);
+    params.viewX = (int)floor(visible.origin.x);
+    params.viewY = (int)floor(visible.origin.y);
+    params.viewWidth = (int)MAX(1.0, floor(visible.size.width));
+    params.viewHeight = (int)MAX(1.0, floor(visible.size.height));
+    params.zoomVirtual = tab.zoom > 0 ? tab.zoom * 100.0 : tab.zoom;
+    params.backingScale = [self backingScale];
+    params.rotation = tab.rotation;
+    return MacLayoutDocument(tab.document, &params, layout);
+}
+
+- (NSRect)frameOfPage:(int)pageNo zoom:(double*)zoomOut {
+    MacDocumentLayout layout = {};
+    NSRect frame = NSZeroRect;
+    if (![self buildLayout:&layout]) {
+        return frame;
+    }
+    if (pageNo >= 1 && pageNo <= layout.pageCount && layout.pages[pageNo - 1].shown) {
+        MacLayoutPage* p = &layout.pages[pageNo - 1];
+        frame = NSMakeRect(p->x, p->y, p->width, p->height);
+        if (zoomOut) {
+            *zoomOut = p->layoutZoom;
+        }
+    }
+    MacFreeDocumentLayout(&layout);
+    return frame;
+}
+
+// The exact render if available (copied once from the render service into
+// _imageCache), else a request plus the best stale image as placeholder.
+- (CGImageRef)imageForPage:(int)pageNo renderZoom:(float)renderZoom request:(BOOL)request {
+    SumatraTabState* tab = _active;
+    NSNumber* key = [NSNumber numberWithInt:pageNo];
+    SumatraCachedImage* cached = [_imageCache objectForKey:key];
+    int rotation = tab.rotation;
+    if (cached && cached.renderZoom == renderZoom && cached.rotation == rotation) {
+        return cached.image;
+    }
     MacRenderedPage page = {};
-    if (!MacRenderPage(_document, _pageNo, zoom, _rotation, &page)) {
+    if (MacCopyRenderedPage(tab.document, pageNo, renderZoom, rotation, &page)) {
+        CGImageRef image = SumatraCreateImage(&page);
+        MacFreeRenderedPage(&page);
+        if (image) {
+            SumatraCachedImage* entry = [[[SumatraCachedImage alloc] init] autorelease];
+            entry.image = image;
+            entry.renderZoom = renderZoom;
+            entry.rotation = rotation;
+            CGImageRelease(image);
+            [_imageCache setObject:entry forKey:key];
+            return entry.image;
+        }
+    }
+    if (request) {
+        MacRequestPage(tab.document, pageNo, renderZoom, rotation, 0);
+    }
+    if (cached && cached.rotation == rotation) {
+        return cached.image;
+    }
+    return nullptr;
+}
+
+- (void)pruneImageCacheFrom:(int)first to:(int)last {
+    for (NSNumber* key in [_imageCache allKeys]) {
+        int pageNo = [key intValue];
+        if (pageNo < first || pageNo > last) {
+            [_imageCache removeObjectForKey:key];
+        }
+    }
+}
+
+- (NSArray*)highlightRects:(Highlight)kind forPage:(const MacLayoutPage*)lp {
+    void* doc = _active.document;
+    int rotation = _active.rotation;
+    int count =
+        kind == Highlight::Find ? MacFindResultRectCount(doc, lp->pageNo) : MacSelectionRectCount(doc, lp->pageNo);
+    if (count <= 0) {
+        return nil;
+    }
+    NSMutableArray* rects = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (int i = 0; i < count; i++) {
+        MacDisplayRect r = {};
+        bool ok = kind == Highlight::Find ? MacFindResultRect(doc, lp->pageNo, i, lp->layoutZoom, rotation, &r)
+                                          : MacSelectionRect(doc, lp->pageNo, i, lp->layoutZoom, rotation, &r);
+        if (ok) {
+            [rects addObject:[NSValue valueWithRect:NSMakeRect(lp->x + r.x, lp->y + r.y, r.width, r.height)]];
+        }
+    }
+    return rects;
+}
+
+// Layout passes re-enter through scroll notifications (setting the canvas size
+// can move the clip view); those are folded into at most a few repeats.
+- (void)updateLayout {
+    if (_inLayout) {
+        _layoutAgain = YES;
         return;
     }
-    CGImageRef image = CreateImageFromRenderedPage(&page);
-    MacFreeRenderedPage(&page);
-    if (!image) {
+    _inLayout = YES;
+    for (int i = 0; i < 3; i++) {
+        _layoutAgain = NO;
+        [self layoutOnce];
+        if (!_layoutAgain) {
+            break;
+        }
+    }
+    _inLayout = NO;
+}
+
+- (void)layoutOnce {
+    SumatraTabState* tab = _active;
+    if (!tab || !tab.document) {
+        [self showEmptyState];
         return;
     }
-    NSRect bounds = [self bounds];
-    CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
-    CGContextSaveGState(ctx);
-    CGContextTranslateCTM(ctx, 0, bounds.size.height);
-    CGContextScaleCTM(ctx, 1, -1);
-    CGContextDrawImage(ctx, NSRectToCGRect(bounds), image);
-    CGContextRestoreGState(ctx);
-    CGImageRelease(image);
-}
-
-@end
-
-@interface SumatraAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSToolbarDelegate,
-                                         NSTextFieldDelegate, SumatraDocumentViewOwner>
-@property(nonatomic, retain) NSWindow* window;
-@property(nonatomic, retain) NSScrollView* scrollView;
-@property(nonatomic, retain) SumatraDocumentView* documentView;
-@property(nonatomic, retain) NSToolbar* toolbar;
-@property(nonatomic, retain) NSTextField* pageLabel;
-@property(nonatomic, copy) NSString* findText;
-@property(nonatomic) void* commandPalette;
-@property(nonatomic, retain) NSTextField* commandPaletteQuery;
-@property(nonatomic, retain) NSPopUpButton* commandPaletteItems;
-@property(nonatomic) dispatch_source_t fileWatcher;
-@property(nonatomic) int watchedFile;
-@property(nonatomic, retain) NSMutableArray* tabs;
-@property(nonatomic, retain) NSMutableArray* closedPaths;
-@property(nonatomic, retain) NSSegmentedControl* tabSelector;
-@property(nonatomic) int activeTab;
-@property(nonatomic) void* document;
-@property(nonatomic, copy) NSString* documentPath;
-@property(nonatomic) int pageCount;
-@property(nonatomic) int currentPage; // 1-based
-@property(nonatomic) int rotation;    // 0/90/180/270
-@property(nonatomic) CGFloat zoom;    // display zoom; 1 means actual size, 0 means fit to window
-@property(nonatomic) BOOL continuousView;
-- (void)installToolbar;
-- (void)updateToolbarStatus;
-- (BOOL)canPerformAction:(SEL)action;
-- (void)renderDocumentShowingErrors:(BOOL)showErrors;
-- (void)pageRenderReady;
-@end
-
-static void PageRenderReady(void* context) {
-    [(SumatraAppDelegate*)context pageRenderReady];
-}
-
-@implementation SumatraAppDelegate
-
-static NSImage* ToolbarImage(NSString* symbolName, NSString* fallbackName) {
-    NSImage* image = nil;
-    if ([NSImage respondsToSelector:@selector(imageWithSystemSymbolName:accessibilityDescription:)]) {
-        image = [NSImage imageWithSystemSymbolName:symbolName accessibilityDescription:nil];
+    MacDocumentLayout layout = {};
+    if (![self buildLayout:&layout]) {
+        [_documentView setPages:nil];
+        [_documentView setMessage:@"The document could not be laid out."];
+        return;
     }
-    if (!image && fallbackName) {
-        image = [NSImage imageNamed:fallbackName];
+    NSSize canvas = NSMakeSize(layout.canvasWidth, layout.canvasHeight);
+    if (!NSEqualSizes([_documentView frame].size, canvas)) {
+        [_documentView setFrameSize:canvas];
     }
-    [image setTemplate:YES];
-    return image;
+
+    // pages scrolled out of view lose their queued renders
+    BOOL request = !_liveMagnify;
+    if (request) {
+        MacCancelPendingRenders(tab.document);
+    }
+    NSMutableArray* pages = [NSMutableArray array];
+    int first = 0;
+    int last = 0;
+    for (int i = 0; i < layout.pageCount; i++) {
+        MacLayoutPage* lp = &layout.pages[i];
+        if (!lp->shown || lp->visibleRatio <= 0) {
+            continue;
+        }
+        SumatraPageImage* page = [[[SumatraPageImage alloc] init] autorelease];
+        page.pageNo = lp->pageNo;
+        page.frame = NSMakeRect(lp->x, lp->y, lp->width, lp->height);
+        page.layoutZoom = lp->layoutZoom;
+        page.image = [self imageForPage:lp->pageNo renderZoom:(float)lp->renderZoom request:request];
+        page.findRects = [self highlightRects:Highlight::Find forPage:lp];
+        page.selectionRects = [self highlightRects:Highlight::Selection forPage:lp];
+        [pages addObject:page];
+        if (first == 0) {
+            first = lp->pageNo;
+        }
+        last = lp->pageNo;
+    }
+
+    if (!_pinnedPage && layout.currentPage >= 1) {
+        tab.currentPage = layout.currentPage;
+    }
+    int current = MAX(1, MIN(layout.pageCount, tab.currentPage));
+    MacLayoutPage* currentPage = &layout.pages[current - 1];
+    if (currentPage->shown && currentPage->layoutZoom > 0) {
+        _currentLayoutZoom = currentPage->layoutZoom;
+    }
+
+    // prefetch neighbours; single page mode lays out one page, so reuse its zoom
+    if (request && first > 0) {
+        for (int d = 1; d <= 2; d++) {
+            int neighbours[] = {last + d, first - d};
+            for (int pageNo : neighbours) {
+                if (pageNo < 1 || pageNo > layout.pageCount) {
+                    continue;
+                }
+                MacLayoutPage* np = &layout.pages[pageNo - 1];
+                double zoom = np->shown ? np->renderZoom : currentPage->renderZoom;
+                MacRequestPage(tab.document, pageNo, (float)zoom, tab.rotation, d);
+            }
+        }
+        [self pruneImageCacheFrom:first - 2 to:last + 2];
+    }
+    MacFreeDocumentLayout(&layout);
+
+    [_documentView setMessage:nil];
+    [_documentView setPages:pages];
+    [self pageStateChanged];
 }
 
-static NSArray<NSString*>* ToolbarDefaultItems() {
+- (void)pageRenderReady {
+    if (_refreshScheduled) {
+        return;
+    }
+    _refreshScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      _refreshScheduled = NO;
+      if (_active) {
+          [self updateLayout];
+      }
+    });
+}
+
+#pragma mark - Scrolling
+
+- (void)scrollToOrigin:(NSPoint)origin {
+    NSClipView* clip = [_scrollView contentView];
+    NSRect visible = [clip bounds];
+    NSSize docSize = [_documentView frame].size;
+    CGFloat maxX = MAX(0.0, docSize.width - visible.size.width);
+    CGFloat maxY = MAX(0.0, docSize.height - visible.size.height);
+    origin.x = floor(MAX(0.0, MIN(maxX, origin.x)));
+    origin.y = floor(MAX(0.0, MIN(maxY, origin.y)));
+    if (NSEqualPoints(origin, visible.origin)) {
+        return;
+    }
+    _programmaticScroll = YES;
+    [clip scrollToPoint:origin];
+    [_scrollView reflectScrolledClipView:clip];
+    _programmaticScroll = NO;
+}
+
+- (void)clipBoundsChanged:(NSNotification*)notification {
+    (void)notification;
+    if (_programmaticScroll || !_active) {
+        return;
+    }
+    if (_inLayout) {
+        _layoutAgain = YES;
+        return;
+    }
+    _pinnedPage = NO;
+    [self updateLayout];
+}
+
+- (void)clipFrameChanged:(NSNotification*)notification {
+    (void)notification;
+    if (!_active) {
+        [self showEmptyState];
+        return;
+    }
+    if (_inLayout) {
+        _layoutAgain = YES;
+        return;
+    }
+    NSRect visible = [[_scrollView contentView] bounds];
+    [self relayoutKeepingAnchor:[self anchorAtClipPoint:NSMakePoint(visible.size.width / 2.0, 0)]];
+}
+
+- (ViewAnchor)anchorAtClipPoint:(NSPoint)clipPoint {
+    ViewAnchor anchor = {0, 0, 0, clipPoint};
+    NSRect visible = [[_scrollView contentView] bounds];
+    NSPoint p = NSMakePoint(visible.origin.x + clipPoint.x, visible.origin.y + clipPoint.y);
+    SumatraPageImage* best = nil;
+    CGFloat bestDistance = CGFLOAT_MAX;
+    for (SumatraPageImage* page in [_documentView pages]) {
+        NSRect f = [page frame];
+        CGFloat d = 0;
+        if (p.y < NSMinY(f)) {
+            d = NSMinY(f) - p.y;
+        } else if (p.y > NSMaxY(f)) {
+            d = p.y - NSMaxY(f);
+        }
+        if (d < bestDistance) {
+            bestDistance = d;
+            best = page;
+        }
+    }
+    if (!best) {
+        return anchor;
+    }
+    NSRect f = [best frame];
+    anchor.pageNo = [best pageNo];
+    anchor.fx = f.size.width > 0 ? (p.x - f.origin.x) / f.size.width : 0;
+    anchor.fy = f.size.height > 0 ? (p.y - f.origin.y) / f.size.height : 0;
+    return anchor;
+}
+
+- (void)relayoutKeepingAnchor:(ViewAnchor)anchor {
+    [self updateLayout];
+    if (anchor.pageNo > 0) {
+        NSRect f = [self frameOfPage:anchor.pageNo zoom:nullptr];
+        if (!NSIsEmptyRect(f)) {
+            NSPoint p = NSMakePoint(f.origin.x + (anchor.fx * f.size.width), f.origin.y + (anchor.fy * f.size.height));
+            [self scrollToOrigin:NSMakePoint(p.x - anchor.clipPoint.x, p.y - anchor.clipPoint.y)];
+        }
+    }
+    [self updateLayout];
+}
+
+- (NSPoint)clipCenter {
+    NSRect visible = [[_scrollView contentView] bounds];
+    return NSMakePoint(visible.size.width / 2.0, visible.size.height / 2.0);
+}
+
+// Scrolls so pageNo's top (or bottom) edge is at the top (bottom) of the view.
+- (void)showPage:(int)pageNo position:(PagePosition)position {
+    SumatraTabState* tab = _active;
+    if (!tab) {
+        return;
+    }
+    tab.currentPage = MAX(1, MIN(tab.pageCount, pageNo));
+    _pinnedPage = YES;
+    [self updateLayout];
+    NSRect f = [self frameOfPage:tab.currentPage zoom:nullptr];
+    NSRect visible = [[_scrollView contentView] bounds];
+    NSPoint origin = visible.origin;
+    if (!NSIsEmptyRect(f)) {
+        if (position == PagePosition::Bottom) {
+            origin.y = NSMaxY(f) - visible.size.height + kPageTopGap;
+        } else {
+            origin.y = f.origin.y - kPageTopGap;
+        }
+    }
+    [self scrollToOrigin:origin];
+    [self updateLayout];
+}
+
+- (void)pushHistoryFrom:(int)from to:(int)to {
+    SumatraTabState* tab = _active;
+    if (!tab || from == to) {
+        return;
+    }
+    NSMutableArray* history = tab.history;
+    NSInteger idx = tab.historyIndex;
+    if ([history count] == 0) {
+        [history addObject:[NSNumber numberWithInt:from]];
+        idx = 0;
+    } else {
+        while ((NSInteger)[history count] > idx + 1) {
+            [history removeLastObject];
+        }
+        [history replaceObjectAtIndex:(NSUInteger)idx withObject:[NSNumber numberWithInt:from]];
+    }
+    [history addObject:[NSNumber numberWithInt:to]];
+    while ([history count] > kMaxHistory) {
+        [history removeObjectAtIndex:0];
+    }
+    tab.historyIndex = (int)[history count] - 1;
+}
+
+// A jump (link, outline, go to page, first/last page, find) that Back undoes.
+- (void)goToPage:(int)pageNo {
+    SumatraTabState* tab = _active;
+    if (!tab) {
+        return;
+    }
+    pageNo = MAX(1, MIN(tab.pageCount, pageNo));
+    [self pushHistoryFrom:tab.currentPage to:pageNo];
+    [self showPage:pageNo position:PagePosition::Top];
+}
+
+- (void)scrollVerticallyBy:(CGFloat)dy {
+    SumatraTabState* tab = _active;
+    if (!tab) {
+        return;
+    }
+    NSRect visible = [[_scrollView contentView] bounds];
+    CGFloat maxY = MAX(0.0, NSHeight([_documentView frame]) - visible.size.height);
+    if (!tab.continuous) {
+        if (dy > 0 && visible.origin.y >= maxY - 0.5) {
+            if (tab.currentPage < tab.pageCount) {
+                [self showPage:tab.currentPage + 1 position:PagePosition::Top];
+            }
+            return;
+        }
+        if (dy < 0 && visible.origin.y <= 0.5) {
+            if (tab.currentPage > 1) {
+                [self showPage:tab.currentPage - 1 position:PagePosition::Bottom];
+            }
+            return;
+        }
+    }
+    _pinnedPage = NO;
+    [self scrollToOrigin:NSMakePoint(visible.origin.x, visible.origin.y + dy)];
+    [self updateLayout];
+}
+
+#pragma mark - SumatraDocumentViewOwner
+
+- (void*)documentHandle {
+    return _active ? _active.document : nullptr;
+}
+
+- (int)documentRotation {
+    return _active ? _active.rotation : 0;
+}
+
+- (NSString*)documentAccessibilityLabel {
+    if (!_active) {
+        return @"No document open";
+    }
+    return [NSString stringWithFormat:@"%@, page %d of %d", [_active.path lastPathComponent], _active.currentPage,
+                                      _active.pageCount];
+}
+
+- (void)documentLinkClickedOnPage:(int)pageNo x:(double)x y:(double)y zoom:(double)zoom {
+    SumatraTabState* tab = _active;
+    if (!tab) {
+        return;
+    }
+    MacLink link = {};
+    if (!MacLinkAtPoint(tab.document, pageNo, x, y, zoom, tab.rotation, &link)) {
+        return;
+    }
+    MacLinkKind kind = link.kind;
+    int target = link.pageNo;
+    NSString* value = StringFromUtf8(link.value);
+    MacFreeLink(&link);
+    if (kind == MacLinkKind::Page) {
+        [self goToPage:target];
+    } else if (kind == MacLinkKind::Url && value) {
+        [self openLinkURL:value];
+    } else if (kind == MacLinkKind::File && value) {
+        [self openLinkedFile:value];
+    }
+}
+
+- (void)documentSelectionChanged {
+    [self updateLayout];
+}
+
+- (void)documentScrollLines:(int)lines {
+    [self scrollVerticallyBy:lines * kLineScroll];
+}
+
+- (void)documentScrollScreens:(int)screens {
+    NSRect visible = [[_scrollView contentView] bounds];
+    [self scrollVerticallyBy:screens * MAX(kLineScroll, visible.size.height - kLineScroll)];
+}
+
+// Left/right scroll sideways when the page is wider than the view, else flip pages.
+- (void)documentHorizontalArrow:(int)direction {
+    if (!_active) {
+        return;
+    }
+    NSRect visible = [[_scrollView contentView] bounds];
+    CGFloat maxX = MAX(0.0, NSWidth([_documentView frame]) - visible.size.width);
+    CGFloat x = MAX(0.0, MIN(maxX, visible.origin.x + (direction * kLineScroll)));
+    if (maxX > 0.5 && fabs(x - visible.origin.x) > 0.5) {
+        _pinnedPage = NO;
+        [self scrollToOrigin:NSMakePoint(x, visible.origin.y)];
+        [self updateLayout];
+        return;
+    }
+    if (direction > 0) {
+        [self goToNextPage:nil];
+    } else {
+        [self goToPrevPage:nil];
+    }
+}
+
+- (void)documentPanBy:(NSPoint)delta {
+    if (!_active) {
+        return;
+    }
+    NSRect visible = [[_scrollView contentView] bounds];
+    _pinnedPage = NO;
+    [self scrollToOrigin:NSMakePoint(visible.origin.x + delta.x, visible.origin.y + delta.y)];
+    [self updateLayout];
+}
+
+// While the pinch is in progress existing images are scaled; renders are
+// requested once it ends.
+- (void)documentMagnify:(CGFloat)magnification atPoint:(NSPoint)point ending:(BOOL)ending {
+    if (!_active) {
+        return;
+    }
+    NSRect visible = [[_scrollView contentView] bounds];
+    NSPoint clipPoint = NSMakePoint(point.x - visible.origin.x, point.y - visible.origin.y);
+    _liveMagnify = !ending;
+    _smartZoomReturn = 0;
+    [self setZoom:[self displayZoom] * (1.0 + magnification) anchorClipPoint:clipPoint];
+}
+
+// Two-finger double tap: zoom in around the point, again to go back.
+- (void)documentSmartMagnifyAtPoint:(NSPoint)point {
+    if (!_active) {
+        return;
+    }
+    NSRect visible = [[_scrollView contentView] bounds];
+    NSPoint clipPoint = NSMakePoint(point.x - visible.origin.x, point.y - visible.origin.y);
+    CGFloat target = 0;
+    if (_smartZoomReturn != 0) {
+        target = _smartZoomReturn;
+        _smartZoomReturn = 0;
+    } else {
+        _smartZoomReturn = _active.zoom;
+        target = MIN(kZoomMax, MAX(1.0, [self displayZoom] * 2.0));
+    }
+    [self setZoom:target anchorClipPoint:clipPoint];
+}
+
+// Single page mode: the wheel moves to the next/previous page at the page
+// edges, once per gesture (or per interval for mouse wheels).
+- (BOOL)documentWheelFlip:(NSEvent*)event {
+    SumatraTabState* tab = _active;
+    if (!tab || tab.continuous) {
+        return NO;
+    }
+    CGFloat dy = [event scrollingDeltaY];
+    if (fabs(dy) < 0.5 || fabs(dy) < fabs([event scrollingDeltaX])) {
+        return NO;
+    }
+    NSRect visible = [[_scrollView contentView] bounds];
+    CGFloat maxY = MAX(0.0, NSHeight([_documentView frame]) - visible.size.height);
+    BOOL towardEnd = dy < 0;
+    BOOL atEdge = towardEnd ? visible.origin.y >= maxY - 0.5 : visible.origin.y <= 0.5;
+    if (!atEdge) {
+        return NO;
+    }
+    NSEventPhase phase = [event phase];
+    BOOL gesture = phase != NSEventPhaseNone || [event momentumPhase] != NSEventPhaseNone;
+    if (gesture && phase != NSEventPhaseBegan) {
+        return YES;
+    }
+    double now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - _lastWheelFlip < kWheelFlipInterval) {
+        return YES;
+    }
+    _lastWheelFlip = now;
+    if (towardEnd && tab.currentPage < tab.pageCount) {
+        [self showPage:tab.currentPage + 1 position:PagePosition::Top];
+    } else if (!towardEnd && tab.currentPage > 1) {
+        [self showPage:tab.currentPage - 1 position:PagePosition::Bottom];
+    }
+    return YES;
+}
+
+// Esc: leave full screen, else clear the selection and search highlights.
+- (void)documentCancel {
+    if ([_window styleMask] & NSWindowStyleMaskFullScreen) {
+        [_window toggleFullScreen:nil];
+        return;
+    }
+    void* doc = [self documentHandle];
+    if (!doc) {
+        return;
+    }
+    MacClearSelection(doc);
+    MacFindCancel(doc);
+    MacFindClear(doc);
+    _active.findToken = 0;
+    [self setFindBusy:NO];
+    [self showFindStatus:nil];
+    [self updateLayout];
+}
+
+#pragma mark - SumatraSidebarHost
+
+- (void*)sidebarDocumentHandle {
+    return [self documentHandle];
+}
+
+- (int)sidebarCurrentPage {
+    return _active ? _active.currentPage : 0;
+}
+
+- (int)sidebarDocumentRotation {
+    return [self documentRotation];
+}
+
+- (void)sidebarGoToPage:(int)pageNo {
+    [self goToPage:pageNo];
+}
+
+#pragma mark - Links
+
+- (void)openLinkURL:(NSString*)value {
+    NSURL* url = [NSURL URLWithString:value];
+    NSString* scheme = [[url scheme] lowercaseString];
+    if ([scheme isEqualToString:@"file"]) {
+        [self openLinkedFile:[url path]];
+        return;
+    }
+    NSArray* allowed = @[ @"http", @"https", @"mailto", @"ftp" ];
+    if (!url || !scheme || ![allowed containsObject:scheme]) {
+        NSBeep();
+        return;
+    }
+    [[NSWorkspace sharedWorkspace] openURL:url];
+}
+
+// Supported documents open in a new tab; other files only after confirmation,
+// and programs never.
+- (void)openLinkedFile:(NSString*)value {
+    NSString* path = [value stringByExpandingTildeInPath];
+    if (![path isAbsolutePath]) {
+        path = [[_active.path stringByDeletingLastPathComponent] stringByAppendingPathComponent:path];
+    }
+    path = [path stringByStandardizingPath];
+    NSString* name = [path lastPathComponent];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        [self showAlertWithMessage:[NSString stringWithFormat:@"The linked file “%@” could not be found.", name]
+                              info:[path stringByAbbreviatingWithTildeInPath]
+                             style:NSAlertStyleWarning];
+        return;
+    }
+    BOOL isPackage = [[NSWorkspace sharedWorkspace] isFilePackageAtPath:path];
+    if (!isPackage && MacIsSupportedPath(FsPath(path))) {
+        [self openPath:path];
+        return;
+    }
+    if (isPackage || IsRiskyLinkTarget(path)) {
+        [self showAlertWithMessage:[NSString stringWithFormat:@"“%@” was not opened.", name]
+                              info:@"SumatraPDF doesn't open programs, scripts or installers from documents."
+                             style:NSAlertStyleWarning];
+        return;
+    }
+    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:[NSString stringWithFormat:@"Open “%@”?", name]];
+    [alert setInformativeText:[NSString stringWithFormat:@"The document links to this file. It will be opened "
+                                                         @"with its default application.\n\n%@",
+                                                         [path stringByAbbreviatingWithTildeInPath]]];
+    [alert addButtonWithTitle:@"Open"];
+    [alert addButtonWithTitle:@"Cancel"];
+    NSURL* url = [NSURL fileURLWithPath:path];
+    [self presentAlert:alert
+            completion:^(NSModalResponse response) {
+              if (response == NSAlertFirstButtonReturn) {
+                  [[NSWorkspace sharedWorkspace] openURL:url];
+              }
+            }];
+}
+
+#pragma mark - Toolbar
+
+static NSArray* ToolbarDefaultItems() {
     return @[
-        kToolbarOpen,
-        NSToolbarSeparatorItemIdentifier,
-        kToolbarTabs,
-        NSToolbarSeparatorItemIdentifier,
-        kToolbarPrevPage,
-        kToolbarNextPage,
-        kToolbarPageStatus,
-        NSToolbarFlexibleSpaceItemIdentifier,
-        kToolbarZoomOut,
-        kToolbarZoomActual,
-        kToolbarZoomIn,
-        NSToolbarSeparatorItemIdentifier,
-        kToolbarFitPage,
-        kToolbarFitWidth,
-        NSToolbarSeparatorItemIdentifier,
-        kToolbarRotateLeft,
-        kToolbarRotateRight,
+        kToolbarSidebar, kToolbarPrevPage, kToolbarNextPage, kToolbarPage, kToolbarTabs,
+        NSToolbarFlexibleSpaceItemIdentifier, kToolbarZoomOut, kToolbarZoomIn, kToolbarFitWidth, kToolbarRotateLeft,
+        kToolbarRotateRight, kToolbarSearch
     ];
 }
 
-static NSArray<NSString*>* ToolbarAllowedItems() {
-    NSMutableArray<NSString*>* items = [NSMutableArray arrayWithArray:ToolbarDefaultItems()];
-    [items addObject:NSToolbarSpaceItemIdentifier];
+static NSArray* ToolbarAllowedItems() {
+    NSMutableArray* items = [NSMutableArray arrayWithArray:ToolbarDefaultItems()];
+    [items addObjectsFromArray:@[
+        kToolbarOpen,
+        kToolbarZoomActual,
+        kToolbarFitPage,
+        NSToolbarSpaceItemIdentifier,
+    ]];
     return items;
 }
 
-- (NSToolbarItem*)toolbarItem:(NSString*)identifier label:(NSString*)label tooltip:(NSString*)tooltip image:(NSImage*)image
-                       action:(SEL)action {
-    NSToolbarItem* item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
-    [item setLabel:label];
-    [item setPaletteLabel:label];
-    [item setToolTip:tooltip];
-    [item setImage:image];
-    [item setTarget:self];
-    [item setAction:action];
-    return item;
-}
-
-- (NSToolbarItem*)pageStatusToolbarItem:(NSString*)identifier {
-    NSToolbarItem* item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
-    [item setLabel:@"Page"];
-    [item setPaletteLabel:@"Page"];
-    [item setToolTip:@"Current page"];
-
-    NSTextField* field = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 86, 24)] autorelease];
-    [field setAlignment:NSTextAlignmentCenter];
-    [field setBezeled:NO];
-    [field setDrawsBackground:NO];
-    [field setEditable:NO];
-    [field setSelectable:NO];
-    [field setFont:[NSFont monospacedDigitSystemFontOfSize:13 weight:NSFontWeightRegular]];
-    [field setTextColor:[NSColor secondaryLabelColor]];
-    self.pageLabel = field;
-
-    [item setView:field];
-    [item setMinSize:NSMakeSize(86, 24)];
-    [item setMaxSize:NSMakeSize(112, 24)];
-    [self updateToolbarStatus];
-    return item;
-}
-
-- (NSToolbarItem*)tabsToolbarItem:(NSString*)identifier {
-    NSToolbarItem* item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
-    [item setLabel:@"Documents"];
-    [item setPaletteLabel:@"Documents"];
-    NSSegmentedControl* control = [[[NSSegmentedControl alloc] initWithFrame:NSMakeRect(0, 0, 280, 28)] autorelease];
-    [control setSegmentStyle:NSSegmentStyleTexturedRounded];
-    [control setTrackingMode:NSSegmentSwitchTrackingSelectOne];
-    [control setTarget:self];
-    [control setAction:@selector(selectTab:)];
-    self.tabSelector = control;
-    [item setView:control];
-    [item setMinSize:NSMakeSize(120, 28)];
-    [item setMaxSize:NSMakeSize(420, 28)];
-    return item;
-}
-
 - (void)installToolbar {
-    NSToolbar* toolbar = [[[NSToolbar alloc] initWithIdentifier:@"sumatra.toolbar.main"] autorelease];
+    NSToolbar* toolbar = [[[NSToolbar alloc] initWithIdentifier:kToolbarIdentifier] autorelease];
     [toolbar setDelegate:self];
-    [toolbar setDisplayMode:NSToolbarDisplayModeIconAndLabel];
-    [toolbar setSizeMode:NSToolbarSizeModeRegular];
+    [toolbar setDisplayMode:NSToolbarDisplayModeIconOnly];
     [toolbar setAllowsUserCustomization:YES];
     [toolbar setAutosavesConfiguration:YES];
-    self.toolbar = toolbar;
+    [_toolbar release];
+    _toolbar = [toolbar retain];
     [_window setToolbar:toolbar];
 }
 
@@ -625,237 +1906,221 @@ static NSArray<NSString*>* ToolbarAllowedItems() {
     return ToolbarAllowedItems();
 }
 
-- (NSArray*)toolbarSelectableItemIdentifiers:(NSToolbar*)toolbar {
-    (void)toolbar;
-    return @[];
+- (NSToolbarItem*)buttonItem:(NSString*)identifier
+                       label:(NSString*)label
+                     tooltip:(NSString*)tooltip
+                       image:(NSImage*)image
+                      action:(SEL)action {
+    NSToolbarItem* item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
+    [item setLabel:label];
+    [item setPaletteLabel:label];
+    [item setToolTip:tooltip];
+    [item setImage:image];
+    [item setTarget:self];
+    [item setAction:action];
+    return item;
 }
 
-- (NSToolbarItem*)toolbar:(NSToolbar*)toolbar itemForItemIdentifier:(NSString*)identifier willBeInsertedIntoToolbar:(BOOL)flag {
+- (NSTextField*)makeLabel:(NSRect)frame {
+    NSTextField* label = [[[NSTextField alloc] initWithFrame:frame] autorelease];
+    [label setBezeled:NO];
+    [label setDrawsBackground:NO];
+    [label setEditable:NO];
+    [label setSelectable:NO];
+    [label setFont:[NSFont systemFontOfSize:12]];
+    [label setTextColor:[NSColor secondaryLabelColor]];
+    return label;
+}
+
+// View items: only the instance inserted into the toolbar is remembered;
+// the customization palette gets throwaway copies.
+- (NSToolbarItem*)pageItem:(NSString*)identifier inserted:(BOOL)inserted {
+    NSToolbarItem* item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
+    [item setLabel:@"Page"];
+    [item setPaletteLabel:@"Page Number"];
+    [item setToolTip:@"Current page; type a page number and press Return"];
+    NSView* container = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 118, 24)] autorelease];
+    NSTextField* field = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 1, 50, 22)] autorelease];
+    [field setAlignment:NSTextAlignmentRight];
+    [field setFont:[NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular]];
+    [field setTarget:self];
+    [field setAction:@selector(pageFieldAction:)];
+    [field setDelegate:self];
+    [field setAccessibilityLabel:@"Page number"];
+    NSTextField* countLabel = [self makeLabel:NSMakeRect(54, 4, 64, 16)];
+    [countLabel setFont:[NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular]];
+    [countLabel setAccessibilityLabel:@"Page count"];
+    [container addSubview:field];
+    [container addSubview:countLabel];
+    [item setView:container];
+    [item setMinSize:NSMakeSize(118, 24)];
+    [item setMaxSize:NSMakeSize(118, 24)];
+    if (inserted) {
+        [_pageField release];
+        _pageField = [field retain];
+        [_pageCountLabel release];
+        _pageCountLabel = [countLabel retain];
+        [self updatePageControls];
+    }
+    return item;
+}
+
+- (NSToolbarItem*)tabsItem:(NSString*)identifier inserted:(BOOL)inserted {
+    NSToolbarItem* item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
+    [item setLabel:@"Documents"];
+    [item setPaletteLabel:@"Documents"];
+    [item setToolTip:@"Open documents (⌃⇥ switches, ⌘W closes)"];
+    NSSegmentedControl* control = [[[NSSegmentedControl alloc] initWithFrame:NSMakeRect(0, 0, 280, 24)] autorelease];
+    [control setSegmentStyle:NSSegmentStyleTexturedRounded];
+    [control setTrackingMode:NSSegmentSwitchTrackingSelectOne];
+    [control setTarget:self];
+    [control setAction:@selector(selectTab:)];
+    [control setAccessibilityLabel:@"Open documents"];
+    [item setView:control];
+    [item setMinSize:NSMakeSize(100, 24)];
+    [item setMaxSize:NSMakeSize(520, 24)];
+    if (inserted) {
+        [_tabSelector release];
+        _tabSelector = [control retain];
+        [self refreshTabSelector];
+    }
+    return item;
+}
+
+- (NSToolbarItem*)searchItem:(NSString*)identifier inserted:(BOOL)inserted {
+    NSToolbarItem* item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
+    [item setLabel:@"Search"];
+    [item setPaletteLabel:@"Search"];
+    [item setToolTip:@"Find text (↩ next, ⇧↩ previous)"];
+    NSView* container = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)] autorelease];
+    NSSearchField* field = [[[NSSearchField alloc] initWithFrame:NSMakeRect(0, 1, 200, 22)] autorelease];
+    [field setPlaceholderString:@"Search"];
+    [[field cell] setSendsWholeSearchString:YES];
+    [field setTarget:self];
+    [field setAction:@selector(searchFieldAction:)];
+    [field setDelegate:(id)self];
+    [field setAccessibilityLabel:@"Search in document"];
+    NSProgressIndicator* spinner = [[[NSProgressIndicator alloc] initWithFrame:NSMakeRect(206, 4, 16, 16)] autorelease];
+    [spinner setStyle:NSProgressIndicatorStyleSpinning];
+    [spinner setControlSize:NSControlSizeSmall];
+    [spinner setDisplayedWhenStopped:NO];
+    [spinner setAccessibilityLabel:@"Searching"];
+    NSTextField* status = [self makeLabel:NSMakeRect(226, 4, 74, 16)];
+    [status setAccessibilityLabel:@"Search status"];
+    [container addSubview:field];
+    [container addSubview:spinner];
+    [container addSubview:status];
+    [item setView:container];
+    [item setMinSize:NSMakeSize(300, 24)];
+    [item setMaxSize:NSMakeSize(300, 24)];
+    if (inserted) {
+        [_searchField release];
+        _searchField = [field retain];
+        [_findSpinner release];
+        _findSpinner = [spinner retain];
+        [_findStatus release];
+        _findStatus = [status retain];
+        [_searchField setStringValue:_findText ?: @""];
+        [_searchField setEnabled:_active != nil];
+    }
+    return item;
+}
+
+- (NSToolbarItem*)toolbar:(NSToolbar*)toolbar
+        itemForItemIdentifier:(NSString*)identifier
+    willBeInsertedIntoToolbar:(BOOL)flag {
     (void)toolbar;
-    (void)flag;
-    if ([identifier isEqualToString:kToolbarOpen]) {
-        return [self toolbarItem:identifier
-                           label:@"Open"
-                         tooltip:@"Open a document"
-                           image:ToolbarImage(@"doc", NSImageNameFolder)
-                          action:@selector(openDocument:)];
+    if ([identifier isEqualToString:kToolbarPage]) {
+        return [self pageItem:identifier inserted:flag];
     }
     if ([identifier isEqualToString:kToolbarTabs]) {
-        return [self tabsToolbarItem:identifier];
+        return [self tabsItem:identifier inserted:flag];
+    }
+    if ([identifier isEqualToString:kToolbarSearch]) {
+        return [self searchItem:identifier inserted:flag];
+    }
+    if ([identifier isEqualToString:kToolbarSidebar]) {
+        return [self buttonItem:identifier
+                          label:@"Sidebar"
+                        tooltip:@"Show or hide the sidebar (⌥⌘S)"
+                          image:ToolbarImage(@"sidebar.left", @"Sidebar", @"☰")
+                         action:@selector(toggleSidebar:)];
+    }
+    if ([identifier isEqualToString:kToolbarOpen]) {
+        return [self buttonItem:identifier
+                          label:@"Open"
+                        tooltip:@"Open a document (⌘O)"
+                          image:ToolbarImage(@"doc", @"Open", @"Open")
+                         action:@selector(openDocument:)];
     }
     if ([identifier isEqualToString:kToolbarPrevPage]) {
-        return [self toolbarItem:identifier
-                           label:@"Previous"
-                         tooltip:@"Previous page"
-                           image:ToolbarImage(@"chevron.left", NSImageNameGoLeftTemplate)
-                          action:@selector(goToPrevPage:)];
+        return [self buttonItem:identifier
+                          label:@"Previous"
+                        tooltip:@"Previous page (⌥⌘↑)"
+                          image:ToolbarImage(@"chevron.up", @"Previous page", @"▲")
+                         action:@selector(goToPrevPage:)];
     }
     if ([identifier isEqualToString:kToolbarNextPage]) {
-        return [self toolbarItem:identifier
-                           label:@"Next"
-                         tooltip:@"Next page"
-                           image:ToolbarImage(@"chevron.right", NSImageNameGoRightTemplate)
-                          action:@selector(goToNextPage:)];
-    }
-    if ([identifier isEqualToString:kToolbarPageStatus]) {
-        return [self pageStatusToolbarItem:identifier];
+        return [self buttonItem:identifier
+                          label:@"Next"
+                        tooltip:@"Next page (⌥⌘↓)"
+                          image:ToolbarImage(@"chevron.down", @"Next page", @"▼")
+                         action:@selector(goToNextPage:)];
     }
     if ([identifier isEqualToString:kToolbarZoomOut]) {
-        return [self toolbarItem:identifier
-                           label:@"Out"
-                         tooltip:@"Zoom out"
-                           image:ToolbarImage(@"minus.magnifyingglass", nil)
-                          action:@selector(zoomOut:)];
+        return [self buttonItem:identifier
+                          label:@"Zoom Out"
+                        tooltip:@"Zoom out (⌘-)"
+                          image:ToolbarImage(@"minus.magnifyingglass", @"Zoom out", @"−")
+                         action:@selector(zoomOut:)];
     }
     if ([identifier isEqualToString:kToolbarZoomActual]) {
-        return [self toolbarItem:identifier
-                           label:@"Actual"
-                         tooltip:@"Actual size"
-                           image:ToolbarImage(@"1.magnifyingglass", nil)
-                          action:@selector(zoomActualSize:)];
+        return [self buttonItem:identifier
+                          label:@"Actual Size"
+                        tooltip:@"Actual size (⌘0)"
+                          image:ToolbarImage(@"1.magnifyingglass", @"Actual size", @"1:1")
+                         action:@selector(zoomActualSize:)];
     }
     if ([identifier isEqualToString:kToolbarZoomIn]) {
-        return [self toolbarItem:identifier
-                           label:@"In"
-                         tooltip:@"Zoom in"
-                           image:ToolbarImage(@"plus.magnifyingglass", nil)
-                          action:@selector(zoomIn:)];
+        return [self buttonItem:identifier
+                          label:@"Zoom In"
+                        tooltip:@"Zoom in (⌘+)"
+                          image:ToolbarImage(@"plus.magnifyingglass", @"Zoom in", @"+")
+                         action:@selector(zoomIn:)];
     }
     if ([identifier isEqualToString:kToolbarFitPage]) {
-        return [self toolbarItem:identifier
-                           label:@"Fit Page"
-                         tooltip:@"Fit page"
-                           image:ToolbarImage(@"rectangle.portrait", nil)
-                          action:@selector(zoomFitPage:)];
+        return [self buttonItem:identifier
+                          label:@"Zoom to Fit"
+                        tooltip:@"Fit the whole page (⌘9)"
+                          image:ToolbarImage(@"arrow.down.right.and.arrow.up.left", @"Zoom to fit", @"Fit")
+                         action:@selector(zoomFitPage:)];
     }
     if ([identifier isEqualToString:kToolbarFitWidth]) {
-        return [self toolbarItem:identifier
-                           label:@"Fit Width"
-                         tooltip:@"Fit width"
-                           image:ToolbarImage(@"arrow.left.and.right.square", nil)
-                          action:@selector(zoomFitWidth:)];
+        return [self buttonItem:identifier
+                          label:@"Zoom to Width"
+                        tooltip:@"Fit the page width (⌘8)"
+                          image:ToolbarImage(@"arrow.left.and.right", @"Zoom to width", @"↔")
+                         action:@selector(zoomFitWidth:)];
     }
     if ([identifier isEqualToString:kToolbarRotateLeft]) {
-        return [self toolbarItem:identifier
-                           label:@"Left"
-                         tooltip:@"Rotate left"
-                           image:ToolbarImage(@"rotate.left", NSImageNameRefreshTemplate)
-                          action:@selector(rotateLeft:)];
+        return [self buttonItem:identifier
+                          label:@"Rotate Left"
+                        tooltip:@"Rotate left (⌘L)"
+                          image:ToolbarImage(@"rotate.left", @"Rotate left", @"⟲")
+                         action:@selector(rotateLeft:)];
     }
     if ([identifier isEqualToString:kToolbarRotateRight]) {
-        return [self toolbarItem:identifier
-                           label:@"Right"
-                         tooltip:@"Rotate right"
-                           image:ToolbarImage(@"rotate.right", NSImageNameRefreshTemplate)
-                          action:@selector(rotateRight:)];
+        return [self buttonItem:identifier
+                          label:@"Rotate Right"
+                        tooltip:@"Rotate right (⌘R)"
+                          image:ToolbarImage(@"rotate.right", @"Rotate right", @"⟳")
+                         action:@selector(rotateRight:)];
     }
     return nil;
 }
 
-- (void)applicationDidFinishLaunching:(NSNotification*)notification {
-    (void)notification;
-    NSArray<NSString*>* supportDirs =
-        NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
-    NSString* supportDir = [supportDirs count] ? [supportDirs objectAtIndex:0] : NSTemporaryDirectory();
-    NSString* settingsPath = [[supportDir stringByAppendingPathComponent:@"SumatraPDF"]
-        stringByAppendingPathComponent:@"SumatraPDF-settings.txt"];
-    MacPrefsInit([settingsPath fileSystemRepresentation]);
-    _zoom = kMacZoomFitPage;
-    _rotation = 0;
-    _continuousView = YES;
-    _watchedFile = -1;
-    _activeTab = -1;
-    _tabs = [[NSMutableArray alloc] init];
-    _closedPaths = [[NSMutableArray alloc] init];
-
-    NSRect frame = NSMakeRect(0, 0, 900, 1100);
-    NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable |
-                       NSWindowStyleMaskResizable;
-    _window = [[NSWindow alloc] initWithContentRect:frame
-                                          styleMask:style
-                                            backing:NSBackingStoreBuffered
-                                              defer:NO];
-    [_window setTitle:@"SumatraPDF"];
-    [_window setDelegate:self];
-
-    [self installToolbar];
-
-    _scrollView = [[NSScrollView alloc] initWithFrame:frame];
-    [_scrollView setHasVerticalScroller:YES];
-    [_scrollView setHasHorizontalScroller:YES];
-    [_scrollView setAutohidesScrollers:YES];
-    [_scrollView setBorderType:NSNoBorder];
-    [_scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-    [_scrollView setBackgroundColor:[NSColor colorWithCalibratedWhite:0.18 alpha:1.0]];
-    [[_scrollView contentView] setPostsBoundsChangedNotifications:YES];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(scrollViewBoundsChanged:)
-                                                 name:NSViewBoundsDidChangeNotification
-                                               object:[_scrollView contentView]];
-
-    _documentView = [[SumatraDocumentView alloc] initWithFrame:frame];
-    [_documentView setOwner:self];
-    [_documentView setScaleToFit:YES];
-    [_scrollView setDocumentView:_documentView];
-
-    [_window setContentView:_scrollView];
-    [_window makeFirstResponder:_documentView];
-
-    NSArray<NSString*>* args = [[NSProcessInfo processInfo] arguments];
-    if ([args count] >= 2) {
-        [self openPath:[args objectAtIndex:1]];
-    } else {
-        int sessionCount = MacPrefsSessionCount();
-        int sessionActiveTab = MacPrefsSessionActiveTab();
-        for (int i = 0; i < sessionCount; i++) {
-            MacPrefsViewState savedState = {};
-            char* savedPath = MacPrefsCopySessionTab(i, &savedState);
-            NSString* path = savedPath ? [NSString stringWithUTF8String:savedPath] : nil;
-            MacFreeString(savedPath);
-            if (path) {
-                [self openPath:path];
-            }
-        }
-        if (sessionCount > 0) {
-            [self activateTabAtIndex:sessionActiveTab];
-        }
-    }
-
-    [_window center];
-    [_window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
-}
-
-- (BOOL)hasDocument {
-    return _document != nullptr;
-}
-
-- (void)saveActiveTabState {
-    if (_activeTab < 0 || _activeTab >= (int)[_tabs count]) {
-        return;
-    }
-    SumatraTabState* tab = [_tabs objectAtIndex:(NSUInteger)_activeTab];
-    [tab setCurrentPage:_currentPage];
-    [tab setRotation:_rotation];
-    [tab setZoom:_zoom];
-    [tab setContinuous:_continuousView];
-    [tab setScrollOrigin:[[_scrollView contentView] bounds].origin];
-}
-
-- (void)refreshTabSelector {
-    NSInteger count = (NSInteger)[_tabs count];
-    [_tabSelector setSegmentCount:count];
-    for (NSInteger i = 0; i < count; i++) {
-        SumatraTabState* tab = [_tabs objectAtIndex:(NSUInteger)i];
-        [_tabSelector setLabel:[[tab path] lastPathComponent] forSegment:i];
-        [_tabSelector setToolTip:[tab path] forSegment:i];
-    }
-    [_tabSelector setSelectedSegment:_activeTab];
-}
-
-- (void)showEmptyDocumentView {
-    _document = nullptr;
-    self.documentPath = nil;
-    _pageCount = 0;
-    _currentPage = 0;
-    _rotation = 0;
-    _zoom = kMacZoomFitPage;
-    _continuousView = YES;
-    [_documentView setScaleToFit:YES];
-    [_documentView setFrame:[[_scrollView contentView] bounds]];
-    [_documentView setImage:nullptr];
-    [_documentView setPages:nil];
-    [_documentView setImageSize:NSZeroSize];
-    [_documentView setMessage:nil];
-    [self updateTitle];
-}
-
-- (void)activateTabAtIndex:(int)index {
-    if (index < 0 || index >= (int)[_tabs count]) {
-        return;
-    }
-    [self saveActiveTabState];
-    [self stopWatchingDocument];
-    _activeTab = index;
-    SumatraTabState* tab = [_tabs objectAtIndex:(NSUInteger)index];
-    _document = [tab document];
-    self.documentPath = [tab path];
-    _pageCount = [tab pageCount];
-    _currentPage = [tab currentPage];
-    _rotation = [tab rotation];
-    _zoom = [tab zoom];
-    _continuousView = [tab continuous];
-    [_documentView setImage:nullptr];
-    [_documentView setPages:nil];
-    [self renderCurrentPage];
-    [[_scrollView contentView] scrollToPoint:[tab scrollOrigin]];
-    [_scrollView reflectScrolledClipView:[_scrollView contentView]];
-    if (_continuousView) {
-        [self renderCurrentPage];
-    }
-    [self startWatchingDocument];
-    [self refreshTabSelector];
-    [_window makeFirstResponder:_documentView];
+- (BOOL)validateToolbarItem:(NSToolbarItem*)item {
+    return [self canPerformAction:[item action]];
 }
 
 - (IBAction)selectTab:(id)sender {
@@ -863,576 +2128,495 @@ static NSArray<NSString*>* ToolbarAllowedItems() {
     [self activateTabAtIndex:(int)[_tabSelector selectedSegment]];
 }
 
-- (int)tabIndexForPath:(NSString*)path {
-    for (NSUInteger i = 0; i < [_tabs count]; i++) {
-        if ([[[_tabs objectAtIndex:i] path] isEqualToString:path]) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-- (void)destroyTab:(SumatraTabState*)tab {
-    MacPrefsViewState state = {};
-    state.valid = true;
-    state.continuous = [tab continuous];
-    CGFloat zoom = [tab zoom];
-    state.zoomVirtual = zoom > 0 ? zoom * 100.0 : zoom;
-    state.rotation = [tab rotation];
-    state.pageNo = [tab currentPage];
-    MacPrefsSaveDocument([[tab path] fileSystemRepresentation], &state);
-    MacCloseDocument([tab document]);
-    [tab setDocument:nullptr];
-}
-
-- (void)closeAllTabs {
-    [self saveActiveTabState];
-    [self stopWatchingDocument];
-    for (SumatraTabState* tab in _tabs) {
-        [self destroyTab:tab];
-    }
-    [_tabs removeAllObjects];
-    _activeTab = -1;
-    [self refreshTabSelector];
-    [self showEmptyDocumentView];
-}
-
-- (void)stopWatchingDocument {
-    if (_fileWatcher) {
-        dispatch_source_cancel(_fileWatcher);
-        dispatch_release(_fileWatcher);
-        _fileWatcher = nullptr;
-        _watchedFile = -1;
-    } else if (_watchedFile >= 0) {
-        close(_watchedFile);
-        _watchedFile = -1;
-    }
-}
-
-- (void)startWatchingDocument {
-    [self stopWatchingDocument];
-    if (!_documentPath) {
+- (IBAction)pageFieldAction:(id)sender {
+    (void)sender;
+    SumatraTabState* tab = _active;
+    if (!tab) {
         return;
     }
-    _watchedFile = open([_documentPath fileSystemRepresentation], O_EVTONLY);
-    if (_watchedFile < 0) {
-        return;
-    }
-    _fileWatcher = dispatch_source_create(DISPATCH_SOURCE_TYPE_VNODE, (uintptr_t)_watchedFile,
-                                          DISPATCH_VNODE_WRITE | DISPATCH_VNODE_DELETE | DISPATCH_VNODE_RENAME,
-                                          dispatch_get_main_queue());
-    if (!_fileWatcher) {
-        close(_watchedFile);
-        _watchedFile = -1;
-        return;
-    }
-    NSString* watchedPath = [[_documentPath copy] autorelease];
-    int watchedFile = _watchedFile;
-    dispatch_source_set_cancel_handler(_fileWatcher, ^{
-      close(watchedFile);
-    });
-    dispatch_source_set_event_handler(_fileWatcher, ^{
-      if (_document && [_documentPath isEqualToString:watchedPath] &&
-          [[NSFileManager defaultManager] fileExistsAtPath:watchedPath]) {
-          [self reloadActiveTab];
-      }
-    });
-    dispatch_resume(_fileWatcher);
-}
-
-- (void)reloadActiveTab {
-    if (_activeTab < 0 || _activeTab >= (int)[_tabs count] || !_documentPath) {
-        return;
-    }
-    [self saveActiveTabState];
-    char* error = nullptr;
-    void* document = MacOpenDocument(_window, [_documentPath fileSystemRepresentation], PageRenderReady, self, &error);
-    free(error);
-    if (!document) {
-        [self startWatchingDocument];
-        return;
-    }
-    [self stopWatchingDocument];
-    SumatraTabState* tab = [_tabs objectAtIndex:(NSUInteger)_activeTab];
-    MacCloseDocument([tab document]);
-    [tab setDocument:document];
-    [tab setPageCount:MacPageCount(document)];
-    [tab setCurrentPage:MAX(1, MIN([tab pageCount], [tab currentPage]))];
-    _document = document;
-    _pageCount = [tab pageCount];
-    _currentPage = [tab currentPage];
-    MacResetRenderer(_document);
-    [self renderCurrentPage];
-    [self startWatchingDocument];
-}
-
-- (void)showOpenError:(NSString*)message forPath:(NSString*)path {
-    NSString* detail = path ? [path stringByAbbreviatingWithTildeInPath] : nil;
-    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-    [alert setAlertStyle:NSAlertStyleWarning];
-    [alert setMessageText:message ?: @"Could not open the document."];
-    if ([detail length] > 0) {
-        [alert setInformativeText:detail];
-    }
-    if (_window) {
-        [alert beginSheetModalForWindow:_window completionHandler:nil];
+    int pageNo = [_pageField intValue];
+    [_window makeFirstResponder:_documentView];
+    if (pageNo < 1 || pageNo > tab.pageCount) {
+        NSBeep();
     } else {
-        [alert runModal];
+        [self goToPage:pageNo];
     }
+    [self updatePageControls];
 }
 
-- (void)openPath:(NSString*)path {
-    path = ResolveDocumentPath(path);
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
-        NSString* message = @"The selected file does not exist.";
-        if (![self hasDocument]) {
-            [_documentView setImage:nullptr];
-            [_documentView setPages:nil];
-            [_documentView setMessage:message];
-        }
-        [self showOpenError:message forPath:path];
-        return;
+- (BOOL)control:(NSControl*)control textView:(NSTextView*)textView doCommandBySelector:(SEL)command {
+    (void)textView;
+    if (command != @selector(cancelOperation:)) {
+        return NO;
     }
-
-    int existing = [self tabIndexForPath:path];
-    if (existing >= 0) {
-        [self activateTabAtIndex:existing];
-        return;
-    }
-
-    char* error = nullptr;
-    void* doc = MacOpenDocument(_window, [path fileSystemRepresentation], PageRenderReady, self, &error);
-    if (!doc) {
-        NSString* message = error ? [NSString stringWithUTF8String:error] : @"Could not open the document.";
-        free(error);
-        if (![self hasDocument]) {
-            [_documentView setImage:nullptr];
-            [_documentView setPages:nil];
-            [_documentView setMessage:message];
-        }
-        [self showOpenError:message forPath:path];
-        return;
-    }
-
-    SumatraTabState* tab = [[[SumatraTabState alloc] init] autorelease];
-    [tab setDocument:doc];
-    [tab setPath:path];
-    [tab setPageCount:MacPageCount(doc)];
-    [tab setCurrentPage:1];
-    [tab setRotation:0];
-    [tab setZoom:kMacZoomFitPage];
-    [tab setContinuous:YES];
-    MacPrefsViewState state = {};
-    if (MacPrefsOpenDocument([path fileSystemRepresentation], &state) && state.valid) {
-        [tab setContinuous:state.continuous];
-        [tab setRotation:state.rotation];
-        [tab setCurrentPage:MAX(1, MIN([tab pageCount], state.pageNo))];
-        [tab setZoom:state.zoomVirtual > 0 ? state.zoomVirtual / 100.0 : state.zoomVirtual];
-    }
-    [_tabs addObject:tab];
-    [self activateTabAtIndex:(int)[_tabs count] - 1];
-    [_window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
-}
-
-- (CGFloat)backingScale {
-    CGFloat scale = [_window backingScaleFactor];
-    return scale > 0 ? scale : 1.0;
-}
-
-- (CGFloat)fileDPI {
-    if (!_document) {
-        return 96.0;
-    }
-    double dpi = MacFileDPI(_document);
-    return dpi > 0 ? (CGFloat)dpi : 96.0;
-}
-
-- (CGFloat)actualSizeRenderZoom {
-    return [self backingScale] * kCocoaPointsPerInch / [self fileDPI];
-}
-
-- (NSSize)pageSizeForDisplayZoom:(CGFloat)displayZoom {
-    double wPts = 0, hPts = 0;
-    if (!MacPageSize(_document, _currentPage, &wPts, &hPts) || wPts <= 0 || hPts <= 0) {
-        return NSMakeSize(1, 1);
-    }
-    if (_rotation == 90 || _rotation == 270) {
-        double t = wPts;
-        wPts = hPts;
-        hPts = t;
-    }
-    CGFloat scale = kCocoaPointsPerInch * displayZoom / [self fileDPI];
-    return NSMakeSize((CGFloat)wPts * scale, (CGFloat)hPts * scale);
-}
-
-// Computes the user-visible zoom for fit modes. At display zoom 1.0, file DPI
-// units are mapped to Cocoa points so "Actual Size" has physical scale.
-- (CGFloat)fitZoomForWidthOnly:(BOOL)widthOnly {
-    NSSize pageSize = [self pageSizeForDisplayZoom:1.0];
-    if (pageSize.width <= 0 || pageSize.height <= 0) {
-        return 1.0;
-    }
-    NSSize clip = [[_scrollView contentView] bounds].size;
-    double margin = 16.0;
-    double availW = MAX(1.0, clip.width - margin);
-    double zoomW = availW / pageSize.width;
-    if (widthOnly) {
-        return (CGFloat)zoomW;
-    }
-    double availH = MAX(1.0, clip.height - margin);
-    double zoomH = availH / pageSize.height;
-    return (CGFloat)MIN(zoomW, zoomH);
-}
-
-- (CGFloat)layoutZoomVirtual {
-    if (_zoom == kMacZoomFitWidth) {
-        return kMacZoomFitWidth;
-    }
-    if (_zoom <= 0) {
-        return kMacZoomFitPage;
-    }
-    return _zoom * 100.0;
-}
-
-- (CGImageRef)renderedImageForPage:(int)pageNo renderZoom:(double)renderZoom showErrors:(BOOL)showErrors {
-    MacRenderedPage page = {};
-    bool ok = MacCopyRenderedPage(_document, pageNo, (float)renderZoom, _rotation, &page);
-    if (!ok) {
-        MacFreeRenderedPage(&page);
-        MacRequestPage(_document, pageNo, (float)renderZoom, _rotation, 0);
-        return nullptr;
-    }
-
-    CGImageRef image = CreateImageFromRenderedPage(&page);
-    MacFreeRenderedPage(&page);
-    if (!image) {
-        if (showErrors) {
-            [self showOpenError:@"Could not render the page." forPath:_documentPath];
-        }
-        return nullptr;
-    }
-
-    return image;
-}
-
-- (BOOL)buildDocumentLayout:(MacDocumentLayout*)layout {
-    NSRect visible = [[_scrollView contentView] bounds];
-    MacLayoutParams params = {};
-    params.continuous = _continuousView;
-    params.startPage = _currentPage > 0 ? _currentPage : 1;
-    params.viewX = (int)floor(visible.origin.x);
-    params.viewY = (int)floor(visible.origin.y);
-    params.viewWidth = (int)MAX(1.0, floor(visible.size.width));
-    params.viewHeight = (int)MAX(1.0, floor(visible.size.height));
-    params.zoomVirtual = [self layoutZoomVirtual];
-    params.backingScale = [self backingScale];
-    params.rotation = _rotation;
-    return MacLayoutDocument(_document, &params, layout);
-}
-
-- (void)renderDocumentShowingErrors:(BOOL)showErrors {
-    if (!_document) {
-        return;
-    }
-
-    MacDocumentLayout layout = {};
-    if (![self buildDocumentLayout:&layout]) {
-        [_documentView setImage:nullptr];
-        [_documentView setPages:nil];
-        [_documentView setMessage:@"Could not render the page."];
-        if (showErrors) {
-            [self showOpenError:@"Could not render the page." forPath:_documentPath];
-        }
-        return;
-    }
-
-    NSMutableArray* pageViews = [NSMutableArray arrayWithCapacity:(NSUInteger)layout.pageCount];
-    for (int i = 0; i < layout.pageCount; i++) {
-        MacLayoutPage* page = &layout.pages[i];
-        if (!page->shown) {
-            continue;
-        }
-        SumatraPageImage* pageView = [[[SumatraPageImage alloc] init] autorelease];
-        [pageView setPageNo:page->pageNo];
-        [pageView setFrame:NSMakeRect(page->x, page->y, page->width, page->height)];
-        [pageView setLayoutZoom:page->layoutZoom];
-        if (page->visibleRatio > 0 || !_continuousView) {
-            CGImageRef image =
-                [self renderedImageForPage:page->pageNo renderZoom:page->renderZoom showErrors:showErrors];
-            [pageView setImage:image];
-            if (image) {
-                CGImageRelease(image);
-            }
-        }
-        int highlightCount = MacFindResultRectCount(_document, page->pageNo);
-        int selectionCount = MacSelectionRectCount(_document, page->pageNo);
-        if (highlightCount > 0 || selectionCount > 0) {
-            NSMutableArray* highlights =
-                [NSMutableArray arrayWithCapacity:(NSUInteger)(highlightCount + selectionCount)];
-            for (int j = 0; j < highlightCount; j++) {
-                MacDisplayRect rect = {};
-                if (!MacFindResultRect(_document, page->pageNo, j, page->layoutZoom, _rotation, &rect)) {
-                    continue;
-                }
-                NSRect highlight = NSMakeRect(page->x + rect.x, page->y + rect.y, rect.width, rect.height);
-                [highlights addObject:[NSValue valueWithRect:highlight]];
-            }
-            for (int j = 0; j < selectionCount; j++) {
-                MacDisplayRect rect = {};
-                if (!MacSelectionRect(_document, page->pageNo, j, page->layoutZoom, _rotation, &rect)) {
-                    continue;
-                }
-                NSRect highlight = NSMakeRect(page->x + rect.x, page->y + rect.y, rect.width, rect.height);
-                [highlights addObject:[NSValue valueWithRect:highlight]];
-            }
-            [pageView setHighlights:highlights];
-        }
-        [pageViews addObject:pageView];
-    }
-
-    int nearbyPages[] = {layout.currentPage - 1, layout.currentPage + 1, layout.currentPage - 2,
-                         layout.currentPage + 2};
-    for (int pageNo : nearbyPages) {
-        if (pageNo < 1 || pageNo > layout.pageCount) {
-            continue;
-        }
-        MacLayoutPage* page = &layout.pages[pageNo - 1];
-        int priority = abs(pageNo - layout.currentPage) == 1 ? 1 : 2;
-        MacRequestPage(_document, pageNo, (float)page->renderZoom, _rotation, priority);
-    }
-
-    [_documentView setScaleToFit:NO];
-    [_documentView setImage:nullptr];
-    [_documentView setPages:pageViews];
-    [_documentView setAutoresizingMask:NSViewNotSizable];
-    [_documentView setFrameSize:NSMakeSize(layout.canvasWidth, layout.canvasHeight)];
-
-    if (layout.currentPage != _currentPage && layout.currentPage >= 1) {
-        _currentPage = layout.currentPage;
-    }
-    MacFreeDocumentLayout(&layout);
-
-    [self updateTitle];
-}
-
-- (void)renderCurrentPage {
-    [self renderDocumentShowingErrors:NO];
-}
-
-- (void)pageRenderReady {
-    if (_document) {
-        [self renderCurrentPage];
-    }
-}
-
-- (void)updateTitle {
-    NSString* name = _documentPath ? [_documentPath lastPathComponent] : @"SumatraPDF";
-    if (_document && _pageCount > 0) {
-        [_window setTitle:[NSString stringWithFormat:@"%@  —  page %d / %d", name, _currentPage, _pageCount]];
-    } else {
-        [_window setTitle:name];
-    }
-    [self updateToolbarStatus];
-}
-
-- (void)updateToolbarStatus {
-    if (_pageLabel) {
-        NSString* text = (_document && _pageCount > 0) ? [NSString stringWithFormat:@"%d / %d", _currentPage, _pageCount]
-                                                       : @"No document";
-        [_pageLabel setStringValue:text];
-    }
-    [_toolbar validateVisibleItems];
-}
-
-- (void*)documentHandle {
-    return _document;
-}
-
-- (int)documentRotation {
-    return _rotation;
-}
-
-- (void)selectionChanged {
-    [self renderCurrentPage];
-}
-
-- (void)activateLinkAtPage:(int)pageNo x:(double)x y:(double)y zoom:(double)zoom {
-    MacLink link = {};
-    if (!MacLinkAtPoint(_document, pageNo, x, y, zoom, _rotation, &link)) {
-        return;
-    }
-    if (link.kind == MacLinkKind::Page) {
-        [self goToPage:link.pageNo];
-    } else if (link.value) {
-        NSString* value = [NSString stringWithUTF8String:link.value];
-        if (link.kind == MacLinkKind::Url) {
-            NSURL* url = [NSURL URLWithString:value];
-            if (url) {
-                [[NSWorkspace sharedWorkspace] openURL:url];
-            }
-        } else if (link.kind == MacLinkKind::File) {
-            NSString* path = [value stringByStandardizingPath];
-            if (![path isAbsolutePath]) {
-                path = [[_documentPath stringByDeletingLastPathComponent] stringByAppendingPathComponent:path];
-            }
-            [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:path]];
-        }
-    }
-    MacFreeLink(&link);
-}
-
-- (BOOL)canPerformAction:(SEL)action {
-    if (!action || action == @selector(openDocument:) || action == @selector(toggleFullScreen:) ||
-        action == @selector(openWebsite:)) {
+    if (control == _searchField) {
+        [self documentCancel];
+        [_window makeFirstResponder:_documentView];
         return YES;
     }
-    if (action == @selector(openRecentDocument:)) {
-        return MacPrefsRecentCount() > 0;
+    if (control == _pageField) {
+        [_window makeFirstResponder:_documentView];
+        [self updatePageControls];
+        return YES;
     }
-    if (action == @selector(reopenClosedTab:)) {
-        return [_closedPaths count] > 0;
-    }
-    if (action == @selector(selectNextTab:) || action == @selector(selectPreviousTab:)) {
-        return [_tabs count] > 1;
-    }
-    if (action == @selector(toggleFavorite:)) {
-        return [self hasDocument];
-    }
-    if (action == @selector(goToPrevPage:) || action == @selector(goToFirstPage:)) {
-        return [self hasDocument] && _currentPage > 1;
-    }
-    if (action == @selector(copySelection:)) {
-        return [self hasDocument] && MacHasSelection(_document);
-    }
-    if (action == @selector(goToNextPage:) || action == @selector(goToLastPage:)) {
-        return [self hasDocument] && _currentPage < _pageCount;
-    }
-    if (action == @selector(performClose:) || action == @selector(showInFolder:) ||
-        action == @selector(goToPageDialog:) || action == @selector(rotateLeft:) ||
-        action == @selector(rotateRight:) || action == @selector(zoomFitPage:) ||
-        action == @selector(zoomFitWidth:) || action == @selector(zoomActualSize:) ||
-        action == @selector(zoomIn:) || action == @selector(zoomOut:) || action == @selector(setSinglePageView:) ||
-        action == @selector(setContinuousPageView:) || action == @selector(findDocument:) ||
-        action == @selector(findNext:) || action == @selector(findPrevious:) || action == @selector(showToc:) ||
-        action == @selector(showProperties:) || action == @selector(selectAll:) || action == @selector(printDocument:)) {
-        return [self hasDocument];
-    }
-    return YES;
+    return NO;
 }
 
-- (BOOL)validateToolbarItem:(NSToolbarItem*)item {
-    return [self canPerformAction:[item action]];
-}
+#pragma mark - Find
 
-- (void)goToPage:(int)pageNo {
-    if (!_document) {
-        return;
-    }
-    if (pageNo < 1) {
-        pageNo = 1;
-    }
-    if (pageNo > _pageCount) {
-        pageNo = _pageCount;
-    }
-    if (pageNo == _currentPage) {
-        return;
-    }
-    _currentPage = pageNo;
-
-    if (_continuousView) {
-        MacDocumentLayout layout = {};
-        if ([self buildDocumentLayout:&layout]) {
-            for (int i = 0; i < layout.pageCount; i++) {
-                MacLayoutPage* page = &layout.pages[i];
-                if (page->pageNo == pageNo) {
-                    [[_scrollView contentView] scrollToPoint:NSMakePoint(0, page->y)];
-                    break;
-                }
-            }
-            MacFreeDocumentLayout(&layout);
-        }
+- (void)setFindBusy:(BOOL)busy {
+    if (busy) {
+        [_findSpinner startAnimation:nil];
     } else {
-        [[_scrollView contentView] scrollToPoint:NSZeroPoint];
+        [_findSpinner stopAnimation:nil];
     }
-    [_scrollView reflectScrolledClipView:[_scrollView contentView]];
-    [self renderCurrentPage];
 }
 
-#pragma mark - Menu / key actions
+- (void)showFindStatus:(NSString*)status {
+    [_findStatus setStringValue:status ?: @""];
+    [_findStatus setTextColor:status ? [NSColor systemRedColor] : [NSColor secondaryLabelColor]];
+    if ([status length] > 0) {
+        NSAccessibilityPostNotificationWithUserInfo(_findStatus ?: (id)_window,
+                                                    NSAccessibilityAnnouncementRequestedNotification,
+                                                    @{NSAccessibilityAnnouncementKey : status});
+    }
+}
+
+// Makes sure the toolbar shows the search field (the user may have removed it).
+- (BOOL)revealSearchField {
+    if (![_toolbar isVisible]) {
+        [_toolbar setVisible:YES];
+    }
+    BOOL present = NO;
+    for (NSToolbarItem* item in [_toolbar items]) {
+        if ([[item itemIdentifier] isEqualToString:kToolbarSearch]) {
+            present = YES;
+        }
+    }
+    if (!present) {
+        [_toolbar insertItemWithItemIdentifier:kToolbarSearch atIndex:(NSInteger)[[_toolbar items] count]];
+    }
+    return _searchField && [_searchField window] == _window;
+}
+
+- (void)startFind:(NSString*)text direction:(MacFindDirection)direction {
+    SumatraTabState* tab = _active;
+    if (!tab || [text length] == 0) {
+        return;
+    }
+    // text may be _findText itself: copy before releasing the old value
+    NSString* newText = [[text copy] autorelease];
+    BOOL sameText = [_findText isEqualToString:newText];
+    [_findText release];
+    _findText = [newText retain];
+    MacFindMode mode = sameText ? MacFindMode::Next : MacFindMode::Restart;
+    int token = MacFindStart(tab.document, tab.currentPage, [newText UTF8String], direction, mode, FindDone, self);
+    if (token == 0) {
+        NSBeep();
+        return;
+    }
+    tab.findToken = token;
+    [self showFindStatus:nil];
+    [self setFindBusy:YES];
+}
+
+- (void)findFinishedForDocument:(void*)document token:(int)token found:(BOOL)found {
+    SumatraTabState* tab = _active;
+    if (!tab || tab.document != document || tab.findToken != token) {
+        return;
+    }
+    tab.findToken = 0;
+    [self setFindBusy:NO];
+    if (!found) {
+        [self showFindStatus:@"Not found"];
+        NSBeep();
+        [self updateLayout];
+        return;
+    }
+    [self showFindStatus:nil];
+    [self revealFindResult];
+}
+
+// Scrolls the current hit into view (centered if it wasn't visible).
+- (void)revealFindResult {
+    SumatraTabState* tab = _active;
+    void* doc = tab.document;
+    int pageNo = MacFindResultPage(doc);
+    if (pageNo <= 0) {
+        [self updateLayout];
+        return;
+    }
+    if (pageNo != tab.currentPage) {
+        [self pushHistoryFrom:tab.currentPage to:pageNo];
+    }
+    tab.currentPage = pageNo;
+    _pinnedPage = YES;
+    [self updateLayout];
+    double zoom = 0;
+    NSRect f = [self frameOfPage:pageNo zoom:&zoom];
+    if (NSIsEmptyRect(f)) {
+        return;
+    }
+    NSRect hit = NSMakeRect(f.origin.x, f.origin.y, f.size.width, MIN(f.size.height, 40.0));
+    MacDisplayRect r = {};
+    if (MacFindResultRect(doc, pageNo, 0, zoom, tab.rotation, &r)) {
+        hit = NSMakeRect(f.origin.x + r.x, f.origin.y + r.y, r.width, r.height);
+    }
+    NSRect visible = [[_scrollView contentView] bounds];
+    if (!NSContainsRect(visible, hit)) {
+        NSPoint origin = visible.origin;
+        if (NSMinY(hit) < NSMinY(visible) || NSMaxY(hit) > NSMaxY(visible)) {
+            origin.y = NSMidY(hit) - (visible.size.height / 2.0);
+        }
+        if (NSMinX(hit) < NSMinX(visible) || NSMaxX(hit) > NSMaxX(visible)) {
+            origin.x = NSMidX(hit) - (visible.size.width / 2.0);
+        }
+        [self scrollToOrigin:origin];
+    }
+    [self updateLayout];
+}
+
+- (IBAction)searchFieldAction:(id)sender {
+    (void)sender;
+    NSString* text = [_searchField stringValue];
+    if ([text length] == 0) {
+        [self documentCancel];
+        [_findText release];
+        _findText = nil;
+        return;
+    }
+    BOOL backward = ([[NSApp currentEvent] modifierFlags] & NSEventModifierFlagShift) != 0;
+    [self startFind:text direction:backward ? MacFindDirection::Backward : MacFindDirection::Forward];
+}
+
+- (void)runFindDialog {
+    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:@"Find in document"];
+    [alert addButtonWithTitle:@"Find"];
+    [alert addButtonWithTitle:@"Cancel"];
+    NSTextField* input = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)] autorelease];
+    [input setStringValue:_findText ?: @""];
+    [input setAccessibilityLabel:@"Search text"];
+    [alert setAccessoryView:input];
+    [[alert window] setInitialFirstResponder:input];
+    [self presentAlert:alert
+            completion:^(NSModalResponse response) {
+              if (response == NSAlertFirstButtonReturn && [[input stringValue] length] > 0) {
+                  [self startFind:[input stringValue] direction:MacFindDirection::Forward];
+              }
+            }];
+}
+
+- (IBAction)findDocument:(id)sender {
+    (void)sender;
+    if (!_active) {
+        return;
+    }
+    if (![self revealSearchField]) {
+        [self runFindDialog];
+        return;
+    }
+    [_window makeFirstResponder:_searchField];
+    [_searchField selectText:nil];
+}
+
+- (IBAction)findNext:(id)sender {
+    (void)sender;
+    if ([_findText length] == 0) {
+        [self findDocument:nil];
+        return;
+    }
+    [self startFind:_findText direction:MacFindDirection::Forward];
+}
+
+- (IBAction)findPrevious:(id)sender {
+    (void)sender;
+    if ([_findText length] == 0) {
+        [self findDocument:nil];
+        return;
+    }
+    [self startFind:_findText direction:MacFindDirection::Backward];
+}
+
+- (IBAction)useSelectionForFind:(id)sender {
+    (void)sender;
+    char* textUtf8 = MacCopySelectionText([self documentHandle]);
+    NSString* text = StringFromUtf8(textUtf8);
+    MacFreeString(textUtf8);
+    NSArray* parts = [text componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableArray* words = [NSMutableArray array];
+    for (NSString* part in parts) {
+        if ([part length] > 0) {
+            [words addObject:part];
+        }
+    }
+    text = [words componentsJoinedByString:@" "];
+    if ([text length] == 0) {
+        NSBeep();
+        return;
+    }
+    [_findText release];
+    _findText = [text copy];
+    [_searchField setStringValue:text];
+}
+
+#pragma mark - Zoom, rotation, view mode
+
+- (CGFloat)displayZoom {
+    if (!_active || _currentLayoutZoom <= 0) {
+        return 1.0;
+    }
+    double dpi = MacFileDPI(_active.document);
+    return (CGFloat)(_currentLayoutZoom * (dpi > 0 ? dpi : 96.0) / 72.0);
+}
+
+- (void)setZoom:(CGFloat)zoom anchorClipPoint:(NSPoint)clipPoint {
+    SumatraTabState* tab = _active;
+    if (!tab) {
+        return;
+    }
+    if (zoom > 0) {
+        zoom = MAX(kZoomMin, MIN(kZoomMax, zoom));
+    }
+    ViewAnchor anchor = [self anchorAtClipPoint:clipPoint];
+    tab.zoom = zoom;
+    if (!_liveMagnify) {
+        MacResetRenderer(tab.document);
+    }
+    [self relayoutKeepingAnchor:anchor];
+}
+
+- (CGFloat)nextZoomLevel:(int)direction {
+    CGFloat current = [self displayZoom];
+    int n = (int)(sizeof(kZoomLevels) / sizeof(kZoomLevels[0]));
+    if (direction > 0) {
+        for (int i = 0; i < n; i++) {
+            if (kZoomLevels[i] > current * 1.01) {
+                return kZoomLevels[i];
+            }
+        }
+        return kZoomMax;
+    }
+    for (int i = n - 1; i >= 0; i--) {
+        if (kZoomLevels[i] < current * 0.99) {
+            return kZoomLevels[i];
+        }
+    }
+    return kZoomMin;
+}
+
+- (IBAction)zoomIn:(id)sender {
+    (void)sender;
+    _smartZoomReturn = 0;
+    [self setZoom:[self nextZoomLevel:1] anchorClipPoint:[self clipCenter]];
+}
+
+- (IBAction)zoomOut:(id)sender {
+    (void)sender;
+    _smartZoomReturn = 0;
+    [self setZoom:[self nextZoomLevel:-1] anchorClipPoint:[self clipCenter]];
+}
+
+- (IBAction)zoomActualSize:(id)sender {
+    (void)sender;
+    _smartZoomReturn = 0;
+    [self setZoom:1.0 anchorClipPoint:[self clipCenter]];
+}
+
+- (IBAction)zoomFitPage:(id)sender {
+    (void)sender;
+    _smartZoomReturn = 0;
+    [self setZoom:kMacZoomFitPage anchorClipPoint:[self clipCenter]];
+}
+
+- (IBAction)zoomFitWidth:(id)sender {
+    (void)sender;
+    _smartZoomReturn = 0;
+    [self setZoom:kMacZoomFitWidth anchorClipPoint:NSMakePoint([self clipCenter].x, 0)];
+}
+
+- (void)rotateBy:(int)degrees {
+    SumatraTabState* tab = _active;
+    if (!tab) {
+        return;
+    }
+    tab.rotation = (tab.rotation + degrees + 360) % 360;
+    [_imageCache removeAllObjects];
+    MacResetRenderer(tab.document);
+    [_sidebar documentChanged];
+    [self showPage:tab.currentPage position:PagePosition::Top];
+}
+
+- (IBAction)rotateLeft:(id)sender {
+    (void)sender;
+    [self rotateBy:-90];
+}
+
+- (IBAction)rotateRight:(id)sender {
+    (void)sender;
+    [self rotateBy:90];
+}
+
+- (void)setContinuous:(BOOL)continuous {
+    SumatraTabState* tab = _active;
+    if (!tab || tab.continuous == continuous) {
+        return;
+    }
+    tab.continuous = continuous;
+    [self showPage:tab.currentPage position:PagePosition::Top];
+}
+
+- (IBAction)setSinglePageView:(id)sender {
+    (void)sender;
+    [self setContinuous:NO];
+}
+
+- (IBAction)setContinuousPageView:(id)sender {
+    (void)sender;
+    [self setContinuous:YES];
+}
+
+- (void)windowDidChangeBackingProperties:(NSNotification*)notification {
+    (void)notification;
+    if (_active) {
+        [self updateLayout];
+    }
+}
+
+- (void)windowWillClose:(NSNotification*)notification {
+    if ([notification object] == _window) {
+        [NSApp performSelector:@selector(terminate:) withObject:nil afterDelay:0];
+    }
+}
+
+#pragma mark - Sidebar
+
+- (void)setSidebarVisible:(BOOL)visible {
+    _sidebarVisible = visible;
+    _adjustingSidebar = YES;
+    NSView* view = [_sidebar view];
+    [view setHidden:!visible];
+    [_splitView adjustSubviews];
+    if (visible) {
+        [_splitView setPosition:_sidebarWidth ofDividerAtIndex:0];
+    }
+    _adjustingSidebar = NO;
+    [[NSUserDefaults standardUserDefaults] setBool:visible forKey:kDefSidebarVisible];
+}
+
+- (void)showSidebarMode:(SumatraSidebarMode)mode {
+    [_sidebar setMode:mode];
+    [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:kDefSidebarMode];
+    if (!_sidebarVisible) {
+        [self setSidebarVisible:YES];
+    }
+}
+
+- (IBAction)toggleSidebar:(id)sender {
+    (void)sender;
+    [self setSidebarVisible:!_sidebarVisible];
+}
+
+- (IBAction)showOutline:(id)sender {
+    (void)sender;
+    [self showSidebarMode:SumatraSidebarModeOutline];
+}
+
+- (IBAction)showThumbnails:(id)sender {
+    (void)sender;
+    [self showSidebarMode:SumatraSidebarModeThumbnails];
+}
+
+- (BOOL)splitView:(NSSplitView*)splitView canCollapseSubview:(NSView*)subview {
+    (void)splitView;
+    return subview == [_sidebar view];
+}
+
+- (CGFloat)splitView:(NSSplitView*)splitView
+    constrainMinCoordinate:(CGFloat)proposedMinimumPosition
+               ofSubviewAt:(NSInteger)dividerIndex {
+    (void)splitView;
+    return dividerIndex == 0 ? kSidebarMinWidth : proposedMinimumPosition;
+}
+
+- (CGFloat)splitView:(NSSplitView*)splitView
+    constrainMaxCoordinate:(CGFloat)proposedMaximumPosition
+               ofSubviewAt:(NSInteger)dividerIndex {
+    if (dividerIndex != 0) {
+        return proposedMaximumPosition;
+    }
+    return MAX(kSidebarMinWidth, MIN(kSidebarMaxWidth, NSWidth([splitView bounds]) - kDocumentMinWidth));
+}
+
+// Window resizes go to the document, not the sidebar.
+- (BOOL)splitView:(NSSplitView*)splitView shouldAdjustSizeOfSubview:(NSView*)view {
+    (void)splitView;
+    return view != [_sidebar view];
+}
+
+// Tracks the divider: dragging it collapses or re-expands the sidebar.
+- (void)splitViewDidResizeSubviews:(NSNotification*)notification {
+    (void)notification;
+    if (_adjustingSidebar) {
+        return;
+    }
+    NSView* view = [_sidebar view];
+    BOOL collapsed = [view isHidden] || [_splitView isSubviewCollapsed:view];
+    if (collapsed != !_sidebarVisible) {
+        _sidebarVisible = !collapsed;
+        [[NSUserDefaults standardUserDefaults] setBool:_sidebarVisible forKey:kDefSidebarVisible];
+    }
+    if (collapsed) {
+        return;
+    }
+    CGFloat width = NSWidth([view frame]);
+    if (width >= kSidebarMinWidth && fabs(width - _sidebarWidth) >= 1.0) {
+        _sidebarWidth = width;
+        [[NSUserDefaults standardUserDefaults] setDouble:width forKey:kDefSidebarWidth];
+    }
+}
+
+#pragma mark - Menu actions
 
 - (IBAction)openDocument:(id)sender {
     (void)sender;
     NSOpenPanel* panel = [NSOpenPanel openPanel];
-    [panel setAllowsMultipleSelection:NO];
+    [panel setAllowsMultipleSelection:YES];
     [panel setCanChooseDirectories:NO];
     [panel setCanChooseFiles:YES];
-    [panel setAllowsOtherFileTypes:YES];
-    [panel setAllowedFileTypes:@[
-        @"pdf", @"xps", @"oxps", @"epub", @"mobi", @"fb2", @"cbz", @"cbr", @"cb7", @"cbt", @"djvu", @"djv", @"chm",
-        @"png", @"jpg", @"jpeg", @"gif", @"tif", @"tiff", @"tga", @"bmp", @"webp", @"jxl", @"heic", @"avif"
-    ]];
-    if ([panel runModal] == NSModalResponseOK) {
-        NSURL* url = [[panel URLs] firstObject];
-        if (url) {
-            [self openPath:[url path]];
+    char* extsUtf8 = MacCopySupportedExtensions();
+    NSString* exts = StringFromUtf8(extsUtf8);
+    MacFreeString(extsUtf8);
+    if ([exts length] > 0) {
+        [panel setAllowedFileTypes:[exts componentsSeparatedByString:@";"]];
+    }
+    if ([panel runModal] != NSModalResponseOK) {
+        return;
+    }
+    NSMutableArray* paths = [NSMutableArray array];
+    for (NSURL* url in [panel URLs]) {
+        if ([url path]) {
+            [paths addObject:[url path]];
         }
+    }
+    [self openPaths:paths];
+}
+
+- (IBAction)openRecentItem:(id)sender {
+    NSString* path = [sender representedObject];
+    if ([path isKindOfClass:[NSString class]]) {
+        [self openPaths:@[ path ]];
     }
 }
 
-- (IBAction)openRecentDocument:(id)sender {
-    (void)sender;
-    int count = MacPrefsRecentCount();
-    if (count == 0) {
+// ⌘W closes the tab; with no tabs left it closes the window (and quits).
+- (IBAction)closeTab:(id)sender {
+    NSInteger idx = [self activeIndex];
+    if (idx < 0) {
+        [_window performClose:sender];
         return;
     }
-    NSPopUpButton* items = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 440, 28) pullsDown:NO] autorelease];
-    NSMutableArray* paths = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
-    for (int i = 0; i < count; i++) {
-        char* pathUtf8 = MacPrefsCopyRecentPath(i);
-        NSString* path = pathUtf8 ? [NSString stringWithUTF8String:pathUtf8] : nil;
-        MacFreeString(pathUtf8);
-        if (path) {
-            [paths addObject:path];
-            [items addItemWithTitle:[path lastPathComponent]];
-        }
-    }
-    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-    [alert setMessageText:@"Open Recent"];
-    [alert addButtonWithTitle:@"Open"];
-    [alert addButtonWithTitle:@"Cancel"];
-    [alert setAccessoryView:items];
-    if ([alert runModal] == NSAlertFirstButtonReturn && [items indexOfSelectedItem] >= 0) {
-        [self openPath:[paths objectAtIndex:(NSUInteger)[items indexOfSelectedItem]]];
-    }
-}
-
-- (IBAction)performClose:(id)sender {
-    (void)sender;
-    MacPrefsSaveSession(nullptr, nullptr);
-    if (_activeTab < 0 || _activeTab >= (int)[_tabs count]) {
-        return;
-    }
-    [self saveActiveTabState];
-    SumatraTabState* tab = [[[_tabs objectAtIndex:(NSUInteger)_activeTab] retain] autorelease];
-    if ([tab path]) {
-        [_closedPaths addObject:[tab path]];
-        while ([_closedPaths count] > 10) {
-            [_closedPaths removeObjectAtIndex:0];
-        }
-    }
-    int nextTab = MIN(_activeTab, (int)[_tabs count] - 2);
-    [self stopWatchingDocument];
-    [self destroyTab:tab];
-    [_tabs removeObjectAtIndex:(NSUInteger)_activeTab];
-    _activeTab = -1;
-    _document = nullptr;
-    if ([_tabs count] > 0) {
-        [self activateTabAtIndex:nextTab];
-    } else {
-        [self refreshTabSelector];
-        [self showEmptyDocumentView];
-    }
+    [self closeTabAtIndex:(int)idx];
 }
 
 - (IBAction)reopenClosedTab:(id)sender {
@@ -1442,15 +2626,7 @@ static NSArray<NSString*>* ToolbarAllowedItems() {
     }
     NSString* path = [[[_closedPaths lastObject] retain] autorelease];
     [_closedPaths removeLastObject];
-    [self openPath:path];
-}
-
-- (void)selectRelativeTab:(int)direction {
-    int count = (int)[_tabs count];
-    if (count < 2) {
-        return;
-    }
-    [self activateTabAtIndex:(_activeTab + direction + count) % count];
+    [self openPaths:@[ path ]];
 }
 
 - (IBAction)selectNextTab:(id)sender {
@@ -1463,272 +2639,97 @@ static NSArray<NSString*>* ToolbarAllowedItems() {
     [self selectRelativeTab:-1];
 }
 
-- (IBAction)toggleFavorite:(id)sender {
+- (IBAction)selectTabFromMenu:(id)sender {
+    NSUInteger idx = [_tabs indexOfObjectIdenticalTo:[sender representedObject]];
+    if (idx != NSNotFound) {
+        [self activateTabAtIndex:(int)idx];
+    }
+}
+
+- (IBAction)showInFinder:(id)sender {
     (void)sender;
-    if (!_documentPath || _currentPage < 1) {
-        return;
-    }
-    const char* path = [_documentPath fileSystemRepresentation];
-    if (MacPrefsHasFavorite(path, _currentPage)) {
-        MacPrefsRemoveFavorite(path, _currentPage);
-    } else {
-        MacPrefsAddFavorite(path, _currentPage);
-    }
-}
-
-- (IBAction)showFavorites:(id)sender {
-    (void)sender;
-    int count = MacPrefsFavoriteCount();
-    if (count == 0) {
-        NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-        [alert setMessageText:@"Favorites"];
-        [alert setInformativeText:@"No favorite pages have been saved."];
-        [alert beginSheetModalForWindow:_window completionHandler:nil];
-        return;
-    }
-    NSPopUpButton* items = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 440, 28) pullsDown:NO] autorelease];
-    NSMutableArray* paths = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
-    NSMutableArray* pages = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
-    for (int i = 0; i < count; i++) {
-        char* pathUtf8 = MacPrefsCopyFavoritePath(i);
-        NSString* path = pathUtf8 ? [NSString stringWithUTF8String:pathUtf8] : nil;
-        MacFreeString(pathUtf8);
-        int pageNo = MacPrefsFavoritePage(i);
-        if (path) {
-            [paths addObject:path];
-            [pages addObject:[NSNumber numberWithInt:pageNo]];
-            [items addItemWithTitle:[NSString stringWithFormat:@"%@ — page %d", [path lastPathComponent], pageNo]];
-        }
-    }
-    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-    [alert setMessageText:@"Favorites"];
-    [alert addButtonWithTitle:@"Go"];
-    [alert addButtonWithTitle:@"Cancel"];
-    [alert setAccessoryView:items];
-    if ([alert runModal] != NSAlertFirstButtonReturn || [items indexOfSelectedItem] < 0) {
-        return;
-    }
-    NSUInteger index = (NSUInteger)[items indexOfSelectedItem];
-    NSString* path = [paths objectAtIndex:index];
-    int pageNo = [[pages objectAtIndex:index] intValue];
-    if (![_documentPath isEqualToString:path]) {
-        [self openPath:path];
-    }
-    [self goToPage:pageNo];
-}
-
-- (IBAction)showInFolder:(id)sender {
-    (void)sender;
-    if (!_documentPath) {
-        return;
-    }
-    NSURL* url = [NSURL fileURLWithPath:_documentPath];
-    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[ url ]];
-}
-
-- (IBAction)goToNextPage:(id)sender {
-    (void)sender;
-    [self goToPage:_currentPage + 1];
-}
-
-- (IBAction)goToPrevPage:(id)sender {
-    (void)sender;
-    [self goToPage:_currentPage - 1];
-}
-
-- (IBAction)goToFirstPage:(id)sender {
-    (void)sender;
-    [self goToPage:1];
-}
-
-- (IBAction)goToLastPage:(id)sender {
-    (void)sender;
-    [self goToPage:_pageCount];
-}
-
-- (IBAction)goToPageDialog:(id)sender {
-    (void)sender;
-    if (!_document) {
-        return;
-    }
-    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-    [alert setMessageText:[NSString stringWithFormat:@"Go to page (1 - %d):", _pageCount]];
-    [alert addButtonWithTitle:@"Go"];
-    [alert addButtonWithTitle:@"Cancel"];
-    NSTextField* input = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)] autorelease];
-    [input setStringValue:[NSString stringWithFormat:@"%d", _currentPage]];
-    [alert setAccessoryView:input];
-    if ([alert runModal] == NSAlertFirstButtonReturn) {
-        int pageNo = [input intValue];
-        if (pageNo >= 1 && pageNo <= _pageCount) {
-            [self goToPage:pageNo];
-        }
-    }
-}
-
-- (void)showSearchNotFound {
-    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-    [alert setAlertStyle:NSAlertStyleInformational];
-    [alert setMessageText:@"Text not found"];
-    [alert setInformativeText:_findText ?: @""];
-    [alert beginSheetModalForWindow:_window completionHandler:nil];
-}
-
-- (BOOL)findForward:(BOOL)forward restart:(BOOL)restart {
-    if (!_document || [_findText length] == 0) {
-        return NO;
-    }
-    bool found = MacFindText(_document, _currentPage, [_findText UTF8String], forward, restart);
-    if (!found) {
-        [self renderCurrentPage];
-        [self showSearchNotFound];
-        return NO;
-    }
-    int pageNo = MacFindResultPage(_document);
-    if (pageNo > 0) {
-        [self goToPage:pageNo];
-        [self renderCurrentPage];
-    }
-    return YES;
-}
-
-- (IBAction)findDocument:(id)sender {
-    (void)sender;
-    if (!_document) {
-        return;
-    }
-    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-    [alert setMessageText:@"Find in document"];
-    [alert addButtonWithTitle:@"Find"];
-    [alert addButtonWithTitle:@"Cancel"];
-    NSTextField* input = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)] autorelease];
-    [input setStringValue:_findText ?: @""];
-    [alert setAccessoryView:input];
-    if ([alert runModal] == NSAlertFirstButtonReturn && [[input stringValue] length] > 0) {
-        self.findText = [input stringValue];
-        [self findForward:YES restart:YES];
-    }
-}
-
-- (IBAction)findNext:(id)sender {
-    (void)sender;
-    if ([_findText length] == 0) {
-        [self findDocument:nil];
-        return;
-    }
-    [self findForward:YES restart:NO];
-}
-
-- (IBAction)findPrevious:(id)sender {
-    (void)sender;
-    if ([_findText length] == 0) {
-        [self findDocument:nil];
-        return;
-    }
-    [self findForward:NO restart:NO];
-}
-
-- (IBAction)showToc:(id)sender {
-    (void)sender;
-    int count = MacTocItemCount(_document);
-    if (count == 0) {
-        NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-        [alert setMessageText:@"Table of Contents"];
-        [alert setInformativeText:@"This document has no table of contents."];
-        [alert beginSheetModalForWindow:_window completionHandler:nil];
-        return;
-    }
-
-    NSPopUpButton* items = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 440, 28) pullsDown:NO] autorelease];
-    int selectedIndex = 0;
-    for (int i = 0; i < count; i++) {
-        char* titleUtf8 = MacCopyTocItemTitle(_document, i);
-        NSString* title = titleUtf8 ? [NSString stringWithUTF8String:titleUtf8] : @"";
-        MacFreeString(titleUtf8);
-        NSMutableString* indented = [NSMutableString string];
-        for (int depth = MacTocItemDepth(_document, i); depth > 0; depth--) {
-            [indented appendString:@"  "];
-        }
-        [indented appendString:title ?: @""];
-        [items addItemWithTitle:indented];
-        int pageNo = MacTocItemPage(_document, i);
-        if (pageNo > 0 && pageNo <= _currentPage) {
-            selectedIndex = i;
-        }
-    }
-    [items selectItemAtIndex:selectedIndex];
-
-    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-    [alert setMessageText:@"Table of Contents"];
-    [alert addButtonWithTitle:@"Go"];
-    [alert addButtonWithTitle:@"Cancel"];
-    [alert setAccessoryView:items];
-    if ([alert runModal] == NSAlertFirstButtonReturn) {
-        int pageNo = MacTocItemPage(_document, (int)[items indexOfSelectedItem]);
-        if (pageNo > 0) {
-            [self goToPage:pageNo];
-        }
+    if (_active.path) {
+        [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[ [NSURL fileURLWithPath:_active.path] ]];
     }
 }
 
 - (IBAction)showProperties:(id)sender {
     (void)sender;
+    SumatraTabState* tab = _active;
+    if (!tab) {
+        return;
+    }
     NSMutableString* text = [NSMutableString string];
-    int count = MacPropertyCount(_document);
+    [text appendFormat:@"File: %@\nPages: %d\n", [tab.path stringByAbbreviatingWithTildeInPath], tab.pageCount];
+    int count = MacPropertyCount(tab.document);
     for (int i = 0; i < count; i++) {
-        char* nameUtf8 = MacCopyPropertyName(_document, i);
-        char* valueUtf8 = MacCopyPropertyValue(_document, i);
-        NSString* name = nameUtf8 ? [NSString stringWithUTF8String:nameUtf8] : @"";
-        NSString* value = valueUtf8 ? [NSString stringWithUTF8String:valueUtf8] : @"";
+        char* nameUtf8 = MacCopyPropertyName(tab.document, i);
+        char* valueUtf8 = MacCopyPropertyValue(tab.document, i);
+        NSString* name = StringFromUtf8(nameUtf8);
+        NSString* value = StringFromUtf8(valueUtf8);
         MacFreeString(nameUtf8);
         MacFreeString(valueUtf8);
         [text appendFormat:@"%@: %@\n", name ?: @"", value ?: @""];
     }
-    if ([text length] == 0) {
-        [text appendString:@"No document properties are available."];
-    }
 
-    NSTextView* textView = [[[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 520, 300)] autorelease];
+    NSScrollView* scroll = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 520, 280)] autorelease];
+    [scroll setHasVerticalScroller:YES];
+    [scroll setBorderType:NSBezelBorder];
+    NSSize size = [scroll contentSize];
+    NSTextView* textView = [[[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)] autorelease];
+    [textView setMinSize:NSMakeSize(0, size.height)];
+    [textView setMaxSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)];
+    [textView setVerticallyResizable:YES];
+    [textView setHorizontallyResizable:NO];
+    [textView setAutoresizingMask:NSViewWidthSizable];
+    [[textView textContainer] setContainerSize:NSMakeSize(size.width, CGFLOAT_MAX)];
+    [[textView textContainer] setWidthTracksTextView:YES];
     [textView setString:text];
     [textView setEditable:NO];
     [textView setSelectable:YES];
-    [textView setFont:[NSFont systemFontOfSize:13]];
-    NSScrollView* scroll = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 520, 300)] autorelease];
-    [scroll setHasVerticalScroller:YES];
-    [scroll setBorderType:NSBezelBorder];
+    [textView setFont:[NSFont systemFontOfSize:12]];
+    [textView setAccessibilityLabel:@"Document properties"];
     [scroll setDocumentView:textView];
 
     NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-    [alert setMessageText:@"Document Properties"];
+    [alert setMessageText:[tab.path lastPathComponent] ?: @"Document Properties"];
+    [alert setInformativeText:@"Document properties"];
     [alert addButtonWithTitle:@"OK"];
     [alert setAccessoryView:scroll];
-    [alert runModal];
+    [self presentAlert:alert completion:nil];
 }
 
+// Fit-to-paper printing through the engine's print render path. App-modal;
+// the document can't be closed or reloaded until it finishes.
 - (IBAction)printDocument:(id)sender {
     (void)sender;
-    if (!_document) {
+    SumatraTabState* tab = _active;
+    if (!tab || _printingDocument) {
         return;
     }
-    SumatraPrintView* view = [[[SumatraPrintView alloc] initWithFrame:NSMakeRect(0, 0, 612, 792)] autorelease];
-    [view setDocument:_document];
-    [view setPageCount:_pageCount];
-    [view setRotation:_rotation];
-    NSPrintOperation* operation = [NSPrintOperation printOperationWithView:view printInfo:[NSPrintInfo sharedPrintInfo]];
+    SumatraPrintView* view = [[[SumatraPrintView alloc] initWithDocument:tab.document
+                                                               pageCount:tab.pageCount
+                                                                rotation:tab.rotation] autorelease];
+    NSPrintInfo* info = [[[NSPrintInfo sharedPrintInfo] copy] autorelease];
+    [info setTopMargin:kPrintMargin];
+    [info setBottomMargin:kPrintMargin];
+    [info setLeftMargin:kPrintMargin];
+    [info setRightMargin:kPrintMargin];
+    NSPrintOperation* operation = [NSPrintOperation printOperationWithView:view printInfo:info];
+    [operation setJobTitle:[tab.path lastPathComponent]];
     [operation setShowsPrintPanel:YES];
     [operation setShowsProgressPanel:YES];
+    _printingDocument = tab.document;
     [operation runOperation];
+    _printingDocument = nullptr;
 }
 
-- (IBAction)copySelection:(id)sender {
+- (IBAction)copy:(id)sender {
     (void)sender;
-    char* textUtf8 = MacCopySelectionText(_document);
-    if (!textUtf8) {
-        return;
-    }
-    NSString* text = [NSString stringWithUTF8String:textUtf8];
+    char* textUtf8 = MacCopySelectionText([self documentHandle]);
+    NSString* text = StringFromUtf8(textUtf8);
     MacFreeString(textUtf8);
-    if (!text) {
+    if ([text length] == 0) {
         return;
     }
     NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
@@ -1738,259 +2739,129 @@ static NSArray<NSString*>* ToolbarAllowedItems() {
 
 - (IBAction)selectAll:(id)sender {
     (void)sender;
-    MacSelectAll(_document);
-    [self renderCurrentPage];
+    MacSelectAll([self documentHandle]);
+    [self updateLayout];
 }
 
-- (void)rebuildCommandPaletteItems {
-    [_commandPaletteItems removeAllItems];
-    MacFilterCommandPalette(_commandPalette, [[_commandPaletteQuery stringValue] UTF8String]);
-    int count = MacCommandPaletteCount(_commandPalette);
-    for (int i = 0; i < count; i++) {
-        char* textUtf8 = MacCopyCommandPaletteItem(_commandPalette, i);
-        NSString* item = textUtf8 ? [NSString stringWithUTF8String:textUtf8] : @"";
-        MacFreeString(textUtf8);
-        [_commandPaletteItems addItemWithTitle:item ?: @""];
-    }
-    [_commandPaletteItems setEnabled:count > 0];
-}
-
-- (void)controlTextDidChange:(NSNotification*)notification {
-    if ([notification object] == _commandPaletteQuery) {
-        [self rebuildCommandPaletteItems];
+- (IBAction)goToNextPage:(id)sender {
+    (void)sender;
+    if (_active && _active.currentPage < _active.pageCount) {
+        [self showPage:_active.currentPage + 1 position:PagePosition::Top];
     }
 }
 
-- (void)dispatchPaletteAction:(MacCommandAction)action {
-    switch (action) {
-        case MacCommandAction::Open:
-            [self openDocument:nil];
-            break;
-        case MacCommandAction::Close:
-            [self performClose:nil];
-            break;
-        case MacCommandAction::ReopenClosed:
-            [self reopenClosedTab:nil];
-            break;
-        case MacCommandAction::NextTab:
-            [self selectNextTab:nil];
-            break;
-        case MacCommandAction::PreviousTab:
-            [self selectPreviousTab:nil];
-            break;
-        case MacCommandAction::Print:
-            [self printDocument:nil];
-            break;
-        case MacCommandAction::ShowInFolder:
-            [self showInFolder:nil];
-            break;
-        case MacCommandAction::Properties:
-            [self showProperties:nil];
-            break;
-        case MacCommandAction::SinglePage:
-            [self setSinglePageView:nil];
-            break;
-        case MacCommandAction::ToggleContinuous:
-            if (_continuousView) {
-                [self setSinglePageView:nil];
-            } else {
-                [self setContinuousPageView:nil];
-            }
-            break;
-        case MacCommandAction::RotateLeft:
-            [self rotateLeft:nil];
-            break;
-        case MacCommandAction::RotateRight:
-            [self rotateRight:nil];
-            break;
-        case MacCommandAction::Fullscreen:
-            [self toggleFullScreen:nil];
-            break;
-        case MacCommandAction::Copy:
-            [self copySelection:nil];
-            break;
-        case MacCommandAction::SelectAll:
-            [self selectAll:nil];
-            break;
-        case MacCommandAction::NextPage:
-            [self goToNextPage:nil];
-            break;
-        case MacCommandAction::PreviousPage:
-            [self goToPrevPage:nil];
-            break;
-        case MacCommandAction::FirstPage:
-            [self goToFirstPage:nil];
-            break;
-        case MacCommandAction::LastPage:
-            [self goToLastPage:nil];
-            break;
-        case MacCommandAction::GoToPage:
-            [self goToPageDialog:nil];
-            break;
-        case MacCommandAction::Find:
-            [self findDocument:nil];
-            break;
-        case MacCommandAction::FindNext:
-            [self findNext:nil];
-            break;
-        case MacCommandAction::FindPrevious:
-            [self findPrevious:nil];
-            break;
-        case MacCommandAction::FitPage:
-            [self zoomFitPage:nil];
-            break;
-        case MacCommandAction::ActualSize:
-            [self zoomActualSize:nil];
-            break;
-        case MacCommandAction::FitWidth:
-            [self zoomFitWidth:nil];
-            break;
-        case MacCommandAction::ZoomIn:
-            [self zoomIn:nil];
-            break;
-        case MacCommandAction::ZoomOut:
-            [self zoomOut:nil];
-            break;
-        case MacCommandAction::Toc:
-            [self showToc:nil];
-            break;
-        case MacCommandAction::KeyboardHelp:
-            [self showKeyboardShortcuts:nil];
-            break;
-        case MacCommandAction::None:
-            break;
+- (IBAction)goToPrevPage:(id)sender {
+    (void)sender;
+    if (_active && _active.currentPage > 1) {
+        [self showPage:_active.currentPage - 1 position:PagePosition::Top];
     }
+}
+
+- (IBAction)goToFirstPage:(id)sender {
+    (void)sender;
+    [self goToPage:1];
+}
+
+- (IBAction)goToLastPage:(id)sender {
+    (void)sender;
+    if (_active) {
+        [self goToPage:_active.pageCount];
+    }
+}
+
+- (IBAction)goToPageDialog:(id)sender {
+    (void)sender;
+    SumatraTabState* tab = _active;
+    if (!tab) {
+        return;
+    }
+    if ([_toolbar isVisible] && [_pageField window] == _window) {
+        [_window makeFirstResponder:_pageField];
+        [_pageField selectText:nil];
+        return;
+    }
+    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
+    [alert setMessageText:[NSString stringWithFormat:@"Go to page (1–%d):", tab.pageCount]];
+    [alert addButtonWithTitle:@"Go"];
+    [alert addButtonWithTitle:@"Cancel"];
+    NSTextField* input = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)] autorelease];
+    [input setStringValue:[NSString stringWithFormat:@"%d", tab.currentPage]];
+    [input setAccessibilityLabel:@"Page number"];
+    [alert setAccessoryView:input];
+    [[alert window] setInitialFirstResponder:input];
+    [self presentAlert:alert
+            completion:^(NSModalResponse response) {
+              int pageNo = [input intValue];
+              if (response == NSAlertFirstButtonReturn && _active && pageNo >= 1 && pageNo <= _active.pageCount) {
+                  [self goToPage:pageNo];
+              }
+            }];
+}
+
+- (IBAction)goBack:(id)sender {
+    (void)sender;
+    SumatraTabState* tab = _active;
+    if (!tab || tab.historyIndex <= 0 || tab.historyIndex >= (int)[tab.history count]) {
+        return;
+    }
+    [tab.history replaceObjectAtIndex:(NSUInteger)tab.historyIndex withObject:[NSNumber numberWithInt:tab.currentPage]];
+    tab.historyIndex = tab.historyIndex - 1;
+    [self showPage:[[tab.history objectAtIndex:(NSUInteger)tab.historyIndex] intValue] position:PagePosition::Top];
+}
+
+- (IBAction)goForward:(id)sender {
+    (void)sender;
+    SumatraTabState* tab = _active;
+    if (!tab || tab.historyIndex + 1 >= (int)[tab.history count]) {
+        return;
+    }
+    [tab.history replaceObjectAtIndex:(NSUInteger)tab.historyIndex withObject:[NSNumber numberWithInt:tab.currentPage]];
+    tab.historyIndex = tab.historyIndex + 1;
+    [self showPage:[[tab.history objectAtIndex:(NSUInteger)tab.historyIndex] intValue] position:PagePosition::Top];
+}
+
+- (IBAction)toggleFavorite:(id)sender {
+    (void)sender;
+    SumatraTabState* tab = _active;
+    if (!tab.path || tab.currentPage < 1) {
+        return;
+    }
+    const char* path = FsPath(tab.path);
+    if (MacPrefsHasFavorite(path, tab.currentPage)) {
+        MacPrefsRemoveFavorite(path, tab.currentPage);
+    } else {
+        MacPrefsAddFavorite(path, tab.currentPage);
+    }
+}
+
+- (IBAction)openFavorite:(id)sender {
+    NSArray* target = [sender representedObject];
+    if (![target isKindOfClass:[NSArray class]] || [target count] != 2) {
+        return;
+    }
+    NSString* path = [target objectAtIndex:0];
+    int pageNo = [[target objectAtIndex:1] intValue];
+    if (!_active || ![_active.canonicalPath isEqualToString:CanonicalPath(path)]) {
+        if (![self openPath:path]) {
+            return;
+        }
+    }
+    [self goToPage:pageNo];
 }
 
 - (IBAction)showCommandPalette:(id)sender {
     (void)sender;
-    _commandPalette = MacCreateCommandPalette();
-    self.commandPaletteQuery = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 38, 460, 24)] autorelease];
-    self.commandPaletteItems = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 460, 28) pullsDown:NO] autorelease];
-    [_commandPaletteQuery setPlaceholderString:@"Type a command"];
-    [_commandPaletteQuery setDelegate:self];
-    NSView* accessory = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 64)] autorelease];
-    [accessory addSubview:_commandPaletteQuery];
-    [accessory addSubview:_commandPaletteItems];
-    [self rebuildCommandPaletteItems];
-
-    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-    [alert setMessageText:@"Command Palette"];
-    [alert addButtonWithTitle:@"Run"];
-    [alert addButtonWithTitle:@"Cancel"];
-    [alert setAccessoryView:accessory];
-    NSInteger result = [alert runModal];
-    int index = (int)[_commandPaletteItems indexOfSelectedItem];
-    int commandId = result == NSAlertFirstButtonReturn ? MacCommandPaletteItemCommand(_commandPalette, index) : 0;
-    MacCommandAction action = MacCommandPaletteAction(commandId);
-    [_commandPaletteQuery setDelegate:nil];
-    self.commandPaletteQuery = nil;
-    self.commandPaletteItems = nil;
-    MacDestroyCommandPalette(_commandPalette);
-    _commandPalette = nullptr;
-    [self dispatchPaletteAction:action];
-}
-
-- (IBAction)rotateLeft:(id)sender {
-    (void)sender;
-    if (!_document) {
+    NSMenuItem* item = SumatraRunCommandPalette(_window);
+    if (!item || ![item action]) {
         return;
     }
-    _rotation = (_rotation + 270) % 360;
-    MacResetRenderer(_document);
-    [self renderCurrentPage];
+    [_window makeKeyAndOrderFront:nil];
+    [NSApp sendAction:[item action] to:[item target] from:item];
 }
 
-- (IBAction)rotateRight:(id)sender {
+- (IBAction)showKeyboardShortcuts:(id)sender {
     (void)sender;
-    if (!_document) {
-        return;
-    }
-    _rotation = (_rotation + 90) % 360;
-    MacResetRenderer(_document);
-    [self renderCurrentPage];
-}
-
-- (IBAction)toggleFullScreen:(id)sender {
-    (void)sender;
-    [_window toggleFullScreen:nil];
-}
-
-- (IBAction)setSinglePageView:(id)sender {
-    (void)sender;
-    if (!_document) {
-        return;
-    }
-    _continuousView = NO;
-    MacResetRenderer(_document);
-    [self renderCurrentPage];
-    [[_scrollView contentView] scrollToPoint:NSZeroPoint];
-    [_scrollView reflectScrolledClipView:[_scrollView contentView]];
-}
-
-- (IBAction)setContinuousPageView:(id)sender {
-    (void)sender;
-    if (!_document) {
-        return;
-    }
-    _continuousView = YES;
-    MacResetRenderer(_document);
-    [self renderCurrentPage];
-}
-
-- (IBAction)zoomFitPage:(id)sender {
-    (void)sender;
-    if (!_document) {
-        return;
-    }
-    _zoom = kMacZoomFitPage;
-    MacResetRenderer(_document);
-    [self renderCurrentPage];
-}
-
-- (IBAction)zoomFitWidth:(id)sender {
-    (void)sender;
-    if (!_document) {
-        return;
-    }
-    _zoom = kMacZoomFitWidth;
-    MacResetRenderer(_document);
-    [self renderCurrentPage];
-}
-
-- (IBAction)zoomActualSize:(id)sender {
-    (void)sender;
-    if (!_document) {
-        return;
-    }
-    _zoom = 1.0;
-    MacResetRenderer(_document);
-    [self renderCurrentPage];
-}
-
-- (void)applyZoomFactor:(CGFloat)factor {
-    if (!_document) {
-        return;
-    }
-    CGFloat base = (_zoom <= 0) ? [self fitZoomForWidthOnly:NO] : _zoom;
-    if (_zoom == kMacZoomFitWidth) {
-        base = [self fitZoomForWidthOnly:YES];
-    }
-    CGFloat z = base * factor;
-    z = MAX(kZoomMin, MIN(kZoomMax, z));
-    _zoom = z;
-    MacResetRenderer(_document);
-    [self renderCurrentPage];
-}
-
-- (IBAction)zoomIn:(id)sender {
-    (void)sender;
-    [self applyZoomFactor:kZoomStep];
-}
-
-- (IBAction)zoomOut:(id)sender {
-    (void)sender;
-    [self applyZoomFactor:1.0 / kZoomStep];
+    SumatraShowKeyboardShortcuts();
 }
 
 - (IBAction)openWebsite:(id)sender {
@@ -1998,270 +2869,277 @@ static NSArray<NSString*>* ToolbarAllowedItems() {
     [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:kWebsiteURL]];
 }
 
-- (IBAction)showKeyboardShortcuts:(id)sender {
+- (IBAction)openManual:(id)sender {
     (void)sender;
-    bool fullscreen = ([_window styleMask] & NSWindowStyleMaskFullScreen) != 0;
-    MacToggleKeyboardHelp(_window, fullscreen);
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:kManualURL]];
 }
 
-// Placeholder for menu items whose feature isn't ported yet: kept in the menu
-// for structure but disabled (see validateMenuItem:).
-- (IBAction)unavailableFeature:(id)sender {
-    (void)sender;
+#pragma mark - Validation
+
+- (BOOL)canPerformAction:(SEL)action {
+    SumatraTabState* tab = _active;
+    BOOL has = tab != nil;
+    if (action == @selector(goToPrevPage:) || action == @selector(goToFirstPage:)) {
+        return has && tab.currentPage > 1;
+    }
+    if (action == @selector(goToNextPage:) || action == @selector(goToLastPage:)) {
+        return has && tab.currentPage < tab.pageCount;
+    }
+    if (action == @selector(goBack:)) {
+        return has && tab.historyIndex > 0 && tab.historyIndex < (int)[tab.history count];
+    }
+    if (action == @selector(goForward:)) {
+        return has && tab.historyIndex + 1 < (int)[tab.history count];
+    }
+    if (action == @selector(copy:) || action == @selector(useSelectionForFind:)) {
+        return has && MacHasSelection(tab.document);
+    }
+    if (action == @selector(reopenClosedTab:)) {
+        return [_closedPaths count] > 0;
+    }
+    if (action == @selector(selectNextTab:) || action == @selector(selectPreviousTab:)) {
+        return [_tabs count] > 1;
+    }
+    if (action == @selector(zoomIn:)) {
+        return has && [self displayZoom] < kZoomMax - 0.001;
+    }
+    if (action == @selector(zoomOut:)) {
+        return has && [self displayZoom] > kZoomMin + 0.001;
+    }
+    if (action == @selector(printDocument:)) {
+        return has && !_printingDocument;
+    }
+    if (action == @selector(showInFinder:) || action == @selector(showProperties:) ||
+        action == @selector(goToPageDialog:) || action == @selector(rotateLeft:) || action == @selector(rotateRight:) ||
+        action == @selector(zoomActualSize:) || action == @selector(zoomFitPage:) ||
+        action == @selector(zoomFitWidth:) || action == @selector(setSinglePageView:) ||
+        action == @selector(setContinuousPageView:) || action == @selector(findDocument:) ||
+        action == @selector(findNext:) || action == @selector(findPrevious:) || action == @selector(selectAll:) ||
+        action == @selector(toggleFavorite:)) {
+        return has;
+    }
+    return YES;
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem*)item {
     SEL action = [item action];
-    if (action == @selector(unavailableFeature:)) {
-        return NO;
-    }
+    SumatraTabState* tab = _active;
+    NSControlStateValue on = NSControlStateValueOn;
+    NSControlStateValue off = NSControlStateValueOff;
     if (action == @selector(setSinglePageView:)) {
-        [item setState:(!_continuousView && [self hasDocument]) ? NSControlStateValueOn : NSControlStateValueOff];
+        [item setState:tab && !tab.continuous ? on : off];
     } else if (action == @selector(setContinuousPageView:)) {
-        [item setState:(_continuousView && [self hasDocument]) ? NSControlStateValueOn : NSControlStateValueOff];
+        [item setState:tab && tab.continuous ? on : off];
+    } else if (action == @selector(toggleSidebar:)) {
+        [item setTitle:_sidebarVisible ? @"Hide Sidebar" : @"Show Sidebar"];
+    } else if (action == @selector(showOutline:)) {
+        [item setState:_sidebarVisible && [_sidebar mode] == SumatraSidebarModeOutline ? on : off];
+    } else if (action == @selector(showThumbnails:)) {
+        [item setState:_sidebarVisible && [_sidebar mode] == SumatraSidebarModeThumbnails ? on : off];
     } else if (action == @selector(toggleFavorite:)) {
-        bool favorite = _documentPath && MacPrefsHasFavorite([_documentPath fileSystemRepresentation], _currentPage);
-        [item setState:favorite ? NSControlStateValueOn : NSControlStateValueOff];
+        BOOL favorite = tab.path && MacPrefsHasFavorite(FsPath(tab.path), tab.currentPage);
+        [item setTitle:favorite ? @"Remove Bookmark" : @"Add Bookmark"];
+    } else if (action == @selector(selectTabFromMenu:)) {
+        [item setState:[item representedObject] == tab ? on : off];
+        return YES;
+    } else if (action == @selector(openRecentItem:) || action == @selector(openFavorite:)) {
+        return YES;
     }
     return [self canPerformAction:action];
 }
 
-#pragma mark - App lifecycle
+#pragma mark - Menus
 
-- (void)windowDidResize:(NSNotification*)notification {
-    (void)notification;
-    if (_document) {
-        [self renderCurrentPage];
+- (void)rebuildRecentMenu:(NSMenu*)menu {
+    [menu removeAllItems];
+    int count = MacPrefsRecentCount();
+    for (int i = 0; i < count; i++) {
+        char* pathFs = MacPrefsCopyRecentPath(i);
+        NSString* path = StringFromFs(pathFs);
+        MacFreeString(pathFs);
+        if (!path) {
+            continue;
+        }
+        NSMenuItem* item = AddItem(menu, [path lastPathComponent], @selector(openRecentItem:), self, @"", 0);
+        [item setRepresentedObject:path];
+        [item setToolTip:[path stringByAbbreviatingWithTildeInPath]];
+    }
+    if ([[menu itemArray] count] == 0) {
+        NSMenuItem* none = AddItem(menu, @"No Recent Documents", nil, nil, @"", 0);
+        [none setEnabled:NO];
     }
 }
 
-- (void)scrollViewBoundsChanged:(NSNotification*)notification {
-    (void)notification;
-    if (_document && _continuousView) {
-        [self renderCurrentPage];
+- (void)rebuildBookmarksMenu:(NSMenu*)menu {
+    [menu removeAllItems];
+    int count = MacPrefsFavoriteCount();
+    for (int i = 0; i < count; i++) {
+        char* pathFs = MacPrefsCopyFavoritePath(i);
+        NSString* path = StringFromFs(pathFs);
+        MacFreeString(pathFs);
+        int pageNo = MacPrefsFavoritePage(i);
+        if (!path || pageNo < 1) {
+            continue;
+        }
+        NSString* title = [NSString stringWithFormat:@"%@ — page %d", [path lastPathComponent], pageNo];
+        NSMenuItem* item = AddItem(menu, title, @selector(openFavorite:), self, @"", 0);
+        [item setRepresentedObject:@[ path, [NSNumber numberWithInt:pageNo] ]];
+        [item setToolTip:[path stringByAbbreviatingWithTildeInPath]];
+    }
+    if ([[menu itemArray] count] == 0) {
+        NSMenuItem* none = AddItem(menu, @"No Bookmarks", nil, nil, @"", 0);
+        [none setEnabled:NO];
     }
 }
 
-- (void)windowDidChangeBackingProperties:(NSNotification*)notification {
-    (void)notification;
-    if (_document) {
-        [self renderCurrentPage];
+// Lists the open documents after "Show Previous Tab" in the Window menu.
+- (void)rebuildWindowMenu:(NSMenu*)menu {
+    for (NSMenuItem* item in [[[menu itemArray] copy] autorelease]) {
+        if ([item action] == @selector(selectTabFromMenu:) || [item tag] == kTabMenuSeparatorTag) {
+            [menu removeItem:item];
+        }
     }
-}
-
-- (BOOL)application:(NSApplication*)sender openFile:(NSString*)filename {
-    (void)sender;
-    [self openPath:filename];
-    return YES;
-}
-
-- (void)applicationWillTerminate:(NSNotification*)notification {
-    (void)notification;
-    [self saveActiveTabState];
-    MacPrefsBeginSession();
+    NSInteger anchor = [menu indexOfItemWithTarget:self andAction:@selector(selectPreviousTab:)];
+    if (anchor < 0 || [_tabs count] == 0) {
+        return;
+    }
+    NSInteger idx = anchor + 1;
+    NSMenuItem* separator = [NSMenuItem separatorItem];
+    [separator setTag:kTabMenuSeparatorTag];
+    [menu insertItem:separator atIndex:idx++];
     for (SumatraTabState* tab in _tabs) {
-        MacPrefsViewState state = {};
-        state.valid = true;
-        state.continuous = [tab continuous];
-        CGFloat zoom = [tab zoom];
-        state.zoomVirtual = zoom > 0 ? zoom * 100.0 : zoom;
-        state.rotation = [tab rotation];
-        state.pageNo = [tab currentPage];
-        MacPrefsAppendSession([[tab path] fileSystemRepresentation], &state);
+        NSString* title = [tab.path lastPathComponent] ?: @"Document";
+        NSMenuItem* item = [[[NSMenuItem alloc] initWithTitle:title
+                                                       action:@selector(selectTabFromMenu:)
+                                                keyEquivalent:@""] autorelease];
+        [item setTarget:self];
+        [item setRepresentedObject:tab];
+        [menu insertItem:item atIndex:idx++];
     }
-    MacPrefsFinishSession(_activeTab);
-    [self closeAllTabs];
-    MacPrefsShutdown();
-    MacShutdown();
 }
 
-- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender {
-    (void)sender;
-    return YES;
-}
-
-- (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [_window setDelegate:nil];
-    [_toolbar setDelegate:nil];
-    [_pageLabel release];
-    [_toolbar release];
-    [_documentView release];
-    [_scrollView release];
-    [_window release];
-    [_documentPath release];
-    [_findText release];
-    [_commandPaletteQuery release];
-    [_commandPaletteItems release];
-    [self stopWatchingDocument];
-    [_tabSelector release];
-    [_closedPaths release];
-    [_tabs release];
-    [super dealloc];
-}
-
-@end
-
-#pragma mark - Menu construction
-
-static NSMenuItem* AddItem(NSMenu* menu, NSString* title, SEL action, id target, NSString* keyEquiv,
-                           NSUInteger modifiers) {
-    NSMenuItem* item = [[[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:keyEquiv] autorelease];
-    if (target) {
-        [item setTarget:target];
+- (void)menuNeedsUpdate:(NSMenu*)menu {
+    if (menu == _recentMenu) {
+        [self rebuildRecentMenu:menu];
+    } else if (menu == _bookmarksMenu) {
+        [self rebuildBookmarksMenu:menu];
+    } else if (menu == _windowMenu) {
+        [self rebuildWindowMenu:menu];
     }
-    if ([keyEquiv length] > 0) {
-        [item setKeyEquivalentModifierMask:modifiers];
-    }
-    [menu addItem:item];
-    return item;
 }
 
-// A disabled placeholder item: present for structure, greyed out.
-static void AddPlaceholder(NSMenu* menu, NSString* title, id target) {
-    AddItem(menu, title, @selector(unavailableFeature:), target, @"", 0);
-}
-
-static NSString* ArrowKey(unichar c) {
-    return [NSString stringWithCharacters:&c length:1];
-}
-
-static void InstallMainMenu(SumatraAppDelegate* delegate) {
+// Menus follow macOS conventions and Preview's shortcuts; keep
+// kShortcutRows (MacPanels.mm) and docs/mac/keyboard-shortcuts.md in sync.
+- (void)installMainMenu {
+    const NSEventModifierFlags cmd = NSEventModifierFlagCommand;
+    const NSEventModifierFlags shiftCmd = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    const NSEventModifierFlags optCmd = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    const NSEventModifierFlags ctrlCmd = NSEventModifierFlagCommand | NSEventModifierFlagControl;
     NSMenu* mainMenu = [[[NSMenu alloc] initWithTitle:@""] autorelease];
 
-    // Application menu
-    NSMenuItem* appMenuItem = [[[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""] autorelease];
-    [mainMenu addItem:appMenuItem];
-    NSMenu* appMenu = [[[NSMenu alloc] initWithTitle:@"SumatraPDF"] autorelease];
+    NSMenu* appMenu = AddSubmenu(mainMenu, @"SumatraPDF");
     AddItem(appMenu, @"About SumatraPDF", @selector(orderFrontStandardAboutPanel:), nil, @"", 0);
     [appMenu addItem:[NSMenuItem separatorItem]];
-    AddItem(appMenu, @"Hide SumatraPDF", @selector(hide:), nil, @"h", NSEventModifierFlagCommand);
-    AddItem(appMenu, @"Hide Others", @selector(hideOtherApplications:), nil, @"h",
-            NSEventModifierFlagCommand | NSEventModifierFlagOption);
+    NSMenu* servicesMenu = AddSubmenu(appMenu, @"Services");
+    [NSApp setServicesMenu:servicesMenu];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    AddItem(appMenu, @"Hide SumatraPDF", @selector(hide:), nil, @"h", cmd);
+    AddItem(appMenu, @"Hide Others", @selector(hideOtherApplications:), nil, @"h", optCmd);
     AddItem(appMenu, @"Show All", @selector(unhideAllApplications:), nil, @"", 0);
     [appMenu addItem:[NSMenuItem separatorItem]];
-    AddItem(appMenu, @"Quit SumatraPDF", @selector(terminate:), nil, @"q", NSEventModifierFlagCommand);
-    [appMenuItem setSubmenu:appMenu];
+    AddItem(appMenu, @"Quit SumatraPDF", @selector(terminate:), nil, @"q", cmd);
 
-    // File menu
-    NSMenuItem* fileItem = [[[NSMenuItem alloc] initWithTitle:@"File" action:nil keyEquivalent:@""] autorelease];
-    [mainMenu addItem:fileItem];
-    NSMenu* fileMenu = [[[NSMenu alloc] initWithTitle:@"File"] autorelease];
-    AddPlaceholder(fileMenu, @"New Window", delegate);
-    AddItem(fileMenu, @"Open…", @selector(openDocument:), delegate, @"o", NSEventModifierFlagCommand);
-    AddItem(fileMenu, @"Open Recent…", @selector(openRecentDocument:), delegate, @"", 0);
-    AddItem(fileMenu, @"Close", @selector(performClose:), delegate, @"w", NSEventModifierFlagCommand);
-    AddItem(fileMenu, @"Reopen Closed Tab", @selector(reopenClosedTab:), delegate, @"t",
-            NSEventModifierFlagCommand | NSEventModifierFlagShift);
-    AddItem(fileMenu, @"Show in Folder", @selector(showInFolder:), delegate, @"", 0);
-    AddPlaceholder(fileMenu, @"Open Next File in Folder", delegate);
-    AddPlaceholder(fileMenu, @"Open Previous File in Folder", delegate);
+    NSMenu* fileMenu = AddSubmenu(mainMenu, @"File");
+    AddItem(fileMenu, @"Open…", @selector(openDocument:), self, @"o", cmd);
+    _recentMenu = AddSubmenu(fileMenu, @"Open Recent");
+    [_recentMenu setDelegate:self];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    AddPlaceholder(fileMenu, @"Save As…", delegate);
-    AddPlaceholder(fileMenu, @"Rename…", delegate);
-    AddItem(fileMenu, @"Print…", @selector(printDocument:), delegate, @"p", NSEventModifierFlagCommand);
+    AddItem(fileMenu, @"Close Tab", @selector(closeTab:), self, @"w", cmd);
+    AddItem(fileMenu, @"Close Window", @selector(performClose:), nil, @"w", shiftCmd);
+    AddItem(fileMenu, @"Reopen Closed Tab", @selector(reopenClosedTab:), self, @"t", shiftCmd);
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    AddItem(fileMenu, @"Properties", @selector(showProperties:), delegate, @"", 0);
-    [fileItem setSubmenu:fileMenu];
+    AddItem(fileMenu, @"Show in Finder", @selector(showInFinder:), self, @"", 0);
+    AddItem(fileMenu, @"Properties", @selector(showProperties:), self, @"i", cmd);
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+    AddItem(fileMenu, @"Page Setup…", @selector(runPageLayout:), nil, @"p", shiftCmd);
+    AddItem(fileMenu, @"Print…", @selector(printDocument:), self, @"p", cmd);
 
-    // Edit menu
-    NSMenuItem* editItem = [[[NSMenuItem alloc] initWithTitle:@"Edit" action:nil keyEquivalent:@""] autorelease];
-    [mainMenu addItem:editItem];
-    NSMenu* editMenu = [[[NSMenu alloc] initWithTitle:@"Edit"] autorelease];
-    AddItem(editMenu, @"Copy", @selector(copySelection:), delegate, @"c", NSEventModifierFlagCommand);
-    AddItem(editMenu, @"Select All", @selector(selectAll:), delegate, @"a", NSEventModifierFlagCommand);
+    // standard actions (nil target) so text fields get cut/copy/paste/undo
+    NSMenu* editMenu = AddSubmenu(mainMenu, @"Edit");
+    AddItem(editMenu, @"Undo", @selector(undo:), nil, @"z", cmd);
+    AddItem(editMenu, @"Redo", @selector(redo:), nil, @"z", shiftCmd);
     [editMenu addItem:[NSMenuItem separatorItem]];
-    AddItem(editMenu, @"Find…", @selector(findDocument:), delegate, @"f", NSEventModifierFlagCommand);
-    AddItem(editMenu, @"Find Next", @selector(findNext:), delegate, @"g", NSEventModifierFlagCommand);
-    AddItem(editMenu, @"Find Previous", @selector(findPrevious:), delegate, @"g",
-            NSEventModifierFlagCommand | NSEventModifierFlagShift);
-    [editItem setSubmenu:editMenu];
+    AddItem(editMenu, @"Cut", @selector(cut:), nil, @"x", cmd);
+    AddItem(editMenu, @"Copy", @selector(copy:), nil, @"c", cmd);
+    AddItem(editMenu, @"Paste", @selector(paste:), nil, @"v", cmd);
+    AddItem(editMenu, @"Select All", @selector(selectAll:), nil, @"a", cmd);
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    NSMenu* findMenu = AddSubmenu(editMenu, @"Find");
+    AddItem(findMenu, @"Find…", @selector(findDocument:), self, @"f", cmd);
+    AddItem(findMenu, @"Find Next", @selector(findNext:), self, @"g", cmd);
+    AddItem(findMenu, @"Find Previous", @selector(findPrevious:), self, @"g", shiftCmd);
+    AddItem(findMenu, @"Use Selection for Find", @selector(useSelectionForFind:), self, @"e", cmd);
 
-    // View menu
-    NSMenuItem* viewItem = [[[NSMenuItem alloc] initWithTitle:@"View" action:nil keyEquivalent:@""] autorelease];
-    [mainMenu addItem:viewItem];
-    NSMenu* viewMenu = [[[NSMenu alloc] initWithTitle:@"View"] autorelease];
-    AddItem(viewMenu, @"Single Page", @selector(setSinglePageView:), delegate, @"", 0);
-    AddPlaceholder(viewMenu, @"Facing", delegate);
-    AddPlaceholder(viewMenu, @"Book View", delegate);
-    AddItem(viewMenu, @"Show Pages Continuously", @selector(setContinuousPageView:), delegate, @"", 0);
-    AddPlaceholder(viewMenu, @"Manga Mode", delegate);
+    NSMenu* viewMenu = AddSubmenu(mainMenu, @"View");
+    AddItem(viewMenu, @"Show Sidebar", @selector(toggleSidebar:), self, @"s", optCmd);
+    AddItem(viewMenu, @"Table of Contents", @selector(showOutline:), self, @"3", optCmd);
+    AddItem(viewMenu, @"Thumbnails", @selector(showThumbnails:), self, @"2", optCmd);
     [viewMenu addItem:[NSMenuItem separatorItem]];
-    AddItem(viewMenu, @"Rotate Left", @selector(rotateLeft:), delegate, @"[", NSEventModifierFlagCommand);
-    AddItem(viewMenu, @"Rotate Right", @selector(rotateRight:), delegate, @"]", NSEventModifierFlagCommand);
+    AddItem(viewMenu, @"Single Page", @selector(setSinglePageView:), self, @"", 0);
+    AddItem(viewMenu, @"Continuous Scroll", @selector(setContinuousPageView:), self, @"", 0);
     [viewMenu addItem:[NSMenuItem separatorItem]];
-    AddPlaceholder(viewMenu, @"Presentation", delegate);
-    AddItem(viewMenu, @"Enter Full Screen", @selector(toggleFullScreen:), delegate, @"f",
-            NSEventModifierFlagCommand | NSEventModifierFlagControl);
+    AddItem(viewMenu, @"Actual Size", @selector(zoomActualSize:), self, @"0", cmd);
+    AddItem(viewMenu, @"Zoom to Fit", @selector(zoomFitPage:), self, @"9", cmd);
+    AddItem(viewMenu, @"Zoom to Width", @selector(zoomFitWidth:), self, @"8", cmd);
+    AddItem(viewMenu, @"Zoom In", @selector(zoomIn:), self, @"+", cmd);
+    AddItem(viewMenu, @"Zoom Out", @selector(zoomOut:), self, @"-", cmd);
     [viewMenu addItem:[NSMenuItem separatorItem]];
-    AddItem(viewMenu, @"Show Bookmarks", @selector(showToc:), delegate, @"", 0);
-    AddItem(viewMenu, @"Add/Remove Favorite", @selector(toggleFavorite:), delegate, @"b", NSEventModifierFlagCommand);
-    AddItem(viewMenu, @"Show Favorites…", @selector(showFavorites:), delegate, @"", 0);
-    AddItem(viewMenu, @"Show Toolbar", @selector(toggleToolbarShown:), nil, @"", 0);
-    AddItem(viewMenu, @"Command Palette…", @selector(showCommandPalette:), delegate, @"p",
-            NSEventModifierFlagCommand | NSEventModifierFlagShift);
-    [viewItem setSubmenu:viewMenu];
+    AddItem(viewMenu, @"Rotate Left", @selector(rotateLeft:), self, @"l", cmd);
+    AddItem(viewMenu, @"Rotate Right", @selector(rotateRight:), self, @"r", cmd);
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    AddItem(viewMenu, @"Show Toolbar", @selector(toggleToolbarShown:), nil, @"t", optCmd);
+    AddItem(viewMenu, @"Customize Toolbar…", @selector(runToolbarCustomizationPalette:), nil, @"", 0);
+    AddItem(viewMenu, @"Command Palette…", @selector(showCommandPalette:), self, @"k", cmd);
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    AddItem(viewMenu, @"Enter Full Screen", @selector(toggleFullScreen:), nil, @"f", ctrlCmd);
 
-    // Go To menu
-    NSMenuItem* goItem = [[[NSMenuItem alloc] initWithTitle:@"Go To" action:nil keyEquivalent:@""] autorelease];
-    [mainMenu addItem:goItem];
-    NSMenu* goMenu = [[[NSMenu alloc] initWithTitle:@"Go To"] autorelease];
-    AddItem(goMenu, @"Next Page", @selector(goToNextPage:), delegate, ArrowKey(NSRightArrowFunctionKey),
-            NSEventModifierFlagCommand | NSEventModifierFlagFunction);
-    AddItem(goMenu, @"Previous Page", @selector(goToPrevPage:), delegate, ArrowKey(NSLeftArrowFunctionKey),
-            NSEventModifierFlagCommand | NSEventModifierFlagFunction);
-    AddItem(goMenu, @"First Page", @selector(goToFirstPage:), delegate, ArrowKey(NSUpArrowFunctionKey),
-            NSEventModifierFlagCommand | NSEventModifierFlagFunction);
-    AddItem(goMenu, @"Last Page", @selector(goToLastPage:), delegate, ArrowKey(NSDownArrowFunctionKey),
-            NSEventModifierFlagCommand | NSEventModifierFlagFunction);
-    AddItem(goMenu, @"Page…", @selector(goToPageDialog:), delegate, @"l", NSEventModifierFlagCommand);
+    NSMenu* goMenu = AddSubmenu(mainMenu, @"Go");
+    AddItem(goMenu, @"Previous Page", @selector(goToPrevPage:), self, KeyString(NSUpArrowFunctionKey), optCmd);
+    AddItem(goMenu, @"Next Page", @selector(goToNextPage:), self, KeyString(NSDownArrowFunctionKey), optCmd);
+    AddItem(goMenu, @"First Page", @selector(goToFirstPage:), self, KeyString(NSUpArrowFunctionKey), cmd);
+    AddItem(goMenu, @"Last Page", @selector(goToLastPage:), self, KeyString(NSDownArrowFunctionKey), cmd);
+    AddItem(goMenu, @"Go to Page…", @selector(goToPageDialog:), self, @"g", optCmd);
     [goMenu addItem:[NSMenuItem separatorItem]];
-    AddPlaceholder(goMenu, @"Back", delegate);
-    AddPlaceholder(goMenu, @"Forward", delegate);
-    [goItem setSubmenu:goMenu];
+    AddItem(goMenu, @"Back", @selector(goBack:), self, @"[", cmd);
+    AddItem(goMenu, @"Forward", @selector(goForward:), self, @"]", cmd);
+    [goMenu addItem:[NSMenuItem separatorItem]];
+    AddItem(goMenu, @"Add Bookmark", @selector(toggleFavorite:), self, @"d", cmd);
+    _bookmarksMenu = AddSubmenu(goMenu, @"Bookmarks");
+    [_bookmarksMenu setDelegate:self];
 
-    // Zoom menu
-    NSMenuItem* zoomItem = [[[NSMenuItem alloc] initWithTitle:@"Zoom" action:nil keyEquivalent:@""] autorelease];
-    [mainMenu addItem:zoomItem];
-    NSMenu* zoomMenu = [[[NSMenu alloc] initWithTitle:@"Zoom"] autorelease];
-    AddItem(zoomMenu, @"Fit Page", @selector(zoomFitPage:), delegate, @"9", NSEventModifierFlagCommand);
-    AddItem(zoomMenu, @"Actual Size", @selector(zoomActualSize:), delegate, @"0", NSEventModifierFlagCommand);
-    AddItem(zoomMenu, @"Fit Width", @selector(zoomFitWidth:), delegate, @"", 0);
-    AddPlaceholder(zoomMenu, @"Fit by Orientation", delegate);
-    AddPlaceholder(zoomMenu, @"Fit Content", delegate);
-    AddPlaceholder(zoomMenu, @"Custom Zoom…", delegate);
-    [zoomMenu addItem:[NSMenuItem separatorItem]];
-    AddItem(zoomMenu, @"Zoom In", @selector(zoomIn:), delegate, @"+", NSEventModifierFlagCommand);
-    AddItem(zoomMenu, @"Zoom Out", @selector(zoomOut:), delegate, @"-", NSEventModifierFlagCommand);
-    [zoomItem setSubmenu:zoomMenu];
+    _windowMenu = AddSubmenu(mainMenu, @"Window");
+    [_windowMenu setDelegate:self];
+    AddItem(_windowMenu, @"Minimize", @selector(performMiniaturize:), nil, @"m", cmd);
+    AddItem(_windowMenu, @"Zoom", @selector(performZoom:), nil, @"", 0);
+    [_windowMenu addItem:[NSMenuItem separatorItem]];
+    // "}" / "{" are ⇧] / ⇧[ on US layouts; ⌃⇥ is handled by the key monitor
+    AddItem(_windowMenu, @"Show Next Tab", @selector(selectNextTab:), self, @"}", cmd);
+    AddItem(_windowMenu, @"Show Previous Tab", @selector(selectPreviousTab:), self, @"{", cmd);
+    [_windowMenu addItem:[NSMenuItem separatorItem]];
+    AddItem(_windowMenu, @"Bring All to Front", @selector(arrangeInFront:), nil, @"", 0);
+    [NSApp setWindowsMenu:_windowMenu];
 
-    // Window menu (standard)
-    NSMenuItem* windowItem = [[[NSMenuItem alloc] initWithTitle:@"Window" action:nil keyEquivalent:@""] autorelease];
-    [mainMenu addItem:windowItem];
-    NSMenu* windowMenu = [[[NSMenu alloc] initWithTitle:@"Window"] autorelease];
-    AddItem(windowMenu, @"Minimize", @selector(performMiniaturize:), nil, @"m", NSEventModifierFlagCommand);
-    AddItem(windowMenu, @"Zoom", @selector(performZoom:), nil, @"", 0);
-    [windowMenu addItem:[NSMenuItem separatorItem]];
-    AddItem(windowMenu, @"Show Next Tab", @selector(selectNextTab:), delegate, @"]",
-            NSEventModifierFlagCommand | NSEventModifierFlagShift);
-    AddItem(windowMenu, @"Show Previous Tab", @selector(selectPreviousTab:), delegate, @"[",
-            NSEventModifierFlagCommand | NSEventModifierFlagShift);
-    [windowItem setSubmenu:windowMenu];
-    [NSApp setWindowsMenu:windowMenu];
-
-    // Help menu
-    NSMenuItem* helpItem = [[[NSMenuItem alloc] initWithTitle:@"Help" action:nil keyEquivalent:@""] autorelease];
-    [mainMenu addItem:helpItem];
-    NSMenu* helpMenu = [[[NSMenu alloc] initWithTitle:@"Help"] autorelease];
-    AddItem(helpMenu, @"Keyboard Shortcuts", @selector(showKeyboardShortcuts:), delegate, @"", 0);
+    NSMenu* helpMenu = AddSubmenu(mainMenu, @"Help");
+    AddItem(helpMenu, @"SumatraPDF Help", @selector(openManual:), self, @"", 0);
+    AddItem(helpMenu, @"Keyboard Shortcuts", @selector(showKeyboardShortcuts:), self, @"", 0);
     [helpMenu addItem:[NSMenuItem separatorItem]];
-    AddItem(helpMenu, @"SumatraPDF Website", @selector(openWebsite:), delegate, @"", 0);
-    AddPlaceholder(helpMenu, @"Manual", delegate);
-    [helpItem setSubmenu:helpMenu];
+    AddItem(helpMenu, @"SumatraPDF Website", @selector(openWebsite:), self, @"", 0);
     [NSApp setHelpMenu:helpMenu];
 
     [NSApp setMainMenu:mainMenu];
 }
+
+@end
 
 int main(int argc, char** argv) {
     (void)argc;
@@ -2273,7 +3151,7 @@ int main(int argc, char** argv) {
 
     SumatraAppDelegate* delegate = [[SumatraAppDelegate alloc] init];
     [app setDelegate:delegate];
-    InstallMainMenu(delegate);
+    [delegate installMainMenu];
     [app run];
 
     MacShutdown();

@@ -9,8 +9,10 @@
 #include "libarchive/archive.h"
 #include "libarchive/archive_entry.h"
 
+#if OS_WIN
 // TODO: set include path to ext/ dir
 #include "../../ext/a-unrar/dll.hpp"
+#endif
 #include "base/Archive.h"
 
 // we pad data read with 3 zeros for convenience. That way returned
@@ -210,8 +212,12 @@ static void SetArchivePassword(struct archive* a, Str password) {
 }
 
 static int ArchiveReadOpenFilename(struct archive* a, Str path) {
+#if OS_WIN
     WCHAR* pathW = CWStrTemp(path);
     return archive_read_open_filename_w(a, pathW, 10240);
+#else
+    return archive_read_open_filename(a, CStrTemp(path), 10240);
+#endif
 }
 
 static struct archive* NewLibarchiveReader(Str password) {
@@ -483,6 +489,8 @@ Archive* OpenArchiveFromData(Str data) {
     return archive;
 }
 
+// ext/a-unrar is built for Windows only; elsewhere libarchive reads RAR files
+#if OS_WIN
 struct UnrarData {
     u8* d = nullptr;
     int sz = 0;
@@ -707,3 +715,12 @@ bool Archive::OpenUnrarFallback(Str rarPath, bool eagerLoad, const ArchiveExtrac
     rarFilePath_ = str::Dup(a, rarPath);
     return true;
 }
+#else
+Str Archive::ReadUnrarEntry(FileInfo*, int, bool*) {
+    return {};
+}
+
+bool Archive::OpenUnrarFallback(Str, bool, const ArchiveExtractProgressCb&) {
+    return false;
+}
+#endif

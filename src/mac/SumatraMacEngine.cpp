@@ -1,30 +1,29 @@
 #include "base/Base.h"
+#include "base/File.h"
+#include "base/GuessFileType.h"
 #include "base/Pixmap.h"
 
 #include "Settings.h"
-#include "Commands.h"
 #include "DisplayMode.h"
 #include "DocumentLayout.h"
 #include "DocProperties.h"
-#include "KeyboardHelp.h"
 #include "gui/UIModels.h"
 #include "EngineBase.h"
+#include "EngineAll.h"
 #include "PageRenderPolicy.h"
 #include "PageRenderService.h"
 #include "ProgressUpdateUI.h"
 #include "ReaderModel.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
-#include "gui/CommandPaletteModel.h"
-#include "gui/PlatformFont.h"
 #include "gui/PlatformWindow.h"
 #include "gui/PasswordDialog.h"
 #include "mac/SumatraMacEngine.h"
 
-void _uploadDebugReport(Str, Str, bool, bool) {}
+void _uploadDebugReport(Str, Str, bool) {}
 
 void log(Str s) {
-    if (!s) {
+    if (len(s) == 0) {
         return;
     }
     fwrite(s.s, 1, (size_t)s.len, stderr);
@@ -53,11 +52,14 @@ static char* DupCString(const char* s) {
     return DupCString(Str((char*)s));
 }
 
+struct MacFindWorker;
+
 struct MacDocument {
     ReaderModel* model = nullptr;
     PageRenderService* renderer = nullptr;
     TextSelection* textSelection = nullptr;
     TextSearch* textSearch = nullptr;
+    MacFindWorker* find = nullptr;
     TocTree* toc = nullptr;
     Vec<TocItem*> tocItems;
     Vec<int> tocDepths;
@@ -71,6 +73,8 @@ static MacDocument* AsDocument(void* document) {
     return (MacDocument*)document;
 }
 
+static void StopFindWorker(MacDocument* doc);
+
 static void OnPageReady(MacDocument* document) {
     if (document->onPageReady) {
         document->onPageReady(document->callbackContext);
@@ -79,8 +83,8 @@ static void OnPageReady(MacDocument* document) {
 
 static void AppendTocItems(MacDocument* document, TocItem* item, int depth) {
     while (item) {
-        document->tocItems.Append(item);
-        document->tocDepths.Append(depth);
+        VecAppend(document->tocItems, item);
+        VecAppend(document->tocDepths, depth);
         AppendTocItems(document, item->child, depth + 1);
         item = item->next;
     }
@@ -183,23 +187,80 @@ static bool CopyPixmap(Pixmap* pixmap, MacRenderedPage* page) {
     return true;
 }
 
-// Opens a document. Returns an opaque handle, or nullptr on failure; on failure
-// *errorOut (if non-null) is set to a malloc'd message the caller must free().
-void* MacOpenDocument(void* passwordParent, const char* path, MacPageReadyCallback onPageReady, void* callbackContext,
-                      char** errorOut) {
-    if (!path || !path[0]) {
-        if (errorOut) {
-            *errorOut = DupCString("Pass a document path on the command line.");
+static MacPasswordCallback gPasswordCallback = nullptr;
+static void* gPasswordContext = nullptr;
+
+// Non-interactive PasswordUI: asks gPasswordCallback; a null answer cancels.
+struct CallbackPasswordUI : PasswordUI {
+    int attempt = 0;
+
+    Str GetPassword(Str filePath, u8*, u8[32], bool* saveKey) override {
+        *saveKey = false;
+        TempStr name = path::GetBaseNameTemp(filePath);
+        const char* pwd = gPasswordCallback(gPasswordContext, CStrTemp(name), ++attempt);
+        return pwd ? str::Dup(Str((char*)pwd)) : Str{};
+    }
+};
+
+// When set, MacOpenDocument gets passwords from callback instead of a dialog
+// (headless tests, automation). Pass nullptr to restore the dialog.
+void MacSetPasswordCallback(MacPasswordCallback callback, void* context) {
+    gPasswordCallback = callback;
+    gPasswordContext = context;
+}
+
+// Pages are rendered whole, so cap a render's size (the cache must fit one)
+constexpr i64 kMacRenderCacheBytes = 256LL * 1024 * 1024;
+constexpr double kMacMaxRenderPixels = 32.0 * 1024 * 1024;
+
+// DialogPasswordUI that tells the user when a prompt follows a rejected password.
+struct MacDialogPasswordUI : DialogPasswordUI {
+    int prompts = 0;
+
+    explicit MacDialogPasswordUI(NativeWnd parent) : DialogPasswordUI(parent) {}
+
+    Str GetPassword(Str filePath, u8*, u8[32], bool* saveKey) override {
+        *saveKey = false;
+        PasswordDialogArgs args;
+        args.parent = parent;
+        args.fileName = path::GetBaseNameTemp(filePath);
+        args.canRemember = canRemember;
+        args.showPassword = showPassword;
+        args.isRetry = prompts > 0;
+        prompts++;
+
+        PasswordDialogResult result;
+        ShowPasswordDialog(args, &result);
+        showPassword = result.showPassword;
+        if (!result.accepted) {
+            str::Free(result.password);
+            return {};
         }
+        *saveKey = result.rememberPassword;
+        return result.password;
+    }
+};
+
+static MacOpenError ClassifyOpenFailure(Str path, bool prompted);
+
+// Engines keep prompting until the password is right or the prompt is
+// cancelled, so a failure after a prompt means the user gave up.
+static MacDocument* OpenDocumentImpl(void* passwordParent, const char* path, MacPageReadyCallback onPageReady,
+                                     void* callbackContext, MacOpenError* errorOut) {
+    *errorOut = MacOpenError::None;
+    if (!path || !path[0]) {
+        *errorOut = MacOpenError::NotFound;
         return nullptr;
     }
 
-    DialogPasswordUI pwdUI(passwordParent);
-    ReaderModel* model = ReaderModel::Create(Str((char*)path), &pwdUI);
+    Str filePath((char*)path);
+    MacDialogPasswordUI dialogUI((NativeWnd)passwordParent);
+    CallbackPasswordUI callbackUI;
+    PasswordUI* pwdUI = gPasswordCallback ? (PasswordUI*)&callbackUI : &dialogUI;
+    ReaderModel* model = ReaderModel::Create(filePath, pwdUI);
     if (!model) {
-        if (errorOut) {
-            *errorOut = DupCString("Could not open the document.");
-        }
+        bool prompted = dialogUI.prompts > 0 || callbackUI.attempt > 0;
+        *errorOut = ClassifyOpenFailure(filePath, prompted);
         return nullptr;
     }
     auto* document = new MacDocument();
@@ -212,19 +273,37 @@ void* MacOpenDocument(void* passwordParent, const char* path, MacPageReadyCallba
     }
     document->onPageReady = onPageReady;
     document->callbackContext = callbackContext;
-    document->renderer = PageRenderService::Create(model->GetEngine(), MkFunc0(OnPageReady, document));
+    document->renderer =
+        PageRenderService::Create(model->GetEngine(), MkFunc0(OnPageReady, document), kMacRenderCacheBytes);
     if (!document->renderer) {
+        // the engine owns the ToC tree
         delete document->textSelection;
         delete document->textSearch;
-        delete document->toc;
         delete model;
         delete document;
-        if (errorOut) {
-            *errorOut = DupCString("Could not start the page renderer.");
-        }
+        *errorOut = MacOpenError::RendererFailed;
         return nullptr;
     }
     return document;
+}
+
+// Opens a document. Returns an opaque handle, or nullptr on failure; on failure
+// *errorOut (if non-null) is set to a malloc'd message the caller must free().
+void* MacOpenDocument(void* passwordParent, const char* path, MacPageReadyCallback onPageReady, void* callbackContext,
+                      char** errorOut) {
+    MacOpenError err = MacOpenError::None;
+    MacDocument* document = OpenDocumentImpl(passwordParent, path, onPageReady, callbackContext, &err);
+    if (document || !errorOut) {
+        return document;
+    }
+    const char* msg = "Could not open the document.";
+    if (!path || !path[0]) {
+        msg = "Pass a document path on the command line.";
+    } else if (err == MacOpenError::RendererFailed) {
+        msg = "Could not start the page renderer.";
+    }
+    *errorOut = DupCString(msg);
+    return nullptr;
 }
 
 // Number of pages, or 0 if the handle is invalid.
@@ -308,6 +387,10 @@ bool MacLayoutDocument(void* document, const MacLayoutParams* params, MacDocumen
         dst->visibleRatio = page->visibleRatio;
         dst->layoutZoom = page->zoomReal;
         dst->renderZoom = page->zoomReal * params->backingScale;
+        double area = (double)page->mediaBox.dx * (double)page->mediaBox.dy;
+        if (area > 0 && dst->renderZoom * dst->renderZoom * area > kMacMaxRenderPixels) {
+            dst->renderZoom = sqrt(kMacMaxRenderPixels / area);
+        }
         dst->shown = page->isShown;
     }
 
@@ -377,55 +460,6 @@ void MacResetRenderer(void* document) {
     if (doc && doc->renderer) {
         doc->renderer->NewGeneration();
     }
-}
-
-bool MacFindText(void* document, int currentPage, const char* text, bool forward, bool restart) {
-    MacDocument* doc = AsDocument(document);
-    if (!doc || !doc->textSearch || !text || !text[0]) {
-        return false;
-    }
-    TextSearch* search = doc->textSearch;
-    Str query((char*)text);
-    bool newText = !str::Eq(search->lastText, query);
-    search->SetDirection(forward ? TextSearch::Direction::Forward : TextSearch::Direction::Backward);
-    TextSel* result = nullptr;
-    if (restart || newText || !search->findText) {
-        result = search->FindFirst(currentPage, query);
-    } else {
-        result = search->FindNext();
-    }
-    if (!result) {
-        int wrapPage = forward ? search->RestrictFirst() : search->RestrictLast();
-        result = search->FindFirst(wrapPage, query);
-    }
-    if (!result) {
-        search->Reset();
-    }
-    return result != nullptr;
-}
-
-int MacFindResultPage(void* document) {
-    MacDocument* doc = AsDocument(document);
-    if (!doc || !doc->textSearch || doc->textSearch->result.len == 0) {
-        return 0;
-    }
-    return doc->textSearch->GetSearchHitStartPageNo();
-}
-
-int MacFindResultRectCount(void* document, int pageNo) {
-    MacDocument* doc = AsDocument(document);
-    if (!doc || !doc->textSearch) {
-        return 0;
-    }
-    return ResultRectCount(doc->textSearch->result, pageNo);
-}
-
-bool MacFindResultRect(void* document, int pageNo, int index, double zoom, int rotation, MacDisplayRect* rect) {
-    MacDocument* doc = AsDocument(document);
-    if (!doc || !doc->textSearch || !rect || index < 0) {
-        return false;
-    }
-    return TransformResultRect(doc, doc->textSearch->result, pageNo, index, zoom, rotation, rect);
 }
 
 bool MacTextAtPoint(void* document, int pageNo, double x, double y, double zoom, int rotation) {
@@ -518,7 +552,7 @@ bool MacLinkAtPoint(void* document, int pageNo, double x, double y, double zoom,
         return false;
     }
     Str value = PageDestGetValue(dest);
-    if (!value) {
+    if (len(value) == 0) {
         return false;
     }
     link->kind = kind == kindDestinationLaunchFile ? MacLinkKind::File : MacLinkKind::Url;
@@ -532,133 +566,6 @@ void MacFreeLink(MacLink* link) {
     }
     free(link->value);
     *link = {};
-}
-
-void* MacCreateCommandPalette() {
-    const int commands[] = {
-        CmdOpenFile,
-        CmdCloseCurrentDocument,
-        CmdReopenLastClosedFile,
-        CmdNextTab,
-        CmdPrevTab,
-        CmdPrint,
-        CmdShowInFolder,
-        CmdProperties,
-        CmdSinglePageView,
-        CmdToggleContinuousView,
-        CmdRotateLeft,
-        CmdRotateRight,
-        CmdToggleFullscreen,
-        CmdCopySelection,
-        CmdSelectAll,
-        CmdGoToNextPage,
-        CmdGoToPrevPage,
-        CmdGoToFirstPage,
-        CmdGoToLastPage,
-        CmdGoToPage,
-        CmdFindFirst,
-        CmdFindNext,
-        CmdFindPrev,
-        CmdZoomFitPage,
-        CmdZoomActualSize,
-        CmdZoomFitWidth,
-        CmdZoomIn,
-        CmdZoomOut,
-        CmdToggleBookmarks,
-        CmdToggleKeyboardHelp,
-    };
-    auto* palette = new CommandPaletteModel();
-    palette->SetCommands(commands, dimofi(commands));
-    return palette;
-}
-
-void MacFilterCommandPalette(void* palette, const char* query) {
-    if (!palette) {
-        return;
-    }
-    ((CommandPaletteModel*)palette)->Filter(query ? Str((char*)query) : Str{});
-}
-
-int MacCommandPaletteCount(void* palette) {
-    return palette ? ((CommandPaletteModel*)palette)->Count() : 0;
-}
-
-char* MacCopyCommandPaletteItem(void* palette, int index) {
-    return palette ? DupCString(((CommandPaletteModel*)palette)->ItemText(index)) : nullptr;
-}
-
-int MacCommandPaletteItemCommand(void* palette, int index) {
-    return palette ? ((CommandPaletteModel*)palette)->ItemCommandId(index) : 0;
-}
-
-MacCommandAction MacCommandPaletteAction(int commandId) {
-    switch (commandId) {
-        case CmdOpenFile:
-            return MacCommandAction::Open;
-        case CmdCloseCurrentDocument:
-            return MacCommandAction::Close;
-        case CmdReopenLastClosedFile:
-            return MacCommandAction::ReopenClosed;
-        case CmdNextTab:
-            return MacCommandAction::NextTab;
-        case CmdPrevTab:
-            return MacCommandAction::PreviousTab;
-        case CmdPrint:
-            return MacCommandAction::Print;
-        case CmdShowInFolder:
-            return MacCommandAction::ShowInFolder;
-        case CmdProperties:
-            return MacCommandAction::Properties;
-        case CmdSinglePageView:
-            return MacCommandAction::SinglePage;
-        case CmdToggleContinuousView:
-            return MacCommandAction::ToggleContinuous;
-        case CmdRotateLeft:
-            return MacCommandAction::RotateLeft;
-        case CmdRotateRight:
-            return MacCommandAction::RotateRight;
-        case CmdToggleFullscreen:
-            return MacCommandAction::Fullscreen;
-        case CmdCopySelection:
-            return MacCommandAction::Copy;
-        case CmdSelectAll:
-            return MacCommandAction::SelectAll;
-        case CmdGoToNextPage:
-            return MacCommandAction::NextPage;
-        case CmdGoToPrevPage:
-            return MacCommandAction::PreviousPage;
-        case CmdGoToFirstPage:
-            return MacCommandAction::FirstPage;
-        case CmdGoToLastPage:
-            return MacCommandAction::LastPage;
-        case CmdGoToPage:
-            return MacCommandAction::GoToPage;
-        case CmdFindFirst:
-            return MacCommandAction::Find;
-        case CmdFindNext:
-            return MacCommandAction::FindNext;
-        case CmdFindPrev:
-            return MacCommandAction::FindPrevious;
-        case CmdZoomFitPage:
-            return MacCommandAction::FitPage;
-        case CmdZoomActualSize:
-            return MacCommandAction::ActualSize;
-        case CmdZoomFitWidth:
-            return MacCommandAction::FitWidth;
-        case CmdZoomIn:
-            return MacCommandAction::ZoomIn;
-        case CmdZoomOut:
-            return MacCommandAction::ZoomOut;
-        case CmdToggleBookmarks:
-            return MacCommandAction::Toc;
-        case CmdToggleKeyboardHelp:
-            return MacCommandAction::KeyboardHelp;
-    }
-    return MacCommandAction::None;
-}
-
-void MacDestroyCommandPalette(void* palette) {
-    delete (CommandPaletteModel*)palette;
 }
 
 int MacTocItemCount(void* document) {
@@ -692,6 +599,39 @@ int MacTocItemPage(void* document, int index) {
     int pageNo = dest ? PageDestGetPageNo(dest) : item->pageNo;
     return pageNo >= 1 && pageNo <= doc->model->PageCount() ? pageNo : 0;
 }
+
+//--- sidebar (MacSidebar.mm, MacThumbnails.cpp)
+
+// Whether the ToC item starts expanded (the document's default open state).
+bool MacTocItemIsOpen(void* document, int index) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || index < 0 || index >= len(doc->tocItems)) {
+        return false;
+    }
+    return doc->tocItems[index]->IsExpanded();
+}
+
+// http(s) / mailto target of a ToC item without a page, or nullptr. Free with MacFreeString.
+char* MacCopyTocItemUrl(void* document, int index) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || index < 0 || index >= len(doc->tocItems)) {
+        return nullptr;
+    }
+    IPageDestination* dest = doc->tocItems[index]->GetPageDestination();
+    if (!dest || dest->GetKind() != kindDestinationLaunchURL) {
+        return nullptr;
+    }
+    Str url = PageDestGetValue(dest);
+    return IsExternalUrl(url) ? DupCString(url) : nullptr;
+}
+
+// The document's engine; used by MacThumbnails.cpp, which AddRef()s it.
+EngineBase* MacDocumentEngine(void* document) {
+    MacDocument* doc = AsDocument(document);
+    return doc && doc->model ? doc->model->GetEngine() : nullptr;
+}
+
+//--- end sidebar
 
 int MacPropertyCount(void* document) {
     MacDocument* doc = AsDocument(document);
@@ -751,10 +691,11 @@ void MacCloseDocument(void* document) {
         return;
     }
     MacDocument* doc = AsDocument(document);
+    StopFindWorker(doc);
     delete doc->renderer;
     delete doc->textSelection;
     delete doc->textSearch;
-    delete doc->toc;
+    // doc->toc is owned by the engine
     FreeProps(doc->properties);
     delete doc->model;
     delete doc;
@@ -766,11 +707,504 @@ void MacShutdown() {
         return;
     }
     didShutdown = true;
-    CloseKeyboardHelp();
-    PlatformFontShutdown();
     DestroyTempArena();
 }
 
 void MacFinalize() {
     DestroyPermArena();
+}
+
+//--- UI core (SumatraMac.mm)
+
+// Must match CreateReaderEngine() in ReaderModel.cpp.
+static bool IsReaderSupportedKind(FileType kind) {
+    if (kind == FileType::Unknown || kind == FileType::Directory) {
+        return false;
+    }
+    if (kind == FileType::Lit || kind == FileType::Mobi || kind == FileType::Chm) {
+        return true;
+    }
+    return IsEngineDjVuSupportedFileType(kind) || IsEngineImageSupportedFileType(kind) ||
+           IsEngineCbxSupportedFileType(kind) || IsEngineMupdfSupportedFileType(kind);
+}
+
+static bool IsReaderSupportedPath(Str path) {
+    if (IsEngineImageDirSupportedFile(path)) {
+        return true;
+    }
+    return IsReaderSupportedKind(GuessFileTypeFromName(path, true));
+}
+
+static MacOpenError ClassifyOpenFailure(Str path, bool prompted) {
+    if (prompted) {
+        return MacOpenError::PasswordCancelled;
+    }
+    bool isDir = dir::Exists(path);
+    if (!isDir && !file::Exists(path)) {
+        return MacOpenError::NotFound;
+    }
+    if (!isDir) {
+        FILE* f = fopen(CStrTemp(path), "rb");
+        if (!f) {
+            return MacOpenError::Unreadable;
+        }
+        fclose(f);
+    }
+    if (!IsReaderSupportedPath(path)) {
+        return MacOpenError::Unsupported;
+    }
+    return MacOpenError::Damaged;
+}
+
+// Like MacOpenDocument() but reports why opening failed.
+void* MacOpenDocumentEx(void* passwordParent, const char* path, MacPageReadyCallback onPageReady, void* callbackContext,
+                        MacOpenError* errorOut) {
+    MacOpenError err = MacOpenError::None;
+    MacDocument* document = OpenDocumentImpl(passwordParent, path, onPageReady, callbackContext, &err);
+    if (errorOut) {
+        *errorOut = err;
+    }
+    return document;
+}
+
+bool MacIsSupportedPath(const char* path) {
+    if (!path || !path[0]) {
+        return false;
+    }
+    return IsReaderSupportedPath(Str((char*)path));
+}
+
+// document extensions offered by the Open panel; GuessFileType has more (e.g. .json)
+static const char* gMacOpenExts[] = {
+    "pdf", "ai",  "xps",  "oxps", "xod",  "dwfx", "epub", "mobi", "prc",      "azw",  "azw1", "azw3",  "azw4",
+    "pdb", "fb2", "fb2z", "fbz",  "zfb2", "lit",  "chm",  "djvu", "djv",      "cbz",  "cbr",  "cb7",   "cbt",
+    "zip", "rar", "7z",   "tar",  "ora",  "ps",   "eps",  "md",   "markdown", "html", "htm",  "xhtml", "svg",
+    "txt", "nfo", "png",  "jpg",  "jpeg", "jfif", "gif",  "tif",  "tiff",     "bmp",  "ico",  "tga",   "jxr",
+    "hdp", "wdp", "webp", "jxl",  "jp2",  "j2k",  "jpx",  "jpf",  "jpm",      "j2c",  "heic", "heif",  "avif",
+};
+
+// ';'-separated extensions (without the dot) the reader can open. Free with MacFreeString.
+char* MacCopySupportedExtensions() {
+    str::Builder out;
+    for (const char* ext : gMacOpenExts) {
+        Str extStr((char*)ext);
+        if (!IsReaderSupportedKind(GuessFileTypeFromName(fmt("x.%s", extStr), true))) {
+            continue;
+        }
+        if (len(out) > 0) {
+            out.AppendChar(';');
+        }
+        out.Append(extStr);
+    }
+    return DupCString(ToStrTemp(out));
+}
+
+struct MacFormatName {
+    FileType kind;
+    const char* name;
+};
+
+static const MacFormatName gDocFormatNames[] = {
+    {FileType::PDF, "PDF"},           {FileType::Xps, "XPS"},        {FileType::Epub, "EPUB"},
+    {FileType::Mobi, "MOBI"},         {FileType::Fb2, "FB2"},        {FileType::Lit, "LIT"},
+    {FileType::Chm, "CHM"},           {FileType::DjVu, "DjVu"},      {FileType::PS, "PostScript"},
+    {FileType::Markdown, "Markdown"}, {FileType::HTML, "HTML"},      {FileType::Svg, "SVG"},
+    {FileType::PalmDoc, "PalmDoc"},   {FileType::Txt, "plain text"},
+};
+
+static const MacFormatName gComicFormatNames[] = {
+    {FileType::Cbz, "CBZ"}, {FileType::Cbr, "CBR"}, {FileType::Cb7, "CB7"},   {FileType::Cbt, "CBT"},
+    {FileType::Zip, "ZIP"}, {FileType::Rar, "RAR"}, {FileType::SevenZ, "7Z"}, {FileType::Tar, "TAR"},
+};
+
+static const MacFormatName gImageFormatNames[] = {
+    {FileType::Png, "PNG"},       {FileType::Jpeg, "JPEG"},   {FileType::Gif, "GIF"},   {FileType::Tiff, "TIFF"},
+    {FileType::Bmp, "BMP"},       {FileType::Tga, "TGA"},     {FileType::Webp, "WebP"}, {FileType::Jxr, "JPEG XR"},
+    {FileType::Jp2, "JPEG 2000"}, {FileType::Jxl, "JPEG XL"}, {FileType::Heic, "HEIC"}, {FileType::Avif, "AVIF"},
+    {FileType::Ico, "ICO"},
+};
+
+static int AppendSupportedNames(str::Builder& out, const MacFormatName* names, int n) {
+    int count = 0;
+    for (int i = 0; i < n; i++) {
+        if (!IsReaderSupportedKind(names[i].kind)) {
+            continue;
+        }
+        if (count > 0) {
+            out.Append(StrL(", "));
+        }
+        out.Append(Str((char*)names[i].name));
+        count++;
+    }
+    return count;
+}
+
+static void AppendFormatGroup(str::Builder& out, Str title, const MacFormatName* names, int n) {
+    str::Builder list;
+    if (AppendSupportedNames(list, names, n) == 0) {
+        return;
+    }
+    if (len(out) > 0) {
+        out.Append(StrL(", "));
+    }
+    out.Append(title);
+    out.Append(StrL(" ("));
+    out.Append(ToStrTemp(list));
+    out.AppendChar(')');
+}
+
+// Human-readable list of the supported formats, e.g. for error messages.
+// Free with MacFreeString.
+char* MacCopySupportedFormats() {
+    str::Builder out;
+    AppendSupportedNames(out, gDocFormatNames, dimofi(gDocFormatNames));
+    AppendFormatGroup(out, StrL("comic books"), gComicFormatNames, dimofi(gComicFormatNames));
+    AppendFormatGroup(out, StrL("images"), gImageFormatNames, dimofi(gImageFormatNames));
+    out.Append(StrL(" and folders of images"));
+    return DupCString(ToStrTemp(out));
+}
+
+// Drops queued (not yet started) renders, e.g. for pages scrolled out of view.
+// The render in progress and the cache are kept.
+void MacCancelPendingRenders(void* document) {
+    MacDocument* doc = AsDocument(document);
+    if (doc && doc->renderer) {
+        doc->renderer->CancelRequests();
+    }
+}
+
+// Like MacRenderPage() but with print-only content (RenderTarget::Print).
+bool MacRenderPageForPrint(void* document, int pageNo, float zoom, int rotation, MacRenderedPage* page) {
+    if (!page) {
+        return false;
+    }
+    *page = {};
+    MacDocument* doc = AsDocument(document);
+    if (!doc || pageNo < 1 || pageNo > doc->model->PageCount()) {
+        return false;
+    }
+    Pixmap* pixmap = doc->model->RenderPageForPrint(pageNo, zoom > 0 ? zoom : 1.0f, rotation);
+    bool ok = CopyPixmap(pixmap, page);
+    FreePixmap(pixmap);
+    return ok;
+}
+
+void MacClearSelection(void* document) {
+    MacDocument* doc = AsDocument(document);
+    if (doc && doc->textSelection) {
+        doc->textSelection->Reset();
+    }
+}
+
+// Selects the word or line under (x, y) in page-local view coordinates.
+bool MacSelectAt(void* document, int pageNo, double x, double y, double zoom, int rotation, MacSelectUnit unit) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !doc->textSelection || pageNo < 1 || pageNo > doc->model->PageCount()) {
+        return false;
+    }
+    PointF pt = ToPagePoint(doc, pageNo, x, y, zoom, rotation);
+    if (!doc->textSelection->IsOverGlyph(pageNo, pt.x, pt.y)) {
+        return false;
+    }
+    doc->textSelection->Reset();
+    if (unit == MacSelectUnit::Line) {
+        doc->textSelection->SelectLineAt(pageNo, pt.x, pt.y);
+    } else {
+        doc->textSelection->SelectWordAt(pageNo, pt.x, pt.y);
+    }
+    return doc->textSelection->result.len > 0;
+}
+
+//--- asynchronous find
+
+// One worker thread per document runs TextSearch so the UI never blocks.
+// doc->textSearch is only touched by the worker; the main thread reads the
+// committed hit (hitPages/hitRects) under the mutex.
+struct MacFindWorker {
+    Mutex mutex;
+    ConditionVariable condition;
+    ThreadHandle thread = nullptr;
+    MacDocument* doc = nullptr;
+    AtomicInt cancel = 0;
+    bool stopping = false;
+    bool stopped = false;
+    bool pending = false;
+    bool busy = false;
+
+    Str text;
+    int startPage = 1;
+    bool forward = true;
+    bool restart = true;
+    int token = 0;
+    MacFindDoneCallback onDone = nullptr;
+    void* callbackContext = nullptr;
+
+    Vec<int> hitPages;
+    Vec<Rect> hitRects;
+    int hitPage = 0;
+};
+
+struct MacFindDone {
+    MacFindDoneCallback onDone = nullptr;
+    void* context = nullptr;
+    void* document = nullptr;
+    int token = 0;
+    bool found = false;
+};
+
+static int gFindToken = 0;
+
+static void RunFindDone(MacFindDone* done) {
+    done->onDone(done->context, done->document, done->token, done->found);
+    delete done;
+}
+
+static void OnFindProgress(MacFindWorker* w, ProgressUpdateData* data) {
+    if (data->wasCancelled) {
+        *data->wasCancelled = AtomicIntGet(&w->cancel) != 0;
+    }
+}
+
+static bool SearchOnce(MacFindWorker* w, Str query, int startPage, bool forward, bool restart) {
+    TextSearch* search = w->doc->textSearch;
+    bool newText = !str::Eq(search->lastText, query);
+    search->SetDirection(forward ? TextSearch::Direction::Forward : TextSearch::Direction::Backward);
+    TextSel* result = nullptr;
+    if (restart || newText || len(search->findText) == 0) {
+        result = search->FindFirst(startPage, query);
+    } else {
+        result = search->FindNext();
+    }
+    if (!result && AtomicIntGet(&w->cancel) == 0) {
+        // wrap around
+        int wrapPage = forward ? search->RestrictFirst() : search->RestrictLast();
+        result = search->FindFirst(wrapPage, query);
+    }
+    if (!result) {
+        search->Reset();
+    }
+    return result != nullptr;
+}
+
+// Called with w->mutex held.
+static void CommitFindResult(MacFindWorker* w, bool found) {
+    VecReset(w->hitPages);
+    VecReset(w->hitRects);
+    w->hitPage = 0;
+    if (!found) {
+        return;
+    }
+    TextSearch* search = w->doc->textSearch;
+    const TextSel& r = search->result;
+    for (int i = 0; i < r.len; i++) {
+        VecAppend(w->hitPages, r.pages[i]);
+        VecAppend(w->hitRects, r.rects[i]);
+    }
+    w->hitPage = search->GetSearchHitStartPageNo();
+}
+
+static void FindWorkerLoop(MacFindWorker* w) {
+    for (;;) {
+        w->mutex.Lock();
+        while (!w->stopping && !w->pending) {
+            w->condition.Wait(&w->mutex);
+        }
+        if (w->stopping) {
+            w->stopped = true;
+            w->condition.WakeAll();
+            w->mutex.Unlock();
+            return;
+        }
+        w->pending = false;
+        Str text = w->text;
+        int startPage = w->startPage;
+        bool forward = w->forward;
+        bool restart = w->restart;
+        w->mutex.Unlock();
+
+        bool found = SearchOnce(w, text, startPage, forward, restart);
+
+        w->mutex.Lock();
+        bool cancelled = AtomicIntGet(&w->cancel) != 0;
+        if (!cancelled) {
+            CommitFindResult(w, found);
+        }
+        MacFindDone* done = nullptr;
+        if (!cancelled && w->onDone) {
+            done = new MacFindDone();
+            done->onDone = w->onDone;
+            done->context = w->callbackContext;
+            done->document = w->doc;
+            done->token = w->token;
+            done->found = found;
+        }
+        w->busy = false;
+        w->condition.WakeAll();
+        w->mutex.Unlock();
+        if (done) {
+            PlatformPostTask(MkFunc0(RunFindDone, done));
+        }
+    }
+}
+
+static MacFindWorker* EnsureFindWorker(MacDocument* doc) {
+    if (doc->find) {
+        return doc->find;
+    }
+    auto* w = new MacFindWorker();
+    w->doc = doc;
+    doc->textSearch->progressCb = MkFunc1(OnFindProgress, w);
+    w->thread = StartThread(MkFunc0(FindWorkerLoop, w), StrL("find"));
+    if (!w->thread) {
+        doc->textSearch->progressCb = {};
+        delete w;
+        return nullptr;
+    }
+    doc->find = w;
+    return w;
+}
+
+// Cancels a queued or running search and waits until the worker is idle.
+static void CancelFindAndWait(MacFindWorker* w) {
+    AtomicIntSet(&w->cancel, 1);
+    w->mutex.Lock();
+    if (w->pending) {
+        w->pending = false;
+        w->busy = false;
+    }
+    while (w->busy) {
+        w->condition.Wait(&w->mutex);
+    }
+    AtomicIntSet(&w->cancel, 0);
+    w->mutex.Unlock();
+}
+
+static void StopFindWorker(MacDocument* doc) {
+    MacFindWorker* w = doc->find;
+    if (!w) {
+        return;
+    }
+    AtomicIntSet(&w->cancel, 1);
+    w->mutex.Lock();
+    w->stopping = true;
+    w->pending = false;
+    w->condition.WakeAll();
+    while (!w->stopped) {
+        w->condition.Wait(&w->mutex);
+    }
+    w->mutex.Unlock();
+    SafeCloseThreadHandle(&w->thread);
+    doc->textSearch->progressCb = {};
+    str::Free(w->text);
+    delete w;
+    doc->find = nullptr;
+}
+
+// Starts a search on the worker thread and returns its token (0 if not
+// started). onDone runs on the main thread unless the search is cancelled;
+// it may arrive after the document was closed, so check the token first.
+int MacFindStart(void* document, int startPage, const char* text, MacFindDirection direction, MacFindMode mode,
+                 MacFindDoneCallback onDone, void* callbackContext) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !doc->textSearch || !text || !text[0]) {
+        return 0;
+    }
+    MacFindWorker* w = EnsureFindWorker(doc);
+    if (!w) {
+        return 0;
+    }
+    CancelFindAndWait(w);
+
+    AutoUnlockMutex lock(&w->mutex);
+    str::ReplaceWithCopy(&w->text, Str((char*)text));
+    w->startPage = limitValue(startPage, 1, doc->model->PageCount());
+    w->forward = direction == MacFindDirection::Forward;
+    w->restart = mode == MacFindMode::Restart;
+    w->token = ++gFindToken;
+    w->onDone = onDone;
+    w->callbackContext = callbackContext;
+    w->pending = true;
+    w->busy = true;
+    w->condition.WakeAll();
+    return w->token;
+}
+
+void MacFindCancel(void* document) {
+    MacDocument* doc = AsDocument(document);
+    if (doc && doc->find) {
+        CancelFindAndWait(doc->find);
+    }
+}
+
+bool MacFindIsBusy(void* document) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !doc->find) {
+        return false;
+    }
+    AutoUnlockMutex lock(&doc->find->mutex);
+    return doc->find->busy;
+}
+
+void MacFindClear(void* document) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !doc->find) {
+        return;
+    }
+    AutoUnlockMutex lock(&doc->find->mutex);
+    VecReset(doc->find->hitPages);
+    VecReset(doc->find->hitRects);
+    doc->find->hitPage = 0;
+}
+
+// First page of the last found hit, 0 if none.
+int MacFindResultPage(void* document) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !doc->find) {
+        return 0;
+    }
+    AutoUnlockMutex lock(&doc->find->mutex);
+    return doc->find->hitPage;
+}
+
+int MacFindResultRectCount(void* document, int pageNo) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !doc->find) {
+        return 0;
+    }
+    AutoUnlockMutex lock(&doc->find->mutex);
+    int count = 0;
+    for (int page : doc->find->hitPages) {
+        count += page == pageNo ? 1 : 0;
+    }
+    return count;
+}
+
+// index-th hit rectangle on pageNo in page-local view coordinates.
+bool MacFindResultRect(void* document, int pageNo, int index, double zoom, int rotation, MacDisplayRect* rect) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !doc->find || !rect || index < 0) {
+        return false;
+    }
+    bool found = false;
+    Rect hit;
+    {
+        AutoUnlockMutex lock(&doc->find->mutex);
+        for (int i = 0; i < len(doc->find->hitPages); i++) {
+            if (doc->find->hitPages[i] != pageNo || index-- != 0) {
+                continue;
+            }
+            hit = doc->find->hitRects[i];
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    RectF r = doc->model->GetEngine()->Transform(ToRectF(hit), pageNo, (float)zoom, rotation);
+    rect->x = r.x;
+    rect->y = r.y;
+    rect->width = r.dx;
+    rect->height = r.dy;
+    return true;
 }

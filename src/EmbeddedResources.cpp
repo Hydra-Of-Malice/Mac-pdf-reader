@@ -2,7 +2,9 @@
    License: GPLv3 */
 
 #include "base/Base.h"
+#if OS_WIN
 #include "base/Win.h"
+#endif
 #include "base/File.h"
 #include "base/LzmaSimpleArchive.h"
 
@@ -11,6 +13,8 @@
 #include "resource.h"
 #include "EmbeddedResources.h"
 
+// POSIX has no resources: EmbeddedResources_posix.cpp reads the files from disk
+#if OS_WIN
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
 static LoadedDataResource gEmbeddedData{};
@@ -75,6 +79,7 @@ u8* GetEmbeddedFileData(Str name, int* outSize) {
     }
     return data;
 }
+#endif
 
 struct EmbeddedFont {
     EmbeddedFont* next;

@@ -14,8 +14,13 @@
 #include "base/Timer.h"
 #include "base/DirScan.h"
 
+#if OS_WIN
 #include "base/Win.h"
 #include "base/GdiPlusUtil.h"
+#else
+// only Windows' 3rd-party WIC codecs unmask fp exceptions
+static void MaskFpExceptions() {}
+#endif
 
 extern "C" {
 #include <mupdf/fitz.h>
@@ -843,6 +848,7 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
     // High-quality scale via GDI+ bicubic. The old per-pixel nearest-neighbor
     // path looked blocky for Pixmap-only formats (HEIC/AVIF/WebP/JXL) whenever
     // zoom != 100%. Rotation still uses the fallback below (rare for images).
+#if OS_WIN
     if (NormalizeRotation(rotation) == 0 && screen.dx > 0 && screen.dy > 0) {
         Gdiplus::Bitmap* srcBmp = WrapPixmapGdiplus(src);
         if (srcBmp) {
@@ -884,6 +890,7 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
             }
         }
     }
+#endif
 
     // Fallback: nearest-neighbor (rotation, non-Windows, or GDI+ failure).
     Pixmap* result = AllocPixmap(screen.dx, screen.dy, PixmapFormat::BGRA8, true);

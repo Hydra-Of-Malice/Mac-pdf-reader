@@ -84,6 +84,7 @@ RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px);
 void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor = 0, Vec<Rect>* skipRects = nullptr);
 
 void FreePixmapNativeBitmap(Pixmap* p);
+Pixmap* PixmapApplyExifOrientation(Pixmap* px, int orientation);
 
 // 0 for Native: those pixels can only be read through GDI
 inline int PixmapBytesPerPixel(PixmapFormat fmt) {

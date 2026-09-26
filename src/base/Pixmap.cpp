@@ -3,7 +3,9 @@
 
 #include "base/Base.h"
 #include "base/ByteReaderWriter.h"
+#if OS_WIN
 #include "base/Win.h"
+#endif
 
 #include "base/Pixmap.h"
 
@@ -74,6 +76,7 @@ Str PixmapToBmpFormat(const Pixmap* pixmap) {
     return bmpData.TakeStr();
 }
 
+#if OS_WIN
 Pixmap* AllocPixmapDIB(int w, int h) {
     if (w <= 0 || h <= 0) {
         return nullptr;
@@ -200,6 +203,88 @@ Pixmap* PixmapFromRenderedBitmap(RenderedBitmap* rb) {
     delete rb;
     return p;
 }
+#else
+// no GDI: a "DIB" is a heap BGRA8 pixmap and no pixmap has a native bitmap
+Pixmap* AllocPixmapDIB(int w, int h) {
+    return AllocPixmap(w, h, PixmapFormat::BGRA8);
+}
+
+Pixmap* PixmapCopyAs32bppDIB(const Pixmap*) {
+    return nullptr;
+}
+
+void FreePixmapNativeBitmap(Pixmap* p) {
+    if (p) {
+        p->data = nullptr;
+    }
+}
+
+// Apply an EXIF orientation (2..8) to px, returning a new Pixmap and freeing px.
+// 0/1 or out of range (or an unreadable format) returns px unchanged. Windows
+// has a GDI+ version in GdiPlusUtil.cpp.
+Pixmap* PixmapApplyExifOrientation(Pixmap* px, int orientation) {
+    if (!px || !px->data || orientation < 2 || orientation > 8) {
+        return px;
+    }
+    int bpp = PixmapBytesPerPixel(px->format);
+    if (bpp == 0) {
+        return px;
+    }
+    int w = px->width;
+    int h = px->height;
+    // 5..8 turn the image on its side
+    bool swapsAxes = orientation >= 5;
+    int dx = swapsAxes ? h : w;
+    int dy = swapsAxes ? w : h;
+    Pixmap* out = AllocPixmap(dx, dy, px->format, px->premultiplied);
+    if (!out) {
+        return px;
+    }
+    for (int y = 0; y < dy; y++) {
+        u8* dst = out->data + ((size_t)y * out->stride);
+        for (int x = 0; x < dx; x++) {
+            // source pixel that lands at (x, y)
+            int sx = x;
+            int sy = y;
+            switch (orientation) {
+                case 2: // mirror horizontal
+                    sx = w - 1 - x;
+                    break;
+                case 3: // rotate 180
+                    sx = w - 1 - x;
+                    sy = h - 1 - y;
+                    break;
+                case 4: // mirror vertical
+                    sy = h - 1 - y;
+                    break;
+                case 5: // transpose
+                    sx = y;
+                    sy = x;
+                    break;
+                case 6: // rotate 90 clockwise
+                    sx = y;
+                    sy = h - 1 - x;
+                    break;
+                case 7: // transverse
+                    sx = w - 1 - y;
+                    sy = h - 1 - x;
+                    break;
+                case 8: // rotate 90 counter-clockwise
+                    sx = w - 1 - y;
+                    sy = x;
+                    break;
+            }
+            const u8* src = px->data + ((size_t)sy * px->stride) + ((size_t)sx * bpp);
+            memcpy(dst + ((size_t)x * bpp), src, (size_t)bpp);
+        }
+    }
+    out->hasAlpha = px->hasAlpha;
+    out->xres = swapsAxes ? px->yres : px->xres;
+    out->yres = swapsAxes ? px->xres : px->yres;
+    FreePixmap(px);
+    return out;
+}
+#endif
 
 // The alpha in a DIB section is straight, not premultiplied: that is what PNG,
 // CF_DIBV5 and GDI+ all expect of a 32bpp bitmap, and mupdf hands us
@@ -269,6 +354,7 @@ Pixmap* PixmapToBgra(Pixmap* p) {
     return dib;
 }
 
+#if OS_WIN
 RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px) {
     if (!px) {
         return nullptr;
@@ -604,6 +690,8 @@ static bool BlitPixmapRegionComposited(Pixmap* p, HDC hdc, Rect target, Rect sou
     return ok;
 }
 
+#endif
+
 static bool SkipRecolorPixel(int x, int y, Vec<Rect>* skipRects) {
     if (skipRects) {
         for (Rect& r : *skipRects) {
@@ -626,9 +714,9 @@ static int Mul255(int a, int b) {
 // Pixel bytes are B,G,R[,A]; rows are stride bytes apart.
 static void RecolorPixels(u8* data, int w, int h, size_t stride, int bpp, Color textColor, Color bgColor,
                           Color linkColor, Vec<Rect>* skipRects) {
-    byte linkR = 0, linkG = 0, linkB = 0;
+    u8 linkR = 0, linkG = 0, linkB = 0;
     UnpackColor(linkColor, linkR, linkG, linkB);
-    byte textR, textG, textB, bgR, bgG, bgB;
+    u8 textR, textG, textB, bgR, bgG, bgB;
     UnpackColor(textColor, textR, textG, textB);
     UnpackColor(bgColor, bgR, bgG, bgB);
     const int base[4] = {textB, textG, textR, 0};
@@ -656,6 +744,7 @@ static void RecolorPixels(u8* data, int w, int h, size_t stride, int bpp, Color 
     }
 }
 
+#if OS_WIN
 // same, for an HBITMAP: in place for mapped 24/32-bit DIBs, via the palette
 // for 8-bit ones, else through GetDIBits/SetDIBits
 static void RecolorHbitmap(HBITMAP hbmp, Color textColor, Color bgColor, Color linkColor, Vec<Rect>* skipRects) {
@@ -706,6 +795,7 @@ static void RecolorHbitmap(HBITMAP hbmp, Color textColor, Color bgColor, Color l
     }
     DeleteDC(hDC);
 }
+#endif
 
 void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor, Vec<Rect>* skipRects) {
     if (!px) {
@@ -714,10 +804,12 @@ void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor, 
     if ((textColor & 0xffffff) == kColBlack && (bgColor & 0xffffff) == kColWhite && !linkColor && !skipRects) {
         return;
     }
+#if OS_WIN
     if (px->hbmp) {
         RecolorHbitmap(px->hbmp, textColor, bgColor, linkColor, skipRects);
         return;
     }
+#endif
     if (!px->data || px->width <= 0 || px->height <= 0 || px->format == PixmapFormat::RGBA8) {
         return;
     }
@@ -725,6 +817,7 @@ void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor, 
                   linkColor, skipRects);
 }
 
+#if OS_WIN
 static Size GetBitmapSize(HBITMAP hbmp) {
     BITMAP bmpInfo;
     GetObject(hbmp, sizeof(BITMAP), &bmpInfo);
@@ -782,3 +875,4 @@ Pixmap* GetClipboardImageAsPixmap() {
     CloseClipboard();
     return pixmap;
 }
+#endif
