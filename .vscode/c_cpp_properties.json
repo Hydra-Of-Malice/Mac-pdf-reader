@@ -1,0 +1,39 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceRoot}/ext/mupdf/include",
+                "${workspaceRoot}/src",
+                "${workspaceRoot}/src/base",
+                "${workspaceRoot}/src/wingui",
+                "${workspaceRoot}/ext/synctex",
+                "${workspaceRoot}/ext/unarr",
+                "${workspaceRoot}/ext/brotli/c/include",
+                "${workspaceRoot}/ext/darkmodelib/include",
+                "${workspaceRoot}/ext/a-zlib",
+                "${workspaceRoot}/ext/libchm",
+                "${workspaceRoot}/ext/webview2"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_WIN32",
+                "WIN32",
+                "_CRT_SECURE_NO_WARNINGS",
+                "WINVER=0x0a00",
+                "_WIN32_WINNT=0x0a00"
+            ],
+            "windowsSdkVersion": "10.0.18362.0",
+            "intelliSenseMode": "windows-msvc-x64",
+            "browse": {
+                "path": [],
+                "limitSymbolsToIncludedHeaders": false,
+                "databaseFilename": "${workspaceRoot}/.vscode/db/intellisense.db"
+            },
+            "cppStandard": "c++20",
+            "compilerPath": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe"
+        }
+    ],
+    "version": 4
+}

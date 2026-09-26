@@ -1,0 +1,459 @@
+/* Theme for the in-app manual (F1) and the local preview. Mirrors the color
+   variables and dark rules of the website's website.css so the shared
+   sumatra.css needs no changes. */
+:root {
+  /* San Francisco on Mac, Segoe UI on Windows. */
+  --font-body: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-heading: var(--font-body);
+  --border: rgb(234, 234, 234);
+  --bg-primary: #ffffff;
+  --bg-elevated: #ffffff;
+  --text-primary: rgb(35 35 35);
+  --text-secondary: #6b6b6b;
+  --link-color: inherit;
+  --nav-track-bg: #f3f3f1;
+  --nav-track-border: #e6e6e2;
+  --nav-btn-color: #333;
+  --search-bg: #f7f7f7;
+  --search-border: #ddd;
+  --search-color: #555;
+  --kbd-bg: #f7f7f7;
+  --kbd-border: #ccc;
+  --docs-bar-h: 3.5rem;
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  --border: #2c2c2c;
+  --bg-primary: #121212;
+  --bg-elevated: #1a1a1a;
+  --text-primary: #e8e8e6;
+  --text-secondary: #c8c8c4;
+  --nav-track-bg: #1e1e1e;
+  --nav-track-border: #2e2e2e;
+  --nav-btn-color: #ddd;
+  --search-bg: #1e1e1e;
+  --search-border: #333;
+  --search-color: #bbb;
+  --kbd-bg: #1e1e1e;
+  --kbd-border: #444;
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-optical-sizing: auto;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-heading);
+  font-optical-sizing: auto;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+h1 {
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+h3 {
+  letter-spacing: -0.005em;
+}
+
+a:not(.hlink) {
+  color: inherit;
+}
+
+.sidebar-toc {
+  border-right-color: var(--border);
+}
+
+.sidebar-toc a {
+  color: var(--text-secondary);
+}
+
+.sidebar-toc .toc-section {
+  color: var(--text-primary);
+}
+
+.sidebar-toc a:hover,
+.sidebar-toc a.toc-current {
+  color: var(--text-primary);
+}
+
+/* Theme switch: current theme only; hover / focus expands to all three. */
+.manual-theme-switch {
+  position: fixed;
+  top: 6px;
+  right: 14px;
+  z-index: 90;
+}
+
+.theme-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9999px;
+  background: rgba(15, 23, 42, 0.05);
+  color: var(--text-primary);
+}
+
+html[data-theme="dark"] .theme-switch {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.theme-opt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: 9999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.theme-opt svg {
+  width: 1.35rem;
+  height: 1.35rem;
+  display: block;
+  flex-shrink: 0;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .theme-switch {
+    gap: 0;
+    overflow: hidden;
+  }
+
+  .theme-switch .theme-opt:not([aria-pressed="true"]) {
+    width: 0;
+    min-width: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .theme-switch:is(:hover, :focus-within):not(.is-locked) {
+    gap: 2px;
+  }
+
+  .theme-switch:is(:hover, :focus-within):not(.is-locked) .theme-opt:not([aria-pressed="true"]) {
+    width: 2rem;
+    min-width: 2rem;
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.theme-opt:hover {
+  color: var(--text-primary);
+}
+
+.theme-opt-active,
+.theme-opt[aria-pressed="true"] {
+  background: #fff;
+  color: #111;
+  box-shadow:
+    0 0 0 1px rgba(15, 23, 42, 0.1),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+html[data-theme="dark"] .theme-opt-active,
+html[data-theme="dark"] .theme-opt[aria-pressed="true"] {
+  background: #374151;
+  color: #fff;
+  box-shadow: none;
+}
+
+/* Dark rules for the docs prose, from website.css */
+html[data-theme="dark"] kbd {
+  background: var(--kbd-bg);
+  border-color: var(--kbd-border);
+  color: var(--text-primary);
+}
+
+html[data-theme="dark"] .code,
+html[data-theme="dark"] code {
+  background: #1e1e1e;
+  color: #d0d0cc;
+}
+
+html[data-theme="dark"] pre {
+  background: #1e1e1e;
+}
+
+html[data-theme="dark"] .code > code {
+  background: none;
+  color: inherit;
+}
+
+html[data-theme="dark"] .sum-code-copy-btn {
+  background: #2a2a2a;
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+
+html[data-theme="dark"] table,
+html[data-theme="dark"] th,
+html[data-theme="dark"] td {
+  border-color: #8a8a86;
+}
+
+html[data-theme="dark"] th {
+  color: #e8e8e6;
+  background-color: #242424;
+}
+
+html[data-theme="dark"] .toc-mini:hover,
+html[data-theme="dark"] .toc-wrapper.toc-open > .toc-mini {
+  background-color: #2a2a2a;
+}
+
+html[data-theme="dark"] .toc-list {
+  background-color: #1e1e1e;
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow:
+    rgba(0, 0, 0, 0.55) 0px 0px 0px 1px,
+    rgba(0, 0, 0, 0.45) 0px 3px 6px,
+    rgba(0, 0, 0, 0.6) 0px 9px 24px;
+}
+
+html[data-theme="dark"] .toc-list::-webkit-scrollbar-thumb {
+  background-color: #555;
+}
+
+html[data-theme="dark"] .toc-list::-webkit-scrollbar-track {
+  background-color: #1a1a1a;
+}
+
+html[data-theme="dark"] .toc-item:hover {
+  background-color: #2e2e2e;
+}
+
+html[data-theme="dark"] .toc-light {
+  color: #5c5c5c;
+}
+
+/* Sticky search bar. No Home button; the theme switch stays at the right. */
+.docs-bar {
+  position: sticky;
+  top: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  height: var(--docs-bar-h);
+  padding: 0 4.5rem 0 0.75rem;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+}
+
+html[data-theme="dark"] .docs-bar {
+  background: rgba(18, 18, 18, 0.92);
+}
+
+.docs-search {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 2.5rem;
+}
+
+.docs-search-input {
+  display: block;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0 0.9rem;
+  border: 1px solid var(--search-border, #ddd);
+  border-radius: 9999px;
+  background: var(--search-bg, #f7f7f7);
+  color: var(--text-primary, #232323);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.2;
+  box-sizing: border-box;
+  text-overflow: ellipsis;
+}
+
+.docs-search-input::placeholder {
+  color: var(--search-color, #555);
+  font-weight: 500;
+  opacity: 1;
+}
+
+.docs-search-input:focus-visible {
+  outline: 2px solid #fff000;
+  outline-offset: 2px;
+}
+
+.docs-search-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  max-height: calc(100vh - var(--docs-bar-h) - 1.5rem);
+  max-height: calc(100dvh - var(--docs-bar-h) - 1.5rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  background: var(--bg-elevated, #fff);
+  color: var(--text-primary, #232323);
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16);
+  z-index: 81;
+}
+
+.docs-search-panel .search-result {
+  padding: 0.65rem 0.75rem;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.docs-search-panel .search-result.selected {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+html[data-theme="dark"] .docs-search-panel .search-result.selected {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.docs-search-panel .search-result-file {
+  color: var(--text-primary, #1f2937);
+  font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1.25;
+  margin-bottom: 0.25rem;
+}
+
+.docs-search-panel .search-result-file mark,
+.docs-search-panel .search-result-context mark {
+  background: #fff3a3;
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.docs-search-panel .search-result-context {
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: var(--text-secondary, #60646c);
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.docs-search-panel .search-no-results,
+.docs-search-panel .search-load-error {
+  padding: 0.85rem 0.75rem;
+  color: var(--text-secondary, #8a8f98);
+  text-align: center;
+}
+
+.docs-search-lead {
+  padding: 0.45rem 0.75rem 0.15rem;
+  color: var(--text-secondary, #666);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.docs-search-lead tt {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  background: #f2f2f0;
+  color: #333;
+  padding: 0 0.3em;
+  border-radius: 3px;
+}
+
+html[data-theme="dark"] .docs-search-lead {
+  color: #c8c8c4;
+}
+
+html[data-theme="dark"] .docs-search-lead tt {
+  background: #2a2a2a;
+  color: #e8e8e6;
+}
+
+.docs-ask {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  padding: 0.35rem 0.55rem 0.55rem;
+  overflow-x: auto;
+  color: var(--text-secondary, #666);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.docs-search-panel:has(.search-result, .search-no-results, .search-load-error) .docs-ask {
+  border-bottom: 1px solid var(--border, #e5e5e5);
+  margin-bottom: 4px;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  scroll-margin-top: calc(var(--docs-bar-h) + 1rem);
+}
+
+.notion-page {
+  line-height: 1.6;
+  letter-spacing: -0.011em;
+}
+
+/* Article links: gray underline, full color on hover. */
+.notion-page a {
+  text-decoration-color: #bbb;
+  text-underline-offset: 2px;
+  transition: text-decoration-color 0.15s ease;
+}
+
+.notion-page a:hover {
+  text-decoration-color: currentColor;
+}
+
+html[data-theme="dark"] .notion-page a {
+  text-decoration-color: #606060;
+}
+
+html[data-theme="dark"] .notion-page a:hover {
+  text-decoration-color: currentColor;
+}
+
+.breadcrumbs > a {
+  text-decoration: none;
+}
+
+.page-content h2 {
+  font-size: 1.75rem;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+
+.page-content h3 {
+  font-size: 1.25rem;
+  line-height: 1.4;
+  letter-spacing: -0.005em;
+}

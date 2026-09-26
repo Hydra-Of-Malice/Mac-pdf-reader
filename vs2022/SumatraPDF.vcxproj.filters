@@ -1,0 +1,1346 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="ext">
+      <UniqueIdentifier>{7670880B-E279-887C-6BF5-9E7CD7FD937C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\darkmodelib">
+      <UniqueIdentifier>{A35716CE-0FE3-8392-18F4-068784FEDF92}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\darkmodelib\include">
+      <UniqueIdentifier>{167246F4-82A9-8E8B-8BB3-F2AEF769B584}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\darkmodelib\src">
+      <UniqueIdentifier>{3A2F0B1B-A690-E828-2FFE-2EDB9B5E1FE8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\synctex">
+      <UniqueIdentifier>{73E6124D-DF9B-8B42-6890-8519D4448246}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\webview2">
+      <UniqueIdentifier>{302B3E82-1C8E-CD26-C513-06DDB15599A9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src">
+      <UniqueIdentifier>{2DAB880B-99B4-887C-2230-9F7C8E38947C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\base">
+      <UniqueIdentifier>{F7972DCF-E364-88DA-0C7E-7682F8A9BD68}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\base\tests">
+      <UniqueIdentifier>{19604212-052E-3618-EEC1-A63EDA2E127D}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\gui">
+      <UniqueIdentifier>{210530A9-8DE4-AE44-96FC-391B025B15A6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\gui\tests">
+      <UniqueIdentifier>{C384B012-2F45-2C49-F87F-75C664FF7025}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\gui\win">
+      <UniqueIdentifier>{9E7B1B1E-0A31-9413-9325-8EEAFFD98A17}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\regress">
+      <UniqueIdentifier>{F7CE8947-6384-023D-EC78-FC13582DF940}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\testcode">
+      <UniqueIdentifier>{D744682D-C3A7-F7D1-6C2D-3088586FC354}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\tests">
+      <UniqueIdentifier>{CF8328B6-3BEE-DC2C-842C-8ED2F0D5BA81}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\uia">
+      <UniqueIdentifier>{1B3F30A9-871E-AF44-9036-3A1BFC9415A6}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\ext\darkmodelib\include\DarkModeSubclass.h">
+      <Filter>ext\darkmodelib\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\include\Darkmodelib.h">
+      <Filter>ext\darkmodelib\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\DmlibColor.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\DmlibDpi.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\DmlibGlyph.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\DmlibHook.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\DmlibIni.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\DmlibPaintHelper.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\DmlibSubclass.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\DmlibSubclassControl.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\DmlibSubclassWindow.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\DmlibWinApi.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\IatHook.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\MemoryHelper.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\MemoryHelperDef.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\ModuleHelper.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\StdAfx.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\UAHMenuBar.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\Version.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AIChatCommon.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AIChatPanel.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Accelerators.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AnnotEditToolbar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AnnotFilterToolbar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AnnotPlacement.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AnnotSearch.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AnnotTextPopup.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Annotation.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AppSettings.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AppTools.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AvifReader.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\BuildConfig.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\CachedObjects.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Canvas.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ChapterTable.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ChmDump.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ChmFile.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ChmModel.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\CommandAvailability.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\CommandPalette.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Commands.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\DarkMode.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\DisplayMode.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\DisplayModel.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\DocController.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\DocProperties.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\DocumentLayout.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\DocumentProperties.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\EbookDoc.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\EbookFormatter.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\EmbeddedResources.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\EngineAll.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\EngineBase.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\EngineMupdf.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\EutlTrust.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ExifDump.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ExplorerQuickLook.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ExternalViewers.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Favorites.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\FileHistory.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\FileThumbnails.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\FilterHighlightDraw.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\FilterUtil.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\FindBar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\FindWindow.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Flags.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\FormFields.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\GlobalHotkeys.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\GoogleLens.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\GumboHtmlParser.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\HangDetector.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\HomePage.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\HtmlFormatter.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ImageReader.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ImageSaveCropResize.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Installer.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\JxlReader.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\KeyboardHelp.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\LinkFollow.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\LitDoc.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\MainWindow.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\MarkdownModel.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\MarkdownToc.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Menu.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\MobiDoc.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\NavFilesInFolder.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Notifications.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\OverlayScrollbar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PagePosition.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PageRenderPolicy.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PageRenderService.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PalmDbReader.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PdfCad.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PdfCreator.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PdfDarkMode.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PdfDarkModeInternal.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PdfSync.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PdfTools.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PngOptimizer.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Print.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PrintWin11.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ProgressUpdateUI.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ReadAloud.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ReaderModel.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ReadingAutoScroll.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ReadingBar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\RefHover.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\RegistryPreview.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\RegistrySearchFilter.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\RenderCache.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Screenshot.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ScreenshotCapture.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SearchAndDDE.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SelectTextKeyboard.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Selection.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SelectionHandlers.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SelectionToolbar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SelectionTranslate.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Settings.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ShortcutParse.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SimpleBrowserWindow.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\StressTesting.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SumatraControl.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SumatraDialogs.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SumatraLog.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SumatraPDF.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SumatraTest.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SvgIcons.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\TabGroupsManage.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\TableOfContents.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Tabs.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\TextSearch.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\TextSelection.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Theme.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Toolbar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Translations.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\UpdateCheck.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Version.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\WebpReader.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\WindowTab.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\Archive.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\CrashHandler.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\tests\UtAssert.h">
+      <Filter>src\base\tests</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\DocumentView.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\Gfx.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\GuiColors.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\Layout.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\PasswordDialog.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\PlatformCanvas.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\PlatformFont.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\PlatformText.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\PlatformWindow.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\UIModels.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\VirtCtrl.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\VirtHost.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\win\BrowserDocView.h">
+      <Filter>src\gui\win</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\win\FrameRateWnd.h">
+      <Filter>src\gui\win</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\win\HtmlWindow.h">
+      <Filter>src\gui\win</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\win\TabsCtrl.h">
+      <Filter>src\gui\win</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\win\WebView.h">
+      <Filter>src\gui\win</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\win\WinGui.h">
+      <Filter>src\gui\win</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\resource.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\testcode\test-app.h">
+      <Filter>src\testcode</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\uia\DocumentProvider.h">
+      <Filter>src\uia</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\uia\PageProvider.h">
+      <Filter>src\uia</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\uia\Provider.h">
+      <Filter>src\uia</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\uia\StartPageProvider.h">
+      <Filter>src\uia</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\uia\TextRange.h">
+      <Filter>src\uia</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\ext\darkmodelib\src\Darkmodelib.cpp">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\darkmodelib\src\DmlibColor.cpp">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\darkmodelib\src\DmlibDpi.cpp">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\darkmodelib\src\DmlibHook.cpp">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\darkmodelib\src\DmlibPaintHelper.cpp">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\darkmodelib\src\DmlibSubclass.cpp">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\darkmodelib\src\DmlibSubclassControl.cpp">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\darkmodelib\src\DmlibSubclassWindow.cpp">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\darkmodelib\src\DmlibWinApi.cpp">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\synctex\synctex_parser.c">
+      <Filter>ext\synctex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\synctex\synctex_parser_utils.c">
+      <Filter>ext\synctex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\webview2\WebView2Loader.cpp">
+      <Filter>ext\webview2</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AIAntiGravity.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AIChatCommon.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AIChatPanel.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AIClaudeCode.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AICodexBuild.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AIGrokBuild.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Accelerators.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AddFavoriteDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AdvancedSettingsDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AnnotEditToolbar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AnnotFilterToolbar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AnnotPlacement.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AnnotSearch.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AnnotTextPopup.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Annotation.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AppSettings.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AppTools.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AvifReader.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\BasePch.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\CachedObjects.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Canvas.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\CanvasAboutUI.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ChangeColorDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ChangeLanguageDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ChangeScrollbarDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ChangeThemeDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ChapterTable.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ChmDump.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ChmFile.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ChmModel.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\CommandAvailability.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\CommandPalette.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Commands.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\CustomZoomDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\DarkMode.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\DisplayMode.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\DisplayModel.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\DocController.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\DocProperties.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\DocumentLayout.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\DocumentProperties.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EbookDoc.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EbookFormatter.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EbookSettingsDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EmbeddedResources.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EngineBase.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EngineCreate.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EngineDjvuDec.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EngineDump.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EngineEbook.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EngineImages.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EngineMupdf.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EnginePs.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\EutlTrust.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ExifDump.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ExplorerQuickLook.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ExternalViewers.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Favorites.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\FileHistory.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\FileThumbnails.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\FilterHighlightDraw.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\FilterUtil.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\FindBar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\FindWindow.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Flags.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\FormFields.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\GetPasswordDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\GlobalHotkeys.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\GoToPageDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\GoogleLens.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\GumboHtmlParser.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\HangDetector.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\HomePage.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\HtmlFormatter.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ImageEditHostSumatra.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ImageReader.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ImageSaveCropResize.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Installer.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\InstallerCommon.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\InverseSearchDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\JxlReader.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\KeyboardHelp.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\LinkFollow.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\LitDoc.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\MainWindow.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\MarkdownModel.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\MarkdownToc.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Menu.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\MobiDoc.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\MuPDF_Exports.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\NavFilesInFolder.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Notifications.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\OverlayScrollbar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PageGridDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PagePosition.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PageRenderPolicy.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PageRenderService.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PalmDbReader.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfCad.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfCreator.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeAnalysis.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeCache.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeColor.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeDevice.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeEngineCache.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeImageBgBlend.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeImageClassifier.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeImageRules.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeImageStats.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeOklab.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeProfile.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDarkModeScanProcess.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfSign.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfSync.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfTools.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PngOptimizer.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Print.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PrintWin11.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ReadAloud.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ReaderModel.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ReadingAutoScroll.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ReadingBar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RefHover.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RefHoverCanvas.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RefHoverDetect.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RefHoverInternal.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RefHoverPopup.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RefHoverRender.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RefHoverShow.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RefHoverText.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RefHoverTextDetect.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RegistryInstaller.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RegistryPreview.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RegistrySearchFilter.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\RenderCache.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Screenshot.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ScreenshotCapture.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SearchAndDDE.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SelectTextKeyboard.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Selection.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SelectionHandlers.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SelectionToolbar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SelectionTranslate.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SettingsDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ShortcutParse.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SignDocumentDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SimpleBrowserWindow.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\StressTesting.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SumatraConfig.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SumatraControl.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SumatraDialogs.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SumatraLog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SumatraPDF.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SumatraTest.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SvgIcons.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TabGroupsManage.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TableOfContents.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Tabs.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TestPlugin.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TestPreview.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Tester.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Tests.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TextSearch.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TextSelection.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TextViewWnd.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Theme.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Toolbar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TranslationLangs.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Translations.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Uninstaller.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\UpdateCheck.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\WebpReader.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\WindowTab.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\Archive.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\CrashHandler.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\Base_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\ByteReaderWriter_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\ClipboardImage_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\Crypto_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\CssParser_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\Dict_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\File_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\GuessFileType_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\JsonParser_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\RefHover_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\SettingsUtil_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\SquareTreeParser_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\StrFormat_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\StrVec_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\Str_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\UtAssert.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\Vec_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\Win_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\Gfx.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\GfxDirect2D.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\GfxGdiplus.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\GuiColors.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\Layout.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\PasswordDialog.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\PlatformFont.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\PlatformText.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\UIModels.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\UiPlatform.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\VirtCtrl.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\VirtHost.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\tests\Layout_ut.cpp">
+      <Filter>src\gui\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\tests\VirtCtrl_ut.cpp">
+      <Filter>src\gui\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\BrowserDocView.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\Button.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\Checkbox.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\DropDown.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\Edit.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\FrameRateWnd.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\HtmlWindow.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\PlatformWindowWin.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\Progress.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\TabsCtrl.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\Tooltip.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\Trackbar.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\TreeView.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\WebView.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\win\WindowBase.cpp">
+      <Filter>src\gui\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\regress\Regress.cpp">
+      <Filter>src\regress</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\testcode\TestApp.cpp">
+      <Filter>src\testcode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\testcode\TestLayout.cpp">
+      <Filter>src\testcode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\testcode\TestTab.cpp">
+      <Filter>src\testcode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\AnnotSearch_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\CachedObjects_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\ChapterTable_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\CommandPalette_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\EngineDjvuDec_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\LitDoc_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\MobiDoc_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\PagePosition_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\PageRenderPolicy_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\PdfDarkModeImageClassifier_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\PdfDarkModeOklab_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\PdfSync_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\ReadAloudHighlight_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\ShortcutParse_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\SimpleLog_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\Sumatra_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\TextSelection_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\uia\DocumentProvider.cpp">
+      <Filter>src\uia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\uia\PageProvider.cpp">
+      <Filter>src\uia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\uia\Provider.cpp">
+      <Filter>src\uia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\uia\StartPageProvider.cpp">
+      <Filter>src\uia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\uia\TextRange.cpp">
+      <Filter>src\uia</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="..\src\SumatraPDF.rc">
+      <Filter>src</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+</Project>

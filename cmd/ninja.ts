@@ -1,0 +1,266 @@
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { runLogged } from "./util";
+
+export const ninjaDir = join(".work", "ninja");
+// Generated paths are relative to ninjaDir, two levels below the root.
+export const ninjaToRoot = join("..", "..");
+const buildFile = join(ninjaDir, "build.ninja");
+const generatedFile = join(ninjaDir, ".generated");
+// ninja.ts is included: it post-processes the generated files, so changing it
+// must re-generate them from scratch (the fixups are not idempotent).
+const premakeFiles = ["premake5.lua", "premake5.files.lua", "cmd/ninja.ts"];
+const resources = [
+  ["SumatraPDF", "SumatraPDF.exe", "../../src/SumatraPDF.rc"],
+  ["SumatraPDF-static", "SumatraPDF-static.exe", "../../src/SumatraPDF.rc"],
+  ["libsumatrapdf", "libsumatrapdf.dll", "../../src/libsumatrapdf.rc"],
+  ["PdfFilter", "PdfFilter.dll", "../../src/ifilter/PdfFilter.rc"],
+  ["PdfPreview", "PdfPreview.dll", "../../src/previewer/PdfPreview.rc"],
+] as const;
+// SharedLib projects using dll_shared_lib_dirs(): the .dll ships in out/<cfg>/
+// while premake emits it under the intermediate dir out/<cfg>/obj.
+const sharedLibs = ["libsumatrapdf", "PdfFilter", "PdfPreview"];
+
+// premake globs source dirs, so adding or removing a source file must
+// re-generate too; .generated holds the list the files were generated from
+const sourceDirs = ["src", "ext"];
+const sourceExtRe = /\.(c|cc|cpp|asm)$/;
+
+function sourceList(): string {
+  const paths: string[] = [];
+  for (const dir of sourceDirs) {
+    for (const path of readdirSync(dir, { recursive: true, encoding: "utf8" })) {
+      if (sourceExtRe.test(path)) {
+        paths.push(join(dir, path));
+      }
+    }
+  }
+  return paths.sort().join("\n");
+}
+
+function needsGenerate(sources: string): boolean {
+  if (!existsSync(buildFile) || !existsSync(generatedFile)) {
+    return true;
+  }
+  const generated = statSync(generatedFile).mtimeMs;
+  if (premakeFiles.some((path) => statSync(path).mtimeMs > generated)) {
+    return true;
+  }
+  return readFileSync(generatedFile, "utf8") !== sources;
+}
+
+function ninjaFiles(dir: string): string[] {
+  const paths: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      paths.push(...ninjaFiles(path));
+    } else if (entry.name.endsWith(".ninja")) {
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+function addResources(text: string, path: string): string {
+  // one pack rule + always-dirty phony per project file, shared by its configs
+  const packRules = new Set<string>();
+  for (const [project, target, source] of resources) {
+    if (!path.endsWith(`${project}.ninja`)) {
+      continue;
+    }
+    const targetRe = target.replace(".", "\\.");
+    const re = new RegExp(`^build (../../out/([^/]+)/${targetRe})( \\| [^:]+)?: link_msc-v145 (.+)$`, "gm");
+    text = text.replace(re, (line, output, config, implicitOutputs, inputs) => {
+      const resource = `../../out/${config}/obj/${project}/${project}.res`;
+      if (inputs.includes(resource)) {
+        return line;
+      }
+      // The prebuild packs IDR_EMBEDDED_PAK into out/<cfg>/, so the .res waits
+      // for that stamp and gets the archive path via the EMBEDDED_PAK resdefine
+      // premake sets: embedded.lzsa (also holding libsumatrapdf.dll & co) for
+      // SumatraPDF.exe, embedded-static.lzsa for SumatraPDF-static.exe.
+      // Mixed slashes on purpose: QM() turns the path into an RC string, and
+      // rc mangles ".." after "/" into "..." (./../../out -> ./.../.../out)
+      // while a backslash before the config name is an escape (out\rel64
+      // reads as out<CR>el64). "\.." and "/rel64" are both left alone.
+      let deps = "";
+      let flags = "";
+      let pack = "";
+      if (project === "SumatraPDF") {
+        const stamp = `../../out/${config}/obj/SumatraPDF/SumatraPDF.prebuild`;
+        const archive = `../../out/${config}/embedded.lzsa`;
+        const bins = ["libsumatrapdf.dll", "PdfFilter.dll", "PdfPreview.dll", "sumatrapdf-tool.exe"];
+        const bin = bins.map((name) => `../../out/${config}/${name}`);
+        pack = packArchiveEdge(text, project, archive, stamp, bin, packRules);
+        deps = ` | ${archive}`;
+        flags = `\n  resflags = /D EMBEDDED_PAK=.\\..\\..\\out/${config}/embedded.lzsa`;
+      } else if (project === "SumatraPDF-static") {
+        const stamp = `../../out/${config}/obj-s/SumatraPDF-static/SumatraPDF-static.prebuild`;
+        const archive = `../../out/${config}/embedded-static.lzsa`;
+        pack = packArchiveEdge(text, project, archive, stamp, [], packRules);
+        deps = ` | ${archive}`;
+        flags = `\n  resflags = /D EMBEDDED_PAK=.\\..\\..\\out/${config}/embedded-static.lzsa`;
+      }
+      return `${pack}build ${resource}: rc_msc-v145 ${source}${deps}${flags}\nbuild ${output}${implicitOutputs ?? ""}: link_msc-v145 ${resource} ${inputs}`;
+    });
+  }
+  return text;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// The premake prebuild stamp has no inputs, so Ninja runs it once per clean
+// build and the archive it packed then went stale for good (a manual generated
+// later never made it into the exe). Re-pack on every invocation instead: the
+// edge depends on a phony target that never exists, so it is always dirty, and
+// restat stops there when MakeLZSA left the archive (and its mtime) unchanged.
+// The .res then depends on the archive itself. The prebuild stamp keeps its
+// command (every .obj waits for it); ordering after it avoids two packs racing.
+function packArchiveEdge(
+  text: string,
+  project: string,
+  archive: string,
+  stamp: string,
+  bins: string[],
+  packRules: Set<string>,
+): string {
+  const cmdRe = new RegExp(
+    `^build ${escapeRe(stamp)}: prebuild[^\\n]*\\n  prebuildcommands = cmd /C "(call [^\\n]*?pack-embedded-prebuild\\.cmd[^\\n]*?) && type nul`,
+    "m",
+  );
+  const packCmd = text.match(cmdRe)?.[1];
+  if (!packCmd) {
+    throw new Error(`ninja: no pack-embedded-prebuild command found for ${stamp}`);
+  }
+  const always = `always_pack_${project}`;
+  let out = "";
+  if (!packRules.has(project)) {
+    packRules.add(project);
+    out += `rule pack_${project}\n  command = cmd /C "$packcmd"\n  description = Packing $out\n  restat = 1\nbuild ${always}: phony\n`;
+  }
+  out += `build ${archive}: pack_${project} | ${always} || ${[stamp, ...bins].join(" ")}\n  packcmd = ${packCmd}\n`;
+  return out;
+}
+
+function fixEscapes(): void {
+  for (const path of ninjaFiles(ninjaDir)) {
+    const text = readFileSync(path, "utf-8");
+    let fixed = text.replace(/\$+\(/g, () => "$$(");
+    fixed = fixed
+      .split("\n")
+      .map((line) => {
+        // Visual Studio's Unicode character set adds these definitions itself.
+        if ((line.startsWith("cflags_") || line.startsWith("cxxflags_")) && !line.includes('/D"UNICODE"')) {
+          line = `${line} /D"UNICODE" /D"_UNICODE"`;
+        }
+        // MSVC requires debug information for useful ASan reports and otherwise
+        // emits C5072, which our project correctly promotes to an error.
+        if (
+          (line.startsWith("cflags_") || line.startsWith("cxxflags_")) &&
+          line.includes("/fsanitize=address") &&
+          !line.includes("/Zi")
+        ) {
+          line = `${line} /Zi`;
+        }
+        if (
+          (line.startsWith("cflags_") || line.startsWith("cxxflags_")) &&
+          line.includes("/fsanitize=address") &&
+          !line.includes("/FS")
+        ) {
+          return `${line} /FS`;
+        }
+        // PCH compiles must scan headers. Without /showIncludes, a Base.h
+        // change leaves a stale .pch and /Yu compiles against that snapshot.
+        if (line.includes("/Yc$pchheader") && !line.includes("/showIncludes")) {
+          line = line.replace(" /c $in", " /showIncludes /c $in");
+        }
+        // rc.exe rejects options placed after the input file.
+        if (line.startsWith("  command = rc ")) {
+          return line.replace(" $in $resflags", " $resflags $in");
+        }
+        if (line.includes("nasm.exe")) {
+          return line.replaceAll('\\"', '"');
+        }
+        if (line.includes("prebuildcommands =")) {
+          return line.replaceAll('\\"', '""');
+        }
+        return line;
+      })
+      .join("\n");
+    // Premake's pch rule has no deps = msvc, so header changes are invisible.
+    fixed = fixed.replace(/(  command = cl[^\n]*\/Yc\$pchheader[^\n]*\n)(?!  deps = )/g, "$1  deps = msvc\n");
+    // Premake's Ninja backend does not apply the Synctex file filter.
+    fixed = fixed.replace(/(build [^\n]* \.\.\/\.\.\/ext\/synctex\/[^\n]*\n  cflags = [^\n]*)/g, (line) => {
+      return line.includes('/wd"4244"') ? line : `${line} /wd"4244" /wd"4267"`;
+    });
+    // link.exe does not update .exp files, so they cannot be Ninja outputs.
+    fixed = fixed.replace(/ \| ([^ \n]+\.exp) /g, " | ");
+    fixed = fixed.replace(/(build [^\n]*\.dll) \| [^\n]*\.lib:/g, "$1:");
+    // dll_shared_lib_dirs() sets targetdir to the intermediate dir but links
+    // with /OUT into out/<cfg>/, so rewrite both the build edges and the phony
+    // aliases premake points at the intermediate path.
+    for (const name of sharedLibs) {
+      const re = new RegExp(`(\\.\\./out/[^/\\s]+)/obj/${name}\\.dll`, "g");
+      fixed = fixed.replace(re, `$1/${name}.dll`);
+    }
+    // link.exe leaves an unchanged import library untouched. Model it as a
+    // phony dependency, otherwise Ninja relinks this DLL on every invocation.
+    fixed = fixed.replace(/^build (\.\.\/\.\.\/out\/[^/]+)\/obj\/libsumatrapdf\.lib: phony .+\n/gm, "");
+    fixed = fixed.replace(
+      /^build (\.\.\/\.\.\/out\/[^/]+)\/libsumatrapdf\.dll(?: \| [^:]+)?:(.*)$/gm,
+      "build $1/libsumatrapdf.dll:$2",
+    );
+    // The archive prebuild must wait for every binary it packages.
+    fixed = fixed.replace(
+      /^build (\.\.\/\.\.\/out\/([^/]+)\/obj\/SumatraPDF\/SumatraPDF\.prebuild): prebuild.*$/gm,
+      "build $1: prebuild || ../../out/$2/libsumatrapdf.dll ../../out/$2/PdfFilter.dll ../../out/$2/PdfPreview.dll ../../out/$2/sumatrapdf-tool.exe",
+    );
+    fixed = addResources(fixed, path);
+    const dlls = [...fixed.matchAll(/^build (\.\.\/\.\.\/out\/[^/]+)\/libsumatrapdf\.dll: link_msc-v145/gm)];
+    for (const [, outputDir] of dlls) {
+      fixed += `\nbuild ${outputDir}/obj/libsumatrapdf.lib: phony ${outputDir}/libsumatrapdf.dll\n`;
+    }
+    fixed = fixed.replace(/\/D"([^"]+)="([^"]+)""/g, (_match, name, value) => `/D${name}=\\"${value}\\"`);
+    if (fixed !== text) {
+      writeFileSync(path, fixed);
+    }
+  }
+}
+
+function createOutputDirs(): void {
+  for (const path of ninjaFiles(ninjaDir)) {
+    const text = readFileSync(path, "utf-8");
+    for (const line of text.split("\n")) {
+      const outputs = line.match(/^build (.+?):/)?.[1];
+      if (!outputs) {
+        continue;
+      }
+      for (const output of outputs.split(" ")) {
+        if (!output.startsWith("../../out/")) {
+          continue;
+        }
+        mkdirSync(dirname(join(ninjaDir, output)), { recursive: true });
+      }
+    }
+  }
+}
+
+export async function ensureNinja(): Promise<void> {
+  const sources = sourceList();
+  const generate = needsGenerate(sources);
+  if (generate) {
+    await runLogged(join("bin", "premake5.exe"), ["--cc=msc-v145", "ninja"]);
+  }
+  fixEscapes();
+  createOutputDirs();
+  if (generate) {
+    writeFileSync(generatedFile, sources);
+  }
+}
+
+if (import.meta.main) {
+  await ensureNinja();
+}

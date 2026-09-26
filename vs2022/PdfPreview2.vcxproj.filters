@@ -1,0 +1,123 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="mui">
+      <UniqueIdentifier>{1092880B-7C9B-887C-0517-9F7C711F947C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="previewer2">
+      <UniqueIdentifier>{70005D87-5CB8-9ED4-C5BF-7730B19639C5}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="utils">
+      <UniqueIdentifier>{169C8510-82B0-ADC1-4B32-5121B705AAF2}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\src\PreviewPipe.h" />
+    <ClInclude Include="..\src\RegistryPreview.h" />
+    <ClInclude Include="..\src\SumatraConfig.h" />
+    <ClInclude Include="..\src\mui\Mui.h">
+      <Filter>mui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\previewer2\PdfPreviewBase.h">
+      <Filter>previewer2</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\BaseUtil.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\ColorUtil.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\Dpi.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\FileUtil.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\GeomUtil.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\Log.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\StrFormat.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\StrUtil.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\StrVec.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\StrconvUtil.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\TempAllocator.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\WinDynCalls.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\WinUtil.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\CrashHandlerNoOp.cpp" />
+    <ClCompile Include="..\src\PreviewPipe.cpp" />
+    <ClCompile Include="..\src\RegistryPreview.cpp" />
+    <ClCompile Include="..\src\SumatraConfig.cpp" />
+    <ClCompile Include="..\src\mui\Mui.cpp">
+      <Filter>mui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\previewer2\PdfPreview.cpp">
+      <Filter>previewer2</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\previewer2\PdfPreviewDll.cpp">
+      <Filter>previewer2</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\BaseUtil.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\ColorUtil.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\Dpi.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\FileUtil.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\GeomUtil.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\Log.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\StrFormat.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\StrUtil.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\StrVec.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\StrconvUtil.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\TempAllocator.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\WinDynCalls.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\WinUtil.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="..\src\previewer2\PdfPreview.rc">
+      <Filter>previewer2</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+</Project>

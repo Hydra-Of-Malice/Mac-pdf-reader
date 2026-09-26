@@ -1,0 +1,140 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="ext">
+      <UniqueIdentifier>{7670880B-E279-887C-6BF5-9E7CD7FD937C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\a-zlib">
+      <UniqueIdentifier>{642AAB7D-50E2-ECCA-B9E9-C526A5C087BB}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\lzma">
+      <UniqueIdentifier>{39F81ED9-25C5-79E4-4EDE-678C3A0AAF72}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\lzma\C">
+      <UniqueIdentifier>{CBF0BD9C-B7A8-FFE9-20B0-D8450C879ADA}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src">
+      <UniqueIdentifier>{2DAB880B-99B4-887C-2230-9F7C8E38947C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\base">
+      <UniqueIdentifier>{F7972DCF-E364-88DA-0C7E-7682F8A9BD68}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\gui">
+      <UniqueIdentifier>{210530A9-8DE4-AE44-96FC-391B025B15A6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\tools">
+      <UniqueIdentifier>{8DED2DB6-F957-E22C-4296-93D2AE3FC081}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\ext\a-zlib\zlib.h">
+      <Filter>ext\a-zlib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\Base.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\ByteReaderWriter.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\CmdLineArgs.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\DirScan.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\File.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\Log.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\LzmaSimpleArchive.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\Pixmap.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\StrQueue.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\Win.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\WinDynCalls.h">
+      <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\Dpi.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\ext\a-zlib\zlib.c">
+      <Filter>ext\a-zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma\C\Bra86.c">
+      <Filter>ext\lzma\C</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma\C\LzFind.c">
+      <Filter>ext\lzma\C</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma\C\LzmaDec.c">
+      <Filter>ext\lzma\C</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma\C\LzmaEnc.c">
+      <Filter>ext\lzma\C</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\CrashHandlerNoOp.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\Base.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\ByteReaderWriter.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\CmdLineArgs.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\DirScan.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\File.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\LogNoOp.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\LzmaSimpleArchive.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\Pixmap.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\StrQueue.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\Win.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\WinDynCalls.cpp">
+      <Filter>src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\Dpi.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tools\MakeLzSA.cpp">
+      <Filter>src\tools</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\ext\a-zlib\LICENSE">
+      <Filter>ext\a-zlib</Filter>
+    </None>
+    <None Include="..\ext\a-zlib\version.txt">
+      <Filter>ext\a-zlib</Filter>
+    </None>
+    <None Include="..\ext\a-zlib\zlib.3.pdf">
+      <Filter>ext\a-zlib</Filter>
+    </None>
+  </ItemGroup>
+</Project>

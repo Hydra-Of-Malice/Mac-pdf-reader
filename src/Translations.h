@@ -1,0 +1,35 @@
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
+   License: Simplified BSD (see COPYING.BSD) */
+
+namespace trans {
+
+int GetLangsCount();
+
+Str GetCurrentLangCode();
+
+void SetCurrentLangByCode(Str langCode);
+Str ValidateLangCode(Str langCode);
+
+Str GetTranslation(Str s);
+TempStr GetLangCodeByIdxTemp(int idx);
+TempStr GetLangNameByIdxTemp(int idx);
+bool IsCurrLangRtl();
+Str DetectUserLang();
+void Destroy();
+
+} // namespace trans
+
+Str Tr(Str s);
+inline Str Tr(const char* s) {
+    return Tr(Str(s));
+}
+template <int N>
+inline Str Tr(const char (&s)[N]) {
+    return Tr(Str((char*)s, N - 1));
+}
+
+// TrN() marks strings that need to be translated but are used in a context
+// that doesn't allow calling Trans::GetTranslationTemp() (e.g. when used as part
+// of a struct). This allows the translation manager script to see the string
+// but they'll need additional code that does Trans::GetTranslationTemp() on them
+#define TrN(x) StrL(x)

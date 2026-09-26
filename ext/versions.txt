@@ -1,0 +1,125 @@
+Project         Version    Date
+----------------------------------
+mupdf           1.28.2     2026-08-03
+  https://github.com/ArtifexSoftware/mupdf/releases/tag/1.28.2
+  our changes to the vendored tree are recorded in ext/patches/ (see its README)
+
+libarchive     3.8.8      2026-06-23
+  https://github.com/libarchive/libarchive
+  https://github.com/libarchive/libarchive/releases/tag/v3.8.8
+  amalgamated into ext/a-libarchive by cmd/amalgam.ts -libarchive, see ext/a-libarchive/version.txt
+
+mujs           1.3.9
+  https://mujs.com/
+  https://github.com/ArtifexSoftware/mujs/commit/e892c9fdbbddba94e52f656ccb378ed4885e30cc
+
+bzip2           1.0.8      2019-07-21
+  https://www.sourceware.org/bzip2/
+
+chmdec          dist       2026-07-28
+  https://github.com/kjk/chmdec
+  commit dbf9c5a899709543724dca344ecfb0b6a21d45a4
+  amalgamated dist/chm.c + dist/chm.h only (was ext/libchm)
+
+freetype        2.14.3
+  https://github.com/ArtifexSoftware/thirdparty-freetype2/tree/artifex
+  mupdf thirdparty submodule, commit 0a0221a1347e2f1e07c395263540026e9a0aa7c7
+  amalgamated into ext/a-freetype by cmd/amalgam.ts -freetype, see ext/a-freetype/version.txt
+
+gumbo           ???
+  https://github.com/ArtifexSoftware/thirdparty-gumbo-parser/tree/artifex
+
+harfbuzz        13.0.1
+  https://harfbuzz.org
+  mupdf thirdparty submodule, commit c28ba35a1e6dc4b6b32e2b1d11fd2a408f6c86bb
+  amalgamated into ext/a-harfbuzz by cmd/amalgam.ts -harfbuzz, see ext/a-harfbuzz/version.txt
+
+jbig2dec        0.20
+  https://github.com/ArtifexSoftware/jbig2dec/commits/artifex
+  amalgamated into ext/a-jbig2dec by cmd/amalgam.ts -jbig2dec, see ext/a-jbig2dec/version.txt
+
+libjpeg-turbo   3.1.4.1    2026-03-27
+  https://github.com/libjpeg-turbo/libjpeg-turbo/tags
+  https://github.com/libjpeg-turbo/libjpeg-turbo/releases/tag/3.1.4.1
+  vendored src/ + simd/ (x86/x86-64 NASM); jconfig.h, jconfigint.h, jversion.h
+  hand-generated (v8 API). See ext/libjpeg-turbo/src/jconfig.h
+
+djvudec         main       2026-08-01
+  https://github.com/kjk/djvudec
+  commit c8bf1b3e6704fd99d6feaba8d8ebc417e013bdb8
+  amalgamated dist/djvu.c + dist/djvu.h only
+
+libwebp         1.6.0      2025-06-30
+  https://github.com/webmproject/libwebp
+  https://github.com/webmproject/libwebp/releases/tag/v1.6.0
+  commit 4fa21912338357f89e4fd51cf2368325b59e9bd9
+  amalgamated into ext/a-libwebp by cmd/amalgam.ts -libwebp, see ext/a-libwebp/version.txt
+
+lzma            9.22b      2011-04-19
+  https://www.7-zip.org/sdk.html
+
+lcms2           2.19.1     (lcms2mt fork)
+  https://github.com/ArtifexSoftware/thirdparty-lcms2
+  mupdf thirdparty submodule, commit d69c64417c4a33a4629957fc0e08f4f4c5abcc3d
+  amalgamated into ext/a-lcms2 by cmd/amalgam.ts -lcms2, see ext/a-lcms2/version.txt
+
+MinHook         master     20201-01-1
+  https://github.com/TsudaKageyu/minhook
+
+openjpeg        2.5.4      (post-release dev snapshot)
+  mupdf thirdparty submodule, commit 957029eb875eee1118743f200cb86da9d8289de2
+
+brotli          1.2.0
+  https://github.com/google/brotli
+  mupdf thirdparty submodule, commit 2523f3314501aa5c90e561922b2e668b3ccee26e
+  amalgamated into ext/a-brotli by cmd/amalgam.ts -brotli, see ext/a-brotli/version.txt
+
+cmark-gfm       0.29.0.gfm.13
+  https://github.com/github/cmark-gfm
+  mupdf thirdparty submodule, commit 74e0f5b6b62bbdd1e262c92f4bb2c6c871c6307e
+  markdown parser for mupdf (FZ_ENABLE_MD); parser-only subset, generated
+  config headers copied into ext/cmark-gfm/src
+
+synctex         1.16       2011-06-14
+  https://itexmac.sourceforge.net/SyncTeX.html
+
+UnRAR           7.1.6
+  https://www.rarlab.com/rar_add.htm
+  amalgamated into ext/a-unrar by cmd/amalgam.ts -unrar, see ext/a-unrar/version.txt
+
+zlib            1.3.2
+  https://www.zlib.net/
+
+zlib-ng         2.0.6      2021-12-24
+  https://github.com/zlib-ng/zlib-ng
+  https://github.com/zlib-ng/zlib-ng/tree/2.0.x
+
+extract         trunk
+  https://github.com/ArtifexSoftware/extract
+
+dav1d           1.5.4      2026-07-14
+  https://code.videolan.org/videolan/dav1d
+  https://code.videolan.org/videolan/dav1d/-/tags/1.5.4
+
+heicdec         dist       2026-07-28
+  https://github.com/kjk/heicdec
+  commit c0aa68eb43de852706069755b0132ac2ec951dc2
+  amalgamated dist/heic.c + dist/heic.h only
+  HEVC pure-C; AV1 via dav1d; unci via zlib/brotli when present.
+  Build flags: HEIC_HAVE_DAV1D, HEIC_HAVE_ZLIB, HEIC_HAVE_BROTLI.
+  Replaces libheif.
+
+darkmodelib     0.76.0     2026-08-23
+  https://github.com/ozone10/win32-darkmodelib
+  https://github.com/ozone10/win32-darkmodelib/commit/25298e8a92ed0fac8e17b3e6878df5bbd7a5d699
+
+jxldec          dist       2026-08-11
+  https://github.com/kjk/jxldec
+  commit 54c8f53001b5f82886a8d96526ad1b0281e7c89a
+  amalgamated dist/jxl.c + dist/jxl.h only
+  Replaces libjxl + highway + skcms for JPEG XL decode.
+
+zopfli         1.0.3+     2024-04-11
+  https://github.com/google/zopfli
+  https://github.com/google/zopfli/commit/ccf9f0588d4a4509cb1040310ec122243e670ee6
+  amalgamated as ext/a-zopfli (zopfli.cpp + public headers + COPYING)

@@ -1,0 +1,10 @@
+# third-party / vendored code: keep edits minimal and match the local style
+ext/
+
+# build output and scratch dirs
+out/
+bin/
+deps/
+node_modules/
+.work/
+tmp/

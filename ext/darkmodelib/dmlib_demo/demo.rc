@@ -1,0 +1,248 @@
+// Microsoft Visual C++ generated resource script.
+//
+#include "resource.h"
+#include "..\src\Version.h"
+
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#ifndef APSTUDIO_INVOKED
+#include "targetver.h"
+#endif
+#define APSTUDIO_HIDDEN_SYMBOLS
+#include "windows.h"
+#undef APSTUDIO_HIDDEN_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+// English (United States) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Icon
+//
+
+// Icon with lowest ID value placed first to ensure application icon
+// remains consistent on all systems.
+IDI_DEMO                ICON                    "demo.ico"
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Menu
+//
+
+IDC_DEMO MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "E&xit",                       IDM_EXIT
+    END
+    POPUP "&Mode"
+    BEGIN
+        MENUITEM "&Dark",                       IDM_DARK
+        MENUITEM "&Light",                      IDM_LIGHT
+        MENUITEM "&Classic",                    IDM_CLASSIC
+    END
+    POPUP "&Dialogs"
+    BEGIN
+        MENUITEM "Choose &Color",               IDM_CHOOSECOLOR
+        MENUITEM "Choose &Font",                IDM_CHOOSEFONT
+        MENUITEM "&Task Dialog",                IDM_TASKDIALOG
+        MENUITEM "&Message Box",                IDM_MSGBOX
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&About ...",                  IDM_ABOUT
+    END
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Accelerator
+//
+
+IDC_DEMO ACCELERATORS
+BEGIN
+    "?",            IDM_ABOUT,              ASCII,  ALT
+    "/",            IDM_ABOUT,              ASCII,  ALT
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Dialog
+//
+
+IDD_ABOUTBOX DIALOGEX 0, 0, 170, 62
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "About darkmodelib demo"
+FONT 9, "Segoe UI", 0, 0, 0x1
+BEGIN
+    ICON            IDI_DEMO,IDC_STATIC,14,14,21,20
+    LTEXT           "Darkmodelib demo",IDC_ABOUT_VERSION,42,14,114,8,SS_NOPREFIX
+    LTEXT           DM_COPYRIGHT,IDC_STATIC,42,26,114,8
+    DEFPUSHBUTTON   "OK",IDOK,113,41,50,14,WS_GROUP
+END
+
+IDD_DARK_FONT_DIALOG DIALOG 13, 54, 243, 234
+STYLE DS_SETFONT | DS_MODALFRAME | DS_3DLOOK | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Font"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "&Font:",1088,7,7,98,9
+    COMBOBOX        1136,7,16,98,76,CBS_SIMPLE | CBS_OWNERDRAWFIXED | CBS_AUTOHSCROLL | CBS_SORT | CBS_HASSTRINGS | CBS_DISABLENOSCROLL | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Font st&yle:",1089,114,7,74,9
+    COMBOBOX        1137,114,16,74,76,CBS_SIMPLE | CBS_OWNERDRAWFIXED | CBS_AUTOHSCROLL | CBS_HASSTRINGS | CBS_DISABLENOSCROLL | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "&Size:",1090,198,7,36,9
+    COMBOBOX        1138,198,16,36,76,CBS_SIMPLE | CBS_AUTOHSCROLL | CBS_SORT | CBS_HASSTRINGS | CBS_DISABLENOSCROLL | WS_VSCROLL | WS_TABSTOP
+    GROUPBOX        "Effects",1072,7,97,98,76,WS_GROUP
+    CONTROL         "Stri&keout",1040,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,13,111,90,10
+    CONTROL         "&Underline",1041,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,13,127,90,10
+    LTEXT           "&Color:",1091,13,144,89,9
+    COMBOBOX        1139,13,155,85,100,CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_AUTOHSCROLL | CBS_HASSTRINGS | WS_BORDER | WS_VSCROLL | WS_TABSTOP
+    GROUPBOX        "Sample",1073,114,97,120,43,WS_GROUP
+    CTEXT           "AaBbYyZz",1092,116,106,117,33,SS_NOPREFIX | NOT WS_VISIBLE
+    LTEXT           "",1093,7,178,227,20,SS_NOPREFIX | NOT WS_GROUP
+    LTEXT           "Sc&ript:",1094,114,145,118,9
+    COMBOBOX        1140,114,155,120,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_HASSTRINGS | WS_BORDER | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "<A>Show more fonts</A>",1592,"SysLink",WS_TABSTOP,7,199,227,9
+    DEFPUSHBUTTON   "OK",IDOK,141,215,45,14,WS_GROUP
+    PUSHBUTTON      "Cancel",IDCANCEL,190,215,45,14,WS_GROUP
+    PUSHBUTTON      "&Apply",1026,92,215,45,14,WS_GROUP
+    PUSHBUTTON      "&Help",1038,43,215,45,14,WS_GROUP
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// DESIGNINFO
+//
+
+#ifdef APSTUDIO_INVOKED
+GUIDELINES DESIGNINFO
+BEGIN
+    IDD_ABOUTBOX, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 163
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 55
+    END
+END
+#endif    // APSTUDIO_INVOKED
+
+
+#ifdef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// TEXTINCLUDE
+//
+
+1 TEXTINCLUDE 
+BEGIN
+    "resource.h\0"
+END
+
+2 TEXTINCLUDE 
+BEGIN
+    "#ifndef APSTUDIO_INVOKED\r\n"
+    "#include ""targetver.h""\r\n"
+    "#endif\r\n"
+    "#define APSTUDIO_HIDDEN_SYMBOLS\r\n"
+    "#include ""windows.h""\r\n"
+    "#undef APSTUDIO_HIDDEN_SYMBOLS\r\n"
+    "\0"
+END
+
+3 TEXTINCLUDE 
+BEGIN
+    "\r\n"
+    "\0"
+END
+
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// String Table
+//
+
+STRINGTABLE
+BEGIN
+    IDS_APP_TITLE           "Darkmodelib demo"
+    IDC_DEMO                "demo"
+END
+
+#endif    // English (United States) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////////////////////////
+// English (United Kingdom) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENG)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Version
+//
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION DM_VERSION_MAJOR, DM_VERSION_MINOR, DM_VERSION_REVISION, 0
+ PRODUCTVERSION DM_VERSION_MAJOR, DM_VERSION_MINOR, DM_VERSION_REVISION, 0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "ozone10"
+            VALUE "FileDescription", "Darkmodelib control preview"
+            VALUE "FileVersion", STR(DM_VERSION_MAJOR) "." STR(DM_VERSION_MINOR) "." STR(DM_VERSION_REVISION) ".0"
+            VALUE "InternalName", "dmlib-demo.exe"
+            VALUE "LegalCopyright", DM_COPYRIGHT
+            VALUE "OriginalFilename", "dmlib-demo.exe"
+            VALUE "ProductName", "dmlib-demo"
+            VALUE "ProductVersion", STR(DM_VERSION_MAJOR) "." STR(DM_VERSION_MINOR) "." STR(DM_VERSION_REVISION) ".0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+#endif    // English (United Kingdom) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+
+/////////////////////////////////////////////////////////////////////////////
+#endif    // not APSTUDIO_INVOKED
+

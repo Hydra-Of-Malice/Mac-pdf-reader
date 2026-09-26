@@ -1,0 +1,265 @@
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
+   License: Simplified BSD (see COPYING.BSD) */
+
+#include "base/Base.h"
+#include "base/File.h"
+#include "base/StrQueue.h"
+
+#include "base/Win.h"
+
+#include "base/DirScan.h"
+
+void AdvanceDirIter(DirIter::iterator* it, int n);
+void CloseDirIter(DirIter::iterator* it);
+
+DirIter::DirIter(Str dir) : dir(dir) {}
+
+DirIter::iterator::iterator(const DirIter* di, bool didFinish) {
+    this->di = di;
+    this->dirsToVisit.Append(di->dir);
+    this->didFinish = didFinish;
+    this->data.fd = &this->fd;
+    AdvanceDirIter(this, 1);
+}
+
+DirIter::iterator::iterator(const iterator& that) {
+    *this = that;
+}
+
+DirIter::iterator& DirIter::iterator::operator=(const iterator& that) {
+    if (this == &that) {
+        return *this;
+    }
+    CloseDirIter(this);
+    this->di = that.di;
+    this->didFinish = that.didFinish;
+    this->dirsToVisit = that.dirsToVisit;
+    this->currDir = that.currDir;
+    this->data = that.data;
+    this->fd = that.fd;
+    this->data.fd = &this->fd;
+    return *this;
+}
+
+DirIter::iterator::~iterator() {
+    CloseDirIter(this);
+}
+
+DirIter::iterator DirIter::begin() const {
+    return {this, false};
+}
+
+DirIter::iterator DirIter::end() const {
+    return {this, true};
+}
+
+DirIterEntry* DirIter::iterator::operator*() {
+    if (didFinish) {
+        return nullptr;
+    }
+    return &data;
+}
+
+// postfix increment
+DirIter::iterator DirIter::iterator::operator++(int) {
+    auto res = *this;
+    AdvanceDirIter(this, 1);
+    return res;
+}
+
+DirIter::iterator& DirIter::iterator::operator++() {
+    AdvanceDirIter(this, 1);
+    return *this;
+}
+
+bool operator==(const DirIter::iterator& a, const DirIter::iterator& b) {
+    return (a.di == b.di) && (a.didFinish == b.didFinish);
+};
+
+bool operator!=(const DirIter::iterator& a, const DirIter::iterator& b) {
+    return (a.di != b.di) || (a.didFinish != b.didFinish);
+};
+
+i64 GetFileSize(DirIterEntry* de) {
+    return de ? de->size : 0;
+}
+
+bool IsDirectory(DirIterEntry* de) {
+    return de && de->isDir;
+}
+
+bool IsRegularFile(DirIterEntry* de) {
+    return de && de->isFile;
+}
+
+struct DirTraverseThreadData {
+    StrQueue* queue = nullptr; // we don't own it
+    Str dir;
+    bool recurse = false;
+    ~DirTraverseThreadData() { str::Free(dir); }
+};
+
+static void DirTraverseThread(DirTraverseThreadData* td) {
+    DirIter di(td->dir);
+    di.includeFiles = true;
+    di.includeDirs = false;
+    di.recurse = td->recurse;
+    for (DirIterEntry* de : di) {
+        td->queue->append(de->filePath);
+    }
+    td->queue->MarkFinished();
+    delete td;
+}
+
+void StartDirTraverseAsync(StrQueue* queue, Str dir, bool recurse) {
+    auto* td = new DirTraverseThreadData{queue, str::Dup(dir), recurse};
+    auto fn = MkFunc0(DirTraverseThread, td);
+    RunAsync(fn, StrL("DirTraverseThread"));
+}
+
+static i64 GetWinFileSize(WIN32_FIND_DATAW* fd) {
+    ULARGE_INTEGER ul;
+    ul.HighPart = fd->nFileSizeHigh;
+    ul.LowPart = fd->nFileSizeLow;
+    return (i64)ul.QuadPart;
+}
+
+// try to filter out things that are not files
+// or not meant to be used by other applications
+//
+// Takes the whole find data because the reparse tag is in dwReserved0, and
+// only there when the entry is a reparse point.
+static bool IsRegularFile(const WIN32_FIND_DATAW& fd) {
+    DWORD fileAttr = fd.dwFileAttributes;
+    if (fileAttr & (FILE_ATTRIBUTE_DEVICE | FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_TEMPORARY)) {
+        return false;
+    }
+    if (fileAttr & FILE_ATTRIBUTE_REPARSE_POINT) {
+        // A symlink stands for a file somewhere else rather than being one. A
+        // cloud provider's placeholder is the file: OneDrive puts a reparse
+        // point on everything it syncs, and reading one fetches the contents.
+        return !IsReparseTagNameSurrogate(fd.dwReserved0);
+    }
+    // Offline with no reparse point is the older kind of archived storage,
+    // where reading can block for a very long time. A cloud placeholder is
+    // marked offline as well, but it was already let through above.
+    return !(fileAttr & FILE_ATTRIBUTE_OFFLINE);
+}
+
+static bool IsDirectoryAttr(DWORD fileAttr) {
+    return (fileAttr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+// Whether the entry stands for something elsewhere rather than being it.
+// Symlinks and junctions are such name surrogates, and descending into one can
+// loop or count the same files twice: a profile has
+// AppData\Local\"Application Data" pointing back at AppData\Local. A cloud
+// provider's reparse point is not a surrogate: OneDrive marks every folder it
+// syncs with one, and those are ordinary directories that only look like
+// something else. Treating them as surrogates hides all of OneDrive.
+//
+// dwReserved0 holds the reparse tag, but only when the entry is a reparse
+// point, which is why this takes the whole find data. FindExInfoBasic still
+// fills it in; it only leaves out cAlternateFileName.
+static bool IsNameSurrogate(const WIN32_FIND_DATAW& fd) {
+    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        return false;
+    }
+    return IsReparseTagNameSurrogate(fd.dwReserved0);
+}
+
+static bool IsSpecialDir(Str s) {
+    return str::Eq(s, StrL(".")) || str::Eq(s, StrL(".."));
+}
+
+// Store apps put 0-byte execution aliases under WindowsApps with tag
+// IO_REPARSE_TAG_APPEXECLINK. FindFirstFile reports size 0; the reparse
+// buffer names the real package executable, whose size is what to show.
+#ifndef IO_REPARSE_TAG_APPEXECLINK
+constexpr ULONG IO_REPARSE_TAG_APPEXECLINK = 0x8000001BL;
+#endif
+
+static void SetDirIterData(DirIter::iterator* it, TempStr name, TempStr path, bool isFile, bool isDir) {
+    it->data.fd = &it->fd;
+    it->data.name = name;
+    it->data.filePath = path;
+    it->data.size = GetWinFileSize(&it->fd);
+    it->data.accessTime = it->fd.ftLastAccessTime;
+    it->data.modificationTime = it->fd.ftLastWriteTime;
+    it->data.isFile = isFile;
+    it->data.isDir = isDir;
+}
+
+void CloseDirIter(DirIter::iterator* it) {
+    wstr::FreePtr(&it->pattern);
+    SafeFindClose(&it->h);
+}
+
+void AdvanceDirIter(DirIter::iterator* it, int n) {
+    ReportIf(n != 1);
+    if (it->didFinish) {
+        return;
+    }
+    if (it->data.stopTraversal) {
+        // could have been set by user accessing prev traversal
+        it->didFinish = true;
+        return;
+    }
+
+    bool includeFiles = it->di->includeFiles;
+    bool includeDirs = it->di->includeDirs;
+    bool recur = it->di->recurse;
+
+    bool ok;
+    bool isFile;
+    bool isDir;
+    TempStr name;
+    TempStr path;
+
+NextDir:
+    if (len(it->pattern) == 0) {
+        int nDirs = len(it->dirsToVisit);
+        if (nDirs == 0) {
+            goto DidFinish;
+        }
+        it->currDir = it->dirsToVisit.RemoveAt(nDirs - 1);
+        TempWStr ws = ToWStrTemp(it->currDir);
+        it->pattern = path::Join(ws, WStrL(L"*"));
+        it->h = FindFirstFileW(it->pattern.s, &it->fd);
+        if (!IsValidHandle(it->h)) {
+            goto DidFinish;
+        }
+    } else {
+        ok = FindNextFileW(it->h, &it->fd);
+        if (!ok) {
+            CloseDirIter(it);
+            goto NextDir;
+        }
+    }
+    while (true) {
+        isFile = IsRegularFile(it->fd);
+        isDir = IsDirectoryAttr(it->fd.dwFileAttributes);
+        name = ToUtf8Temp(it->fd.cFileName);
+        path = path::JoinTemp(it->currDir, name);
+        SetDirIterData(it, name, path, isFile, isDir);
+        if (isFile && includeFiles) {
+            return;
+        }
+        if (isDir && !IsSpecialDir(name)) {
+            if (recur && !IsNameSurrogate(it->fd)) {
+                it->dirsToVisit.Append(path);
+            }
+            if (includeDirs) {
+                return;
+            }
+        }
+        ok = FindNextFileW(it->h, &it->fd);
+        if (!ok) {
+            CloseDirIter(it);
+            goto NextDir;
+        }
+    };
+DidFinish:
+    CloseDirIter(it);
+    it->didFinish = true;
+}

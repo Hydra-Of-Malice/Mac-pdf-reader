@@ -1,0 +1,53 @@
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
+   License: GPLv3 */
+
+/*
+A favorite is a bookmark (we call it a favorite, like Internet Explorer, to
+differentiate from bookmarks inside a PDF file (which really are
+table of contents)).
+
+We can have multiple favorites per file.
+
+A favorite is identified by a (mandatory) page number, an optional name
+(provided by the user), an optional page label (from EngineBase::GetPageLabel),
+and the scroll position on that page (so jumping back lands where you were,
+not only at the top).
+
+Favorites do not remember presentation settings like zoom or viewing mode -
+they are for navigation only. Presentation settings are remembered on a
+per-file basis in FileHistory.
+*/
+
+struct WindowTab;
+struct DocController;
+
+bool HasFavorites();
+void AddFavoriteWithLabelAndName(MainWindow* win, int pageNo, Str pageLabel, Str nameIn);
+void ApplyAddFavorite(MainWindow* win, Str filePath, int pageNo, Str pageLabel, Str name);
+void AddFavoriteForPage(MainWindow* win, int pageNo);
+void AddFavoriteForCurrentPage(MainWindow* win);
+// ctrl, when it's the DocController for filePath, lets a chaptered doc's
+// favorite be matched by (chapter, page) instead of the stale flat pageNo
+void DelFavorite(Str filePath, int pageNo, DocController* ctrl = nullptr);
+void DelFavorite(FileState* fs, Favorite* fav);
+void RebuildFavMenu(MainWindow* win, HMENU menu);
+void CreateFavorites(MainWindow* win);
+void ToggleFavorites(MainWindow* win); // sidebar
+void ToggleFavoritesTab(MainWindow* win);
+WindowTab* FindFavoritesTab(MainWindow* win);
+void PopulateFavTreeIfNeeded(MainWindow* win);
+void LayoutFavoritesContainer(MainWindow* win);
+void GoToFavoriteByCmd(MainWindow* win, CustomCommand* cmd);
+void UpdateFavoritesTree(MainWindow* win);
+void UpdateFavoritesTreeForAllWindows();
+bool IsPageInFavorites(Str filePath, int pageNo, DocController* ctrl = nullptr);
+
+void GoToNextFavorite(MainWindow* win, bool forward);
+
+TempStr FavReadableNameTemp(Favorite* fn);
+void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav);
+void JumpToFavorite(MainWindow* win, Favorite* fav);
+
+void SetSearchStartFavorite(MainWindow* win);
+
+void ToggleSortFavoritesByName();

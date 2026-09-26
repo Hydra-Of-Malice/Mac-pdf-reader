@@ -1,0 +1,1261 @@
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
+   License: GPLv3 */
+
+#include "base/Base.h"
+#include "base/File.h"
+#include "base/Win.h"
+#include "gui/Dpi.h"
+#include "base/UITask.h"
+
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/PlatformFont.h"
+#include "gui/Gfx.h"
+#include "gui/VirtCtrl.h"
+
+#include "Settings.h"
+#include "AppSettings.h"
+#include "DocProperties.h"
+#include "DocController.h"
+#include "EngineBase.h"
+#include "base/GuessFileType.h"
+#include "EngineAll.h"
+#include "DisplayModel.h"
+#include "AppTools.h"
+#include "SumatraPDF.h"
+#include "MainWindow.h"
+#include "Commands.h"
+#include "Translations.h"
+#include "SumatraConfig.h"
+#include "Print.h"
+#include "Theme.h"
+#include "DarkMode.h"
+#include "EutlTrust.h"
+
+#include <wincrypt.h>
+#include "DocumentProperties.h"
+
+constexpr int kButtonPadding = 8;
+
+struct PropertiesWnd : WindowBase {
+    HWND hwndParent = nullptr;
+    Edit* editProps = nullptr;
+    VirtButton* btnCopyToClipboard = nullptr;
+    VirtButton* btnViewCert = nullptr;
+    VirtButton* btnUpdateEutl = nullptr;
+    PlatformFont* propsFont = nullptr;
+    str::Builder propsText;
+    Point initialPos;
+    PdfSigCert* certs = nullptr;
+
+    ~PropertiesWnd() override;
+    bool Create(HWND parent);
+    void UpdateTheme() override;
+    void ApplyDarkMode() override;
+    void SetPropsText(Str text);
+    void SizeToContent();
+    void CopyToClipboard(VirtMouseEvent* ev = nullptr);
+    void ViewCertificate(VirtMouseEvent* ev = nullptr);
+    void UpdateEutl(VirtMouseEvent* ev = nullptr);
+    void OnCommand(WindowBase::CommandEvent* ev);
+};
+
+static Vec<PropertiesWnd*> gPropertiesWindows;
+
+static int ButtonPadding() {
+    return DpiScale(kButtonPadding);
+}
+
+PropertiesWnd* FindPropertyWindowByHwnd(HWND hwnd) {
+    for (PropertiesWnd* w : gPropertiesWindows) {
+        if (w->hwnd == hwnd) {
+            return w;
+        }
+        if (w->hwndParent == hwnd) {
+            return w;
+        }
+    }
+    return nullptr;
+}
+
+// Which action buttons the open properties dialog has.
+TempStr PropertiesDialogButtonsTemp(int* exitCodeOut) {
+    str::Builder out;
+    auto finish = [&](Str msg, int code) -> TempStr {
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        out.Append(msg);
+        return ToStrTemp(out);
+    };
+    if (len(gPropertiesWindows) == 0) {
+        return finish(StrL("NOTREADY no-properties-window"), 2);
+    }
+    PropertiesWnd* w = gPropertiesWindows[0];
+    return finish(fmt("copy=%d viewCert=%d updateEutl=%d", w->btnCopyToClipboard ? 1 : 0, w->btnViewCert ? 1 : 0,
+                      w->btnUpdateEutl ? 1 : 0),
+                  0);
+}
+
+// True for the properties dialog and its children (the read-only edit),
+// but not the owner frame. Used so Home/End keep navigating the document
+// while Properties stays open (issue #5971).
+bool IsHwndInPropertiesWindow(HWND hwnd) {
+    if (!hwnd) {
+        return false;
+    }
+    for (PropertiesWnd* w : gPropertiesWindows) {
+        if (w->hwnd == hwnd || (w->hwnd && IsChild(w->hwnd, hwnd))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void SavePropertiesWindowPos(PropertiesWnd* w, HWND hwnd);
+
+void DeletePropertiesWindow(HWND hwndParent) {
+    PropertiesWnd* w = FindPropertyWindowByHwnd(hwndParent);
+    if (!w) {
+        return;
+    }
+    // Unregister first so a second closer cannot find this instance and schedule
+    // another delete (CloseDocumentInCurrentTab then DeleteMainWindow).
+    VecRemove(gPropertiesWindows, w);
+    if (w->hwnd && IsWindow(w->hwnd)) {
+        SavePropertiesWindowPos(w, w->hwnd);
+        // Destroy HWND now (sync). Do not use Close()/PostMessage: that left the
+        // object findable until WM_CLOSE ran and allowed a double ScheduleDelete.
+        w->Destroy();
+    }
+    w->ScheduleDelete();
+}
+
+// See: http://www.verypdf.com/pdfinfoeditor/pdf-date-format.htm
+// Format:  "D:YYYYMMDDHHMMSSxxxxxxx"
+// Example: "D:20091222171933-05'00'"
+static bool PdfDateParseA(Str date, SYSTEMTIME* timeOut, int* timeZoneOut) {
+    if (len(date) == 0) return false;
+
+    ZeroMemory(timeOut, sizeof(SYSTEMTIME));
+    *timeZoneOut = 0;
+
+    Str slice = date;
+    // "D:" at the beginning is optional
+    str::TrimPrefix(slice, StrL("D:"));
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    Str end = str::Parse(slice,
+                         "%4d%2d%2d"
+                         "%2d%2d%2d",
+                         &year, &month, &day, &hour, &minute, &second);
+    if (!end.s) {
+        return false;
+    }
+    timeOut->wYear = (WORD)year;
+    timeOut->wMonth = (WORD)month;
+    timeOut->wDay = (WORD)day;
+    timeOut->wHour = (WORD)hour;
+    timeOut->wMinute = (WORD)minute;
+    timeOut->wSecond = (WORD)second;
+    // parse optional timezone: Z, +HH'MM', -HH'MM' (or +HH'MM, +HHMM, +HH)
+    if (end.s[0] == 'Z') {
+        *timeZoneOut = 0;
+    } else if (end.s[0] == '+' || end.s[0] == '-') {
+        int sign = (end.s[0] == '+') ? 1 : -1;
+        int tzHour = 0;
+        int tzMin = 0;
+        Str tz = Str(end.s + 1, end.len - 1);
+        Str tzEnd = str::Parse(tz, "%2d'%2d", &tzHour, &tzMin);
+        if (!tzEnd.s) {
+            tzEnd = str::Parse(tz, "%2d:%2d", &tzHour, &tzMin);
+        }
+        if (!tzEnd.s) {
+            str::Parse(tz, "%2d", &tzHour);
+        }
+        *timeZoneOut = sign * ((tzHour * 100) + tzMin);
+    }
+    return true;
+    // don't bother about the day of week, we won't display it anyway
+}
+
+// See: ISO 8601 specification
+// Format:  "YYYY-MM-DDTHH:MM:SSZ"
+// Example: "2011-04-19T22:10:48Z"
+static bool IsoDateParse(Str date, SYSTEMTIME* timeOut, int* timeZoneOut) {
+    if (len(date) == 0) return false;
+
+    ZeroMemory(timeOut, sizeof(SYSTEMTIME));
+    *timeZoneOut = 0;
+
+    int year = 0, month = 0, day = 0;
+    Str end = str::Parse(date, "%4d-%2d-%2d", &year, &month, &day);
+    if (end.s) { // time is optional
+        timeOut->wYear = (WORD)year;
+        timeOut->wMonth = (WORD)month;
+        timeOut->wDay = (WORD)day;
+        int hour = 0, minute = 0, second = 0;
+        Str timeEnd = str::Parse(end, "T%2d:%2d:%2d", &hour, &minute, &second);
+        if (timeEnd.s) {
+            timeOut->wHour = (WORD)hour;
+            timeOut->wMinute = (WORD)minute;
+            timeOut->wSecond = (WORD)second;
+            // parse optional timezone: Z, +HH:MM, -HH:MM
+            if (timeEnd.s[0] == 'Z') {
+                *timeZoneOut = 0;
+            } else if (timeEnd.s[0] == '+' || timeEnd.s[0] == '-') {
+                int sign = (timeEnd.s[0] == '+') ? 1 : -1;
+                int tzHour = 0;
+                int tzMin = 0;
+                Str tz = Str(timeEnd.s + 1, timeEnd.len - 1);
+                Str tzEnd = str::Parse(tz, "%2d:%2d", &tzHour, &tzMin);
+                if (!tzEnd.s) {
+                    str::Parse(tz, "%2d%2d", &tzHour, &tzMin);
+                }
+                *timeZoneOut = sign * ((tzHour * 100) + tzMin);
+            }
+        }
+    }
+    return end.s != nullptr;
+    // don't bother about the day of week, we won't display it anyway
+}
+
+static TempStr AddTimeZone(TempStr s, int timeZone) {
+    // timeZone 0 means UTC or unspecified: nothing to append, return the date as-is
+    // (returning {} here would drop the whole formatted date, e.g. for "D:...Z" dates)
+    if (timeZone == 0) return s;
+
+    Str tzSign = (timeZone > 0) ? StrL("+") : StrL("-");
+    int abs = (timeZone > 0) ? timeZone : -timeZone;
+    int hours = abs / 100;
+    int mins = abs % 100;
+    return fmt("%s %s%02d:%02d", s, tzSign, hours, mins);
+}
+
+static TempStr FormatSystemTimeTemp(SYSTEMTIME& date, int timeZone) {
+    WCHAR bufW[512]{};
+    int cchBufLen = dimof(bufW);
+    int ret = GetDateFormatW(LOCALE_USER_DEFAULT, DATE_SHORTDATE, &date, nullptr, bufW, cchBufLen);
+    if (ret < 2) { // GetDateFormat() failed or returned an empty result
+        return {};
+    }
+
+    // don't add 00:00:00 for dates without time
+    if (0 == date.wHour && 0 == date.wMinute && 0 == date.wSecond) {
+        TempStr res = ToUtf8Temp(bufW);
+        return AddTimeZone(res, timeZone);
+    }
+
+    WCHAR* tmp = bufW + ret;
+    tmp[-1] = ' ';
+    ret = GetTimeFormatW(LOCALE_USER_DEFAULT, 0, &date, nullptr, tmp, cchBufLen - ret);
+    if (ret < 2) { // GetTimeFormat() failed or returned an empty result
+        tmp[-1] = '\0';
+    }
+    TempStr res = ToUtf8Temp(bufW);
+    return AddTimeZone(res, timeZone);
+}
+
+// Convert a date in PDF or XPS format, e.g. "D:20091222171933-05'00'" to a display
+// format e.g. "12/22/2009 5:19:33 PM"
+// See: http://www.verypdf.com/pdfinfoeditor/pdf-date-format.htm
+// The conversion happens in place
+// static TempStr ConvDateToDisplayTemp(SYSTEMTIME* timeOut) {
+//    return
+//}
+
+// One "W x H unit" fragment for FormatPageSizeTemp (size.dx/dy are inches).
+static TempStr FormatPageSizeUnitTemp(SizeF sizeInches, double unitsPerInch, Str unit) {
+    double width = sizeInches.dx * unitsPerInch;
+    double height = sizeInches.dy * unitsPerInch;
+    if (((int)(width * 100)) % 100 == 99) {
+        width += 0.01;
+    }
+    if (((int)(height * 100)) % 100 == 99) {
+        height += 0.01;
+    }
+    TempStr strWidth = str::FormatFloatWithThousandSepTemp(width);
+    TempStr strHeight = str::FormatFloatWithThousandSepTemp(height);
+    return fmt("%sx%s %s", strWidth, strHeight, unit);
+}
+
+// Format page size in cm/mm/in (locale unit first) and points (issue #2186).
+// Metric: "21.0 x 29.7 cm, 210 x 297 mm, 8.27 x 11.69 in, 595 x 842 pt (A4)"
+// US:     "8.27 x 11.69 in, 21.0 x 29.7 cm, 210 x 297 mm, 595 x 842 pt (A4)"
+static TempStr FormatPageSizeTemp(EngineBase* engine, int pageNo, int rotation) {
+    RectF mediabox = engine->PageMediabox(pageNo);
+    float fileDpi = engine->GetFileDPI();
+    float zoom = 1.0f / fileDpi;
+    SizeF size = engine->Transform(mediabox, pageNo, zoom, rotation).Size();
+
+    Str formatName;
+    switch (GetPaperFormatFromSizeApprox(size)) {
+        case PaperFormat::A2:
+            formatName = StrL(" (A2)");
+            break;
+        case PaperFormat::A3:
+            formatName = StrL(" (A3)");
+            break;
+        case PaperFormat::A4:
+            formatName = StrL(" (A4)");
+            break;
+        case PaperFormat::A5:
+            formatName = StrL(" (A5)");
+            break;
+        case PaperFormat::A6:
+            formatName = StrL(" (A6)");
+            break;
+        case PaperFormat::Letter:
+            formatName = StrL(" (Letter)");
+            break;
+        case PaperFormat::Legal:
+            formatName = StrL(" (Legal)");
+            break;
+        case PaperFormat::Tabloid:
+            formatName = StrL(" (Tabloid)");
+            break;
+        case PaperFormat::Statement:
+            formatName = StrL(" (Statement)");
+            break;
+        case PaperFormat::Other:
+            formatName = StrL(" (Other)");
+            break;
+    }
+
+    TempStr inStr = FormatPageSizeUnitTemp(size, 1.0, StrL("in"));
+    TempStr cmStr = FormatPageSizeUnitTemp(size, 2.54, StrL("cm"));
+    TempStr mmStr = FormatPageSizeUnitTemp(size, 25.4, StrL("mm"));
+
+    int ptW = (int)lroundf(size.dx * 72.0f);
+    int ptH = (int)lroundf(size.dy * 72.0f);
+    TempStr ptStr = fmt("%dx%d pt", ptW, ptH);
+
+    // Locale unit first, then the other two, then points (issue #2186)
+    bool isMetric = GetMeasurementSystem() == 0;
+    if (isMetric) {
+        return fmt("%s, %s, %s, %s%s", cmStr, mmStr, inStr, ptStr, formatName);
+    }
+    return fmt("%s, %s, %s, %s%s", inStr, cmStr, mmStr, ptStr, formatName);
+}
+
+// returns a list of permissions denied by this document
+static TempStr FormatPermissionsTemp(DocController* ctrl) {
+    if (!ctrl->AsFixed()) {
+        return {};
+    }
+
+    StrVec denials;
+
+    EngineBase* engine = ctrl->AsFixed()->GetEngine();
+    if (!engine->AllowsPrinting()) {
+        denials.Append(Tr("printing document"));
+    }
+    if (!engine->AllowsCopyingText()) {
+        denials.Append(Tr("copying text"));
+    }
+
+    return JoinTemp(&denials, StrL(", "));
+}
+
+static void AppendProp(str::Builder& out, Str key, Str value) {
+    if (len(value) == 0) {
+        return;
+    }
+    out.Append(fmt("%s %s\n", key, value));
+}
+
+// clang-format off
+struct PropLabel {
+    DocProp prop;
+    Str label;
+};
+
+static const PropLabel propToName[] = {
+    {DocProp::Title, TrN("Title:")},
+    {DocProp::Subject, TrN("Subject:")},
+    {DocProp::Author, TrN("Author:")},
+    {DocProp::Copyright, TrN("Copyright:")},
+    {DocProp::CreatorApp, TrN("Application:")},
+    {DocProp::PdfProducer, TrN("PDF Producer:")},
+    {DocProp::PdfVersion, TrN("PDF Version:")},
+    {DocProp::Files, TrN("Files:")},
+    {DocProp::Keywords, TrN("Keywords:")},
+    {DocProp::Encryption, TrN("Encryption:")},
+    {DocProp::Signatures, TrN("Signatures:")},
+    {DocProp::ImageSize, TrN("Image Size:")},
+    {DocProp::Dpi, TrN("DPI:")},
+    {DocProp::Comment, TrN("Comment:")},
+    {DocProp::CameraMake, TrN("Camera Make:")},
+    {DocProp::CameraModel, TrN("Camera Model:")},
+    {DocProp::DateOriginal, TrN("Date Original:")},
+    {DocProp::ExposureTime, TrN("Exposure Time:")},
+    {DocProp::FNumber, TrN("F-Number:")},
+    {DocProp::IsoSpeed, TrN("ISO Speed:")},
+    {DocProp::FocalLength, TrN("Focal Length:")},
+    {DocProp::FocalLength35mm, TrN("Focal Length (35mm):")},
+    {DocProp::Flash, TrN("Flash:")},
+    {DocProp::Orientation, TrN("Orientation:")},
+    {DocProp::ExposureProgram, TrN("Exposure Program:")},
+    {DocProp::MeteringMode, TrN("Metering Mode:")},
+    {DocProp::WhiteBalance, TrN("White Balance:")},
+    {DocProp::ExposureBias, TrN("Exposure Bias:")},
+    {DocProp::BitsPerSample, TrN("Bits Per Sample:")},
+    {DocProp::ResolutionUnit, TrN("Resolution Unit:")},
+    {DocProp::Software, TrN("Software:")},
+    {DocProp::DateTime, TrN("Date/Time:")},
+    {DocProp::YCbCrPositioning, TrN("YCbCr Positioning:")},
+    {DocProp::ExifVersion, TrN("Exif Version:")},
+    {DocProp::DateTimeDigitized, TrN("Date/Time Digitized:")},
+    {DocProp::ComponentsConfig, TrN("Components Configuration:")},
+    {DocProp::CompressedBpp, TrN("Compressed Bits/Pixel:")},
+    {DocProp::MaxAperture, TrN("Max Aperture:")},
+    {DocProp::LightSource, TrN("Light Source:")},
+    {DocProp::UserComment, TrN("User Comment:")},
+    {DocProp::FlashpixVersion, TrN("Flashpix Version:")},
+    {DocProp::ColorSpace, TrN("Color Space:")},
+    {DocProp::PixelXDimension, TrN("Pixel X Dimension:")},
+    {DocProp::PixelYDimension, TrN("Pixel Y Dimension:")},
+    {DocProp::FileSource, TrN("File Source:")},
+    {DocProp::SceneType, TrN("Scene Type:")},
+    {DocProp::ImageFileSize, TrN("Image File Size:")},
+    {DocProp::ImagePath, TrN("Path:")},
+    {DocProp::None, {}},
+};
+// clang-format on
+
+static void AppendPropTranslated(str::Builder& out, DocProp prop, Str val) {
+    if (prop == DocProp::None || len(val) == 0) return;
+    if (prop == DocProp::ImageFileSize) {
+        TempStr valFormatted = FormatFileSizeTransTemp(ParseInt64(val));
+        AppendProp(out, Tr("File Size:"), valFormatted);
+        return;
+    }
+    Str s;
+    for (int i = 0; propToName[i].prop != DocProp::None; i++) {
+        if (propToName[i].prop == prop) {
+            s = propToName[i].label;
+            break;
+        }
+    }
+    if (len(s) > 0) {
+        // found a display label (e.g. "Application:"); show its translation
+        Str trans = trans::GetTranslation(s);
+        AppendProp(out, trans, val);
+        return;
+    }
+    // no display label: fall back to the raw property name
+    TempStr propName = PropNameTemp(prop);
+    TempStr label = fmt("%s:", propName);
+    AppendProp(out, label, val);
+}
+
+static void AppendPdfFileStructure(str::Builder& out, Str fstruct, Str filePath) {
+    if (len(fstruct) == 0) {
+        bool isPDF = str::EndsWithI(filePath, StrL(".pdf"));
+        if (isPDF) {
+            AppendProp(out, str::JoinTemp(Tr("Fast Web View"), StrL(":")), Tr("No"));
+        }
+        return;
+    }
+    StrVec parts;
+    Split(&parts, fstruct, StrL(","), true);
+
+    StrVec props;
+
+    Str linearized = Tr("No");
+    if (parts.Contains(StrL("linearized"))) {
+        linearized = Tr("Yes");
+    }
+    AppendProp(out, str::JoinTemp(Tr("Fast Web View"), StrL(":")), linearized);
+
+    if (parts.Contains(StrL("tagged"))) {
+        props.Append(Tr("Tagged PDF"));
+    }
+    if (parts.Contains(StrL("PDFX"))) {
+        props.Append(StrL("PDF/X (ISO 15930)"));
+    }
+    if (parts.Contains(StrL("PDFA1"))) {
+        props.Append(StrL("PDF/A (ISO 19005)"));
+    }
+    if (parts.Contains(StrL("PDFE1"))) {
+        props.Append(StrL("PDF/E (ISO 24517)"));
+    }
+
+    TempStr val = JoinTemp(&props, StrL(", "));
+    AppendProp(out, Tr("PDF Optimizations:"), val);
+}
+
+static void GetAllProps(DocController* ctrl, Props& propsOut) {
+    DisplayModel* dm = ctrl->AsFixed();
+    if (dm) {
+        EngineBase* engine = dm->GetEngine();
+        engine->GetProperties(propsOut);
+        return;
+    }
+    for (int i = 0; gAllProps[i] != DocProp::None; i++) {
+        DocProp prop = gAllProps[i];
+        TempStr val = ctrl->GetPropertyTemp(prop);
+        if (val) {
+            AddProp(propsOut, prop, val);
+        }
+    }
+}
+
+static void AppendDateProp(str::Builder& out, Str key, Str val, bool isPdfDate) {
+    SYSTEMTIME date;
+    int timeZone = 0;
+    bool ok = false;
+    if (len(val) == 0) return;
+    if (isPdfDate) {
+        ok = PdfDateParseA(val, &date, &timeZone);
+    } else {
+        ok = IsoDateParse(val, &date, &timeZone);
+    }
+    if (!ok) return;
+    TempStr dateStr = FormatSystemTimeTemp(date, timeZone);
+    AppendProp(out, key, dateStr);
+}
+
+static void AddImageProperties(EngineBase* engine, int pageNo, str::Builder& out) {
+    // for image engines, show EXIF properties for the current image
+    ReportIf(!IsEngineImages(engine));
+    Props imageProps;
+    EngineImagesGetImageProperties(engine, pageNo, imageProps);
+    int nImageProps = PropsCount(imageProps);
+    if (nImageProps == 0) return;
+    out.AppendChar('\n');
+    TempStr header = fmt(Tr("Current Image (%d):").s, pageNo);
+    out.Append(header);
+    out.AppendChar('\n');
+    for (int i = 0; i < nImageProps; i++) {
+        AppendPropTranslated(out, imageProps[i].prop, imageProps[i].val);
+    }
+}
+
+// Types whose name is more than an upper-cased extension. Everything else
+// reads fine as-is (".pdf" -> "PDF"), so only the exceptions live here.
+static Str FileTypeDisplayName(FileType ft) {
+    if (ft == FileType::Jxl) {
+        return StrL("JPEG-XL");
+    }
+    return {};
+}
+
+// The file type as sniffed from the content, which is what the app went by
+// when it picked an engine - the extension can say something else entirely.
+// Only for a plain file on disk: a directory document has no content of its
+// own, an embedded PDF stream isn't a file, and in plugin mode the "path" is
+// a URL we can't read.
+static void AppendFileType(str::Builder& out, Str path) {
+    if (gPluginMode || len(path) == 0) {
+        return;
+    }
+    if (path::IsDirectory(path) || !file::Exists(path)) {
+        return;
+    }
+    FileType ft = GuessFileTypeFromFile(path);
+    if (ft == FileType::Unknown) {
+        return;
+    }
+    Str name = FileTypeDisplayName(ft);
+    if (len(name) == 0) {
+        TempStr ext = GetExtForFileTypeTemp(ft);
+        if (len(ext) < 2) {
+            return;
+        }
+        // ".pdf" reads better as "PDF" next to the file name it belongs to
+        TempStr fromExt = str::DupTemp(Str(ext.s + 1, ext.len - 1));
+        str::ToUpperInPlace(fromExt);
+        name = fromExt;
+    }
+    AppendProp(out, Tr("File Type:"), name);
+}
+
+// Which way the pages run, and where that came from. A PDF can state it with
+// ViewerPreferences /Direction; an EPUB with page-progression-direction.
+// Otherwise it's the manga-mode default or the user's own toggle
+// (issues #1264, #2022).
+// Not shown for a standalone image (no page sequence) or a one-page document
+// that neither declares a direction nor has had manga mode toggled (#5950).
+static bool ShouldShowReadingDirection(DisplayModel* dm) {
+    if (!dm) {
+        return false;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!engine || engine->kind == kindEngineImage) {
+        return false;
+    }
+    const PageLayout& layout = engine->preferredLayout;
+    if (layout.r2lDeclared) {
+        return true;
+    }
+    if (dm->GetDisplayR2L() != layout.r2l) {
+        return true;
+    }
+    return dm->PageCount() > 1;
+}
+
+static void AppendReadingDirection(str::Builder& out, DisplayModel* dm) {
+    if (!ShouldShowReadingDirection(dm)) {
+        return;
+    }
+    bool r2l = dm->GetDisplayR2L();
+    Str dir = r2l ? Tr("Right to left") : Tr("Left to right");
+    Str src;
+    const PageLayout& layout = dm->GetEngine()->preferredLayout;
+    if (layout.r2lDeclared && r2l == layout.r2l) {
+        src = Tr("from the document");
+    } else if (r2l != layout.r2l) {
+        src = Tr("changed by you");
+    }
+    TempStr val = src ? str::JoinTemp(dir, StrL(" ("), src, StrL(")")) : TempStr(dir);
+    AppendProp(out, Tr("Reading Direction:"), val);
+}
+
+static void GetPropsText(DocController* ctrl, str::Builder& out) {
+    ReportIf(!ctrl);
+
+    Str path = gPluginMode ? gPluginURL : Str(ctrl->GetFilePath());
+    AppendProp(out, Tr("File:"), len(path) == 0 ? StrL("(not available)") : path);
+
+    DisplayModel* dm = ctrl->AsFixed();
+    i64 fileSize = file::GetSize(path); // can be gPluginURL
+    if (-1 == fileSize && dm) {
+        EngineBase* engine = dm->GetEngine();
+        Str d = engine->GetFileData();
+        if (len(d) > 0) {
+            fileSize = d.len;
+        }
+        str::Free(d);
+    }
+    TempStr strTemp;
+    if (-1 != fileSize) {
+        strTemp = FormatFileSizeTransTemp(fileSize);
+        AppendProp(out, Tr("File Size:"), strTemp);
+    }
+    AppendFileType(out, path);
+    AppendReadingDirection(out, dm);
+
+    Props props;
+    GetAllProps(ctrl, props);
+
+    AppendPropTranslated(out, DocProp::Title, GetPropValueTemp(props, DocProp::Title));
+    AppendPropTranslated(out, DocProp::Subject, GetPropValueTemp(props, DocProp::Subject));
+    AppendPropTranslated(out, DocProp::Author, GetPropValueTemp(props, DocProp::Author));
+    AppendPropTranslated(out, DocProp::Copyright, GetPropValueTemp(props, DocProp::Copyright));
+
+    bool isPdfDate = dm && kindEngineMupdf == dm->engineType;
+    Str val = GetPropValueTemp(props, DocProp::CreationDate);
+    AppendDateProp(out, Tr("Created:"), val, isPdfDate);
+    val = GetPropValueTemp(props, DocProp::ModificationDate);
+    AppendDateProp(out, Tr("Modified:"), val, isPdfDate);
+
+    AppendPropTranslated(out, DocProp::CreatorApp, GetPropValueTemp(props, DocProp::CreatorApp));
+    AppendPropTranslated(out, DocProp::PdfProducer, GetPropValueTemp(props, DocProp::PdfProducer));
+    AppendPropTranslated(out, DocProp::PdfVersion, GetPropValueTemp(props, DocProp::PdfVersion));
+    strTemp = FormatPermissionsTemp(ctrl);
+    AppendProp(out, Tr("Denied Permissions:"), strTemp);
+
+    AppendPdfFileStructure(out, GetPropValueTemp(props, DocProp::PdfFileStructure), ctrl->GetFilePath());
+
+    int pageNo = ctrl->CurrentPageNo();
+    bool isImages = false;
+    if (dm) {
+        EngineBase* engine = dm->GetEngine();
+        isImages = IsEngineImages(engine);
+    }
+
+    strTemp = fmt("%d", ctrl->PageCount());
+    if (isImages) {
+        AppendProp(out, Tr("Number of Images:"), strTemp);
+    } else {
+        AppendProp(out, Tr("Number of Pages:"), strTemp);
+    }
+
+    if (dm && !isImages) { // we show image size below
+        strTemp = FormatPageSizeTemp(dm->GetEngine(), pageNo, dm->GetRotation());
+        TempStr s = fmt(Tr("Current Page (%d) Size:").s, pageNo);
+        AppendProp(out, s, strTemp);
+    }
+    if (isImages) AddImageProperties(dm->GetEngine(), pageNo, out);
+
+    // clang-format off
+    // properties already shown above, skip when appending remaining
+    static const DocProp handledProps[] = {
+        DocProp::Title, DocProp::Subject, DocProp::Author, DocProp::Copyright,
+        DocProp::CreationDate, DocProp::ModificationDate,
+        DocProp::CreatorApp, DocProp::PdfProducer, DocProp::PdfVersion,
+        DocProp::PdfFileStructure, DocProp::Files,
+        DocProp::UnsupportedFeatures, DocProp::FontList,
+        DocProp::None,
+    };
+    // clang-format on
+
+    // append any remaining properties not already shown
+    int nProps = PropsCount(props);
+    for (int i = 0; i < nProps; i++) {
+        DocProp prop = props[i].prop;
+        Str propVal = props[i].val;
+        if (len(propVal) == 0) {
+            continue;
+        }
+        bool handled = false;
+        for (int j = 0; handledProps[j] != DocProp::None; j++) {
+            if (prop == handledProps[j]) {
+                handled = true;
+                break;
+            }
+        }
+        if (handled) {
+            continue;
+        }
+        AppendPropTranslated(out, prop, propVal);
+    }
+
+    out.AppendChar('\n');
+    AppendPropTranslated(out, DocProp::Files, GetPropValueTemp(props, DocProp::Files));
+}
+
+// make text end with exactly one '\n' (if not empty) so that appending
+// a section preceded by "\n" yields a single empty line, not more.
+// the last property is optional (e.g. "Files:") so text can end with
+// a stray blank line
+static void EndWithSingleNewline(str::Builder& b) {
+    while (len(b) > 0 && b.LastChar() == '\n') {
+        b.RemoveLast();
+    }
+    if (len(b) > 0) {
+        b.AppendChar('\n');
+    }
+}
+
+static int GetPropertyLabelWidth(Str line, int* labelBytesOut) {
+    for (int i = 0; i + 2 < line.len; i++) {
+        if (line.s[i] != ':' || line.s[i + 1] != ' ') {
+            continue;
+        }
+        TempWStr label = ToWStrTemp(Str(line.s, i + 1));
+        *labelBytesOut = i + 1;
+        return len(label);
+    }
+    return -1;
+}
+
+static void AlignPropertiesText(str::Builder& text) {
+    int maxLabelWidth = 0;
+    Str content = ToStr(text);
+    for (int off = 0; off < content.len;) {
+        Str rest = Str(content.s + off, content.len - off);
+        int nl = str::IndexOfChar(rest, '\n');
+        int lineLen = nl >= 0 ? nl : rest.len;
+        int labelBytes = 0;
+        int labelWidth = GetPropertyLabelWidth(Str(rest.s, lineLen), &labelBytes);
+        maxLabelWidth = std::max(labelWidth, maxLabelWidth);
+        off += lineLen + (nl >= 0 ? 1 : 0);
+    }
+    if (maxLabelWidth == 0) {
+        return;
+    }
+
+    str::Builder aligned;
+    for (int off = 0; off < content.len;) {
+        Str rest = Str(content.s + off, content.len - off);
+        int nl = str::IndexOfChar(rest, '\n');
+        int lineLen = nl >= 0 ? nl : rest.len;
+        int labelBytes = 0;
+        int labelWidth = GetPropertyLabelWidth(Str(rest.s, lineLen), &labelBytes);
+        if (labelWidth >= 0) {
+            int nSpacesBefore = maxLabelWidth - labelWidth;
+            for (int i = 0; i < nSpacesBefore; i++) {
+                aligned.AppendChar(' ');
+            }
+            aligned.Append(Str(rest.s, labelBytes));
+            aligned.Append(StrL("  "));
+            aligned.Append(Str(rest.s + labelBytes + 1, lineLen - labelBytes - 1));
+        } else {
+            aligned.Append(Str(rest.s, lineLen));
+        }
+        if (nl >= 0) {
+            aligned.AppendChar('\n');
+        }
+        off += lineLen + (nl >= 0 ? 1 : 0);
+    }
+    text.Reset(ToStr(aligned));
+}
+
+void PropertiesWnd::CopyToClipboard(VirtMouseEvent*) {
+    CopyTextToClipboard(ToStr(propsText));
+}
+
+PropertiesWnd::~PropertiesWnd() {
+    FreePdfSigCerts(certs);
+    certs = nullptr;
+}
+
+// CryptUIDlgViewContext is in cryptui.dll. MSVC can pull that via
+// #pragma comment; mingw-w64 often has no import lib, so load it here.
+static void ViewCertDer(HWND parent, Str der) {
+    if (len(der) == 0) {
+        return;
+    }
+    PCCERT_CONTEXT cert =
+        CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, (const BYTE*)der.s, (DWORD)len(der));
+    if (!cert) {
+        return;
+    }
+    using Fn = BOOL(WINAPI*)(DWORD, const void*, HWND, LPCWSTR, DWORD, void*);
+    HMODULE h = LoadLibraryW(L"cryptui.dll");
+    Fn fn = h ? (Fn)GetProcAddress(h, "CryptUIDlgViewContext") : nullptr;
+    if (fn) {
+        fn(CERT_STORE_CERTIFICATE_CONTEXT, cert, parent, L"Certificate", 0, nullptr);
+    }
+    if (h) {
+        FreeLibrary(h);
+    }
+    CertFreeCertificateContext(cert);
+}
+
+static TempStr HexBytesTemp(const BYTE* p, int n, bool reverse) {
+    if (!p || n <= 0) {
+        return {};
+    }
+    char* buf = AllocArrayTemp<char>((n * 2) + 1);
+    for (int i = 0; i < n; i++) {
+        BYTE v = reverse ? p[n - 1 - i] : p[i];
+        buf[(size_t)i * 2] = "0123456789ABCDEF"[v >> 4];
+        buf[(i * 2) + 1] = "0123456789ABCDEF"[v & 0xf];
+    }
+    return Str(buf, n * 2);
+}
+
+static TempStr CertNameTemp(PCCERT_CONTEXT cert, DWORD flags) {
+    char buf[512];
+    DWORD n = CertGetNameStringA(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, flags, nullptr, buf, dimof(buf));
+    if (n <= 1) {
+        return {};
+    }
+    return str::DupTemp(Str(buf));
+}
+
+static TempStr FileTimeLocalTemp(const FILETIME& ft) {
+    FILETIME local{};
+    SYSTEMTIME st{};
+    if (!FileTimeToLocalFileTime(&ft, &local) || !FileTimeToSystemTime(&local, &st)) {
+        return {};
+    }
+    return FormatSystemTimeTemp(st, 0);
+}
+
+static void AppendOneCert(str::Builder& out, PdfSigCert* c) {
+    out.Append(c->label);
+    out.AppendChar('\n');
+    if (len(c->der) == 0) {
+        return;
+    }
+    PCCERT_CONTEXT cert = CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, (const BYTE*)c->der.s,
+                                                       (DWORD)len(c->der));
+    if (!cert) {
+        return;
+    }
+    AppendProp(out, Tr("Subject:"), CertNameTemp(cert, 0));
+    AppendProp(out, Tr("Issuer:"), CertNameTemp(cert, CERT_NAME_ISSUER_FLAG));
+    if (cert->pCertInfo) {
+        AppendProp(out, Tr("Serial Number:"),
+                   HexBytesTemp(cert->pCertInfo->SerialNumber.pbData, (int)cert->pCertInfo->SerialNumber.cbData, true));
+        AppendProp(out, Tr("Valid From:"), FileTimeLocalTemp(cert->pCertInfo->NotBefore));
+        AppendProp(out, Tr("Valid To:"), FileTimeLocalTemp(cert->pCertInfo->NotAfter));
+    }
+    BYTE hash[20];
+    DWORD hashLen = sizeof(hash);
+    if (CertGetCertificateContextProperty(cert, CERT_HASH_PROP_ID, hash, &hashLen) && hashLen > 0) {
+        AppendProp(out, Tr("SHA-1:"), HexBytesTemp(hash, (int)hashLen, false));
+    }
+    Str trust = EutlCertIsEuTrusted((const u8*)c->der.s, len(c->der)) ? StrL("European Union Trusted List (EUTL)")
+                                                                      : StrL("Windows Certificate Store");
+    AppendProp(out, Tr("Trust:"), trust);
+    CertFreeCertificateContext(cert);
+}
+
+static void AppendCertsText(str::Builder& out, PdfSigCert* certs) {
+    if (!certs) {
+        return;
+    }
+    out.AppendChar('\n');
+    out.Append(Tr("Certificates:"));
+    out.AppendChar('\n');
+    for (PdfSigCert* c = certs; c; c = c->next) {
+        AppendOneCert(out, c);
+        if (c->next) {
+            out.AppendChar('\n');
+        }
+    }
+}
+
+void PropertiesWnd::ViewCertificate(VirtMouseEvent*) {
+    if (!certs) {
+        return;
+    }
+    if (!certs->next) {
+        ViewCertDer(hwnd, certs->der);
+        return;
+    }
+    HMENU menu = CreatePopupMenu();
+    UINT_PTR id = 1;
+    for (PdfSigCert* c = certs; c; c = c->next) {
+        AppendMenuW(menu, MF_STRING, id, CWStrTemp(c->label));
+        id++;
+    }
+    POINT pt{};
+    GetCursorPos(&pt);
+    int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+    if (chosen >= 1) {
+        PdfSigCert* c = certs;
+        for (int n = 1; c && n < chosen; n++) {
+            c = c->next;
+        }
+        if (c) {
+            ViewCertDer(hwnd, c->der);
+        }
+    }
+}
+
+struct EutlUpdateJob {
+    HWND hwnd = nullptr;
+    bool ok = false;
+    Str msg;
+};
+
+static void OnEutlUpdateDone(EutlUpdateJob* job) {
+    if (job->hwnd && IsWindow(job->hwnd)) {
+        MessageBoxW(job->hwnd, CWStrTemp(job->msg), L"EU Trusted List",
+                    MB_OK | (job->ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+    }
+    str::Free(job->msg);
+    delete job;
+}
+
+static void EutlUpdateThread(EutlUpdateJob* job) {
+    Str err;
+    job->ok = EutlUpdate(&err);
+    TempStr msg = job->ok ? EutlCacheInfoTemp() : (err ? str::DupTemp(err) : StrL("update failed"));
+    job->msg = str::Dup(msg);
+    str::Free(err);
+    auto fn = MkFunc0<EutlUpdateJob>(OnEutlUpdateDone, job);
+    uitask::Post(fn, "EutlUpdateDone");
+}
+
+void PropertiesWnd::UpdateEutl(VirtMouseEvent*) {
+    auto* job = new EutlUpdateJob;
+    job->hwnd = hwnd;
+    auto fn = MkFunc0<EutlUpdateJob>(EutlUpdateThread, job);
+    RunAsync(fn, StrL("EutlUpdate"));
+}
+
+void PropertiesWnd::SetPropsText(Str text) {
+    if (!editProps) {
+        return;
+    }
+    str::Builder crlfText;
+    for (int i = 0; i < text.len; i++) {
+        char c = text.s[i];
+        if (c == '\n' && (i == 0 || text.s[i - 1] != '\r')) {
+            crlfText.AppendChar('\r');
+        }
+        crlfText.AppendChar(c);
+    }
+    editProps->SetText(ToStr(crlfText));
+    SendMessageW(editProps->hwnd, EM_SETSEL, 0, 0);
+}
+
+void PropertiesWnd::SizeToContent() {
+    if (!editProps) {
+        return;
+    }
+    int maxLineDx = 0;
+    int nLines = 0;
+    Str text = ToStr(propsText);
+    for (int off = 0; off < text.len;) {
+        Str rest = Str(text.s + off, text.len - off);
+        int nl = str::IndexOfChar(rest, '\n');
+        int lineLen = nl >= 0 ? nl : rest.len;
+        Size size = PlatformFontMeasureText(propsFont, Str(rest.s, lineLen));
+        maxLineDx = std::max(size.dx, maxLineDx);
+        nLines++;
+        off += lineLen + (nl >= 0 ? 1 : 0);
+    }
+    maxLineDx += 16;
+
+    int lineHeight = PlatformFontLineHeight(propsFont);
+    // a bit of slack so the longest lines don't touch the right edge
+    maxLineDx += 4 * PlatformFontMeasureText(propsFont, StrL("x")).dx;
+
+    // add padding for scrollbar, border, window frame
+    int editPadding = DpiGetSystemMetrics(SM_CXVSCROLL) + (2 * DpiGetSystemMetrics(SM_CXEDGE)) + 16;
+    int frameDx = DpiGetSystemMetrics(SM_CXFRAME) * 2;
+    int wantedClientDx = maxLineDx + editPadding;
+    if (btnCopyToClipboard) {
+        Size buttonSize = btnCopyToClipboard->GetIdealSize();
+        wantedClientDx = std::max(wantedClientDx, buttonSize.dx + (2 * ButtonPadding()));
+    }
+    int wantedDx = wantedClientDx + frameDx;
+
+    // calculate height to fit all lines
+    int editBorderDy = 2 * DpiGetSystemMetrics(SM_CYEDGE);
+    int frameDy = (DpiGetSystemMetrics(SM_CYFRAME) * 2) + DpiGetSystemMetrics(SM_CYCAPTION);
+    int btnAreaDy = DpiScale(40);
+    if (btnCopyToClipboard) {
+        btnAreaDy = std::max(btnAreaDy, btnCopyToClipboard->GetIdealSize().dy + (2 * ButtonPadding()));
+    }
+    int bottomMargin = ButtonPadding();
+    int wantedDy = ((nLines + 3) * lineHeight) + editBorderDy + btnAreaDy + bottomMargin + frameDy;
+
+    // cap at 80% of screen
+    Rect work = GetWorkAreaRect(HwndWindowRect(hwnd), hwnd);
+    int maxDx = (work.dx * 80) / 100;
+    int maxDy = (work.dy * 80) / 100;
+    wantedDx = std::min(wantedDx, maxDx);
+    wantedDy = std::min(wantedDy, maxDy);
+
+    Rect wRc = HwndWindowRect(hwnd);
+    MoveWindow(hwnd, wRc.x, wRc.y, wantedDx, wantedDy, TRUE);
+    DoLayout();
+}
+
+void PropertiesWnd::ApplyDarkMode() {
+    DarkModeApplyToWindowAndEraseBg(hwnd);
+}
+
+void PropertiesWnd::UpdateTheme() {
+    WindowBase::UpdateTheme();
+    // Re-apply monospaced font after darkmode child theming (may reset font).
+    if (editProps && propsFont) {
+        editProps->SetFont(propsFont);
+    }
+}
+
+void PropertiesWnd::OnCommand(WindowBase::CommandEvent* ev) {
+    auto cmd = LOWORD(ev->wparam);
+    if (cmd == CmdCopySelection) {
+        CopyToClipboard();
+        ev->didHandle = true;
+    }
+}
+
+static void SavePropertiesWindowPos(PropertiesWnd* w, HWND hwnd) {
+    if (!w || !hwnd || !IsWindow(hwnd)) {
+        return;
+    }
+    Rect rc = HwndWindowRect(hwnd);
+    Point pos = {rc.x, rc.y};
+    if (pos != w->initialPos) {
+        // Only stash the point. SaveSettings() walks every tab and can re-enter
+        // IsDocLoaded while CloseDocumentInCurrentTab has already cleared win->ctrl.
+        gSettings->propWinPos = pos;
+    }
+}
+
+// WM_CLOSE must clean up here: WindowBase::Destroy() clears hwnd and drops the WindowBase from
+// the hwnd map before DestroyWindow(), so WM_DESTROY never reaches onDestroy.
+static void OnPropertiesClose(WindowBase::CloseEvent* ev) {
+    PropertiesWnd* w = (PropertiesWnd*)ev->e->self;
+    if (!w || w->deleteScheduled) {
+        return;
+    }
+    SavePropertiesWindowPos(w, w->hwnd);
+    VecRemove(gPropertiesWindows, w);
+    w->ScheduleDelete();
+}
+
+static void OnPropertiesDestroy(WindowBase::DestroyEvent* ev) {
+    PropertiesWnd* w = (PropertiesWnd*)ev->e->self;
+    // Fallback if the window was destroyed without WM_CLOSE (or Close already
+    // scheduled the deferred free — then deleteScheduled is set and we no-op).
+    if (!w || w->deleteScheduled) {
+        return;
+    }
+    if (VecFind(gPropertiesWindows, w) >= 0) {
+        SavePropertiesWindowPos(w, ev->e->hwnd);
+        VecRemove(gPropertiesWindows, w);
+    }
+    w->ScheduleDelete();
+}
+
+bool PropertiesWnd::Create(HWND parent) {
+    hwndParent = parent;
+    bool isRtl = IsUIRtl();
+
+    {
+        CreateCustomArgs args;
+        args.title = Tr("Document Properties");
+        args.visible = false;
+        args.style = WS_OVERLAPPEDWINDOW;
+        args.font = GetAppFont();
+        args.isRtl = isRtl;
+        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
+        CreateCustom(args);
+    }
+    if (!hwnd) {
+        return false;
+    }
+
+    HDC hdc = GetDC(hwnd);
+    propsFont = HdcCreateSimpleFont(hdc, StrL("Consolas"), 14);
+    ReleaseDC(hwnd, hdc);
+
+    auto* vbox = new VBox();
+    vbox->alignMain = MainAxisAlign::MainStart;
+    vbox->alignCross = CrossAxisAlign::Stretch;
+
+    {
+        Edit::CreateArgs args;
+        args.parent = hwnd;
+        args.font = propsFont;
+        args.isMultiLine = true;
+        args.withBorder = true;
+        args.isRtl = isRtl;
+        editProps = new Edit();
+        editProps->Create(args);
+        SendMessageW(editProps->hwnd, EM_SETREADONLY, TRUE, 0);
+        // multi-line edit default can still cap text; font lists may be large
+        SendMessageW(editProps->hwnd, EM_SETLIMITTEXT, 0, 0);
+        DWORD tabStop = 16;
+        SendMessageW(editProps->hwnd, EM_SETTABSTOPS, 1, (LPARAM)&tabStop);
+        vbox->AddChild(editProps, 1);
+    }
+
+    {
+        auto* btnRow = new HBox();
+        btnRow->alignMain = MainAxisAlign::MainEnd;
+        btnRow->alignCross = CrossAxisAlign::CrossCenter;
+        btnRow->gap = GetAppFont()->averageCharWidth;
+        btnCopyToClipboard = NewThemedButton(hwnd, Tr("Copy To Clipboard"), GetAppFont(), true);
+        btnCopyToClipboard->onClick = MkMethod1<PropertiesWnd, VirtMouseEvent*, &PropertiesWnd::CopyToClipboard>(this);
+        btnRow->AddChild(new Padding(btnCopyToClipboard, DpiScaledInsets(kButtonPadding, 0, 0, 0)));
+        if (certs) {
+            btnViewCert = NewThemedButton(hwnd, Tr("View Certificate..."), GetAppFont(), true);
+            btnViewCert->onClick = MkMethod1<PropertiesWnd, VirtMouseEvent*, &PropertiesWnd::ViewCertificate>(this);
+            btnRow->AddChild(new Padding(btnViewCert, DpiScaledInsets(kButtonPadding, 0, 0, 0)));
+            btnUpdateEutl = NewThemedButton(hwnd, Tr("Update EU Trusted List"), GetAppFont(), true);
+            btnUpdateEutl->onClick = MkMethod1<PropertiesWnd, VirtMouseEvent*, &PropertiesWnd::UpdateEutl>(this);
+            btnRow->AddChild(new Padding(btnUpdateEutl, DpiScaledInsets(kButtonPadding, 0, 0, 0)));
+        }
+        vbox->AddChild(btnRow);
+    }
+
+    layout = new Padding(vbox, DpiScaledInsets(0, kButtonPadding, kButtonPadding, kButtonPadding));
+
+    SetPropsText(ToStr(propsText));
+    SizeToContent();
+    UpdateTheme();
+    SetIsVisible(true);
+    return true;
+}
+
+struct GetFontsResult {
+    HWND hwnd;
+    str::Builder fontsText;
+};
+
+static void OnGetFontsFinished(GetFontsResult* result) {
+    PropertiesWnd* w = FindPropertyWindowByHwnd(result->hwnd);
+    if (w) {
+        Str marker = Tr("Getting font information...");
+        Str props = ToStr(w->propsText);
+        int pos = str::IndexOf(props, marker);
+        if (pos >= 0) {
+            w->propsText.RemoveAt(pos, len(w->propsText) - pos);
+        }
+        // fontsText starts with "\n" to separate it with a single empty line
+        EndWithSingleNewline(w->propsText);
+        w->propsText.Append(ToStr(result->fontsText));
+        w->SetPropsText(ToStr(w->propsText));
+        w->SizeToContent();
+    }
+    delete result;
+}
+
+struct GetFontsData {
+    HWND hwnd;
+    EngineBase* engine;
+};
+
+static void GetFontsThread(GetFontsData* data) {
+    TempStr val = data->engine->GetPropertyTemp(DocProp::FontList);
+    auto* result = new GetFontsResult;
+    result->hwnd = data->hwnd;
+    if (val) {
+        result->fontsText.Append(StrL("\n"));
+        result->fontsText.Append(Tr("Fonts:"));
+        result->fontsText.Append(StrL("\n"));
+        result->fontsText.Append(val);
+    }
+    auto fn = MkFunc0<GetFontsResult>(OnGetFontsFinished, result);
+    uitask::Post(fn, "GetFontsFinished");
+    data->engine->Release();
+    delete data;
+    DestroyTempArena();
+}
+
+void ShowProperties(HWND parent, DocController* ctrl) {
+    PropertiesWnd* w = FindPropertyWindowByHwnd(parent);
+    if (w) {
+        SetActiveWindow(w->hwnd);
+        return;
+    }
+
+    if (!ctrl) {
+        return;
+    }
+
+    auto* wnd = new PropertiesWnd();
+    VecAppend(gPropertiesWindows, wnd);
+    DisplayModel* dm = ctrl->AsFixed();
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (EngineMupdfIsPdf(engine)) {
+        EutlRegisterLookup();
+        wnd->certs = EngineMupdfGetSignatureCerts(engine);
+    }
+    GetPropsText(ctrl, wnd->propsText);
+    AppendCertsText(wnd->propsText, wnd->certs);
+    AlignPropertiesText(wnd->propsText);
+    EndWithSingleNewline(wnd->propsText);
+    wnd->propsText.Append(StrL("\n"));
+    wnd->propsText.Append(Tr("Getting font information..."));
+
+    wnd->closeOnEsc = true;
+    wnd->onClose = MkFunc1Void<WindowBase::CloseEvent*>(OnPropertiesClose);
+    wnd->onDestroy = MkFunc1Void<WindowBase::DestroyEvent*>(OnPropertiesDestroy);
+    wnd->onCommand = MkMethod1<PropertiesWnd, WindowBase::CommandEvent*, &PropertiesWnd::OnCommand>(wnd);
+    if (!wnd->Create(parent)) {
+        VecRemove(gPropertiesWindows, wnd);
+        delete wnd;
+        return;
+    }
+
+    Point savedPos = gSettings->propWinPos;
+    if (!savedPos.IsEmpty()) {
+        SetWindowPos(wnd->hwnd, nullptr, savedPos.x, savedPos.y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+        wnd->DoLayout();
+    } else {
+        HwndCenterDialog(wnd->hwnd, parent);
+    }
+    HwndEnsureOnScreen(wnd->hwnd);
+    {
+        Rect rc = HwndWindowRect(wnd->hwnd);
+        wnd->initialPos = {rc.x, rc.y};
+    }
+
+    if (!dm || !dm->engine) {
+        auto* result = new GetFontsResult;
+        result->hwnd = wnd->hwnd;
+        OnGetFontsFinished(result);
+        return;
+    }
+    auto* data = new GetFontsData;
+    data->hwnd = wnd->hwnd;
+    data->engine = dm->engine;
+    data->engine->AddRef();
+    auto fn = MkFunc0<GetFontsData>(GetFontsThread, data);
+    RunAsync(fn, StrL("GetFontsThread"));
+}

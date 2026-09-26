@@ -1,0 +1,17 @@
+-Isrc
+-Isrc/base
+-Iext/mupdf/include
+-Iext/djvudec
+-Iext/chmdec
+-Iext/libarchive
+-Iext/darkmodelib/include
+-Iext/a-zlib
+-Iext/synctex
+-Iext/webview2
+-DUNICODE
+-DWIN32
+-D_WIN32
+-D_CRT_SECURE_NO_WARNINGS
+-DWINVER=0x0a00
+-D_WIN32_WINNT=0x0a00
+-DPRE_RELEASE_VER=8.8

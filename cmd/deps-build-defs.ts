@@ -1,0 +1,812 @@
+import type { FileGroup, LibDef } from "./deps-build-common.ts";
+
+// ── Library definitions ─────────────────────────────────────────────────────
+// Each matches a project in premake5.lua / premake5.files.lua
+
+export const zlib: LibDef = {
+  name: "a-zlib",
+  alwaysOptimize: true,
+  defines: [],
+  includes: [],
+  files: [
+    {
+      dir: "ext/a-zlib",
+      patterns: ["zlib.c"],
+    },
+  ],
+};
+
+export const aGumbo: LibDef = {
+  name: "a-gumbo",
+  alwaysOptimize: true,
+  defines: [],
+  includes: ["ext/a-gumbo"],
+  files: [{ dir: "ext/a-gumbo", patterns: ["gumbo.c"] }],
+};
+
+export const unrar: LibDef = {
+  name: "a-unrar",
+  alwaysOptimize: true,
+  // MSVC compiles throw/catch with exceptions disabled (warning 4530);
+  // GCC requires -fexceptions for code that uses throw/catch
+  exceptions: true,
+  // Archive=UnrarArchive: unrar's internal C++ class collides with
+  // src/base/Archive.cpp's Archive under GNU ld (duplicate strong symbols;
+  // MSVC tolerates via COMDAT pick-any). Consumers only use the C API in
+  // dll.hpp, which doesn't mention the class, so a TU-local rename is safe.
+  defines: ["UNRAR", "RARDLL", "SILENT", "Archive=UnrarArchive"],
+  includes: ["ext/a-unrar"],
+  files: [{ dir: "ext/a-unrar", patterns: ["unrar.cpp"] }],
+};
+
+export const chmdec: LibDef = {
+  name: "chmdec",
+  alwaysOptimize: true,
+  defines: ["_CRT_SECURE_NO_WARNINGS"],
+  includes: [],
+  files: [{ dir: "ext/chmdec", patterns: ["chm.c"] }],
+};
+
+export const zopfli: LibDef = {
+  name: "a-zopfli",
+  alwaysOptimize: true,
+  defines: ["_CRT_SECURE_NO_WARNINGS"],
+  includes: ["ext/a-zopfli"],
+  files: [{ dir: "ext/a-zopfli", patterns: ["zopfli.cpp"] }],
+};
+
+export const libarchive: LibDef = {
+  name: "a-libarchive",
+  alwaysOptimize: true,
+  defines: [
+    "_CRT_SECURE_NO_WARNINGS",
+    "LIBARCHIVE_STATIC",
+    'PLATFORM_CONFIG_H="config_windows.h"',
+    "BZ_NO_STDIO",
+    "HAVE_CONFIG_H",
+    "LZMA_API_STATIC",
+  ],
+  includes: [
+    "ext/a-libarchive",
+    "ext/a-libarchive/libarchive",
+    "ext/a-zlib",
+    "ext/a-bzip2",
+    "ext/liblzma/api",
+    "ext/liblzma/common",
+    "ext/liblzma/check",
+    "ext/liblzma/delta",
+    "ext/liblzma/lz",
+    "ext/liblzma/lzma",
+    "ext/liblzma/rangecoder",
+    "ext/liblzma/simple",
+    "ext/liblzma",
+  ],
+  files: [
+    {
+      dir: "ext/a-libarchive",
+      patterns: ["libarchive.c"],
+    },
+    {
+      dir: "ext/a-bzip2",
+      patterns: ["bzip2.c"],
+    },
+    // LzmaDec/Bra* live in base/exe for LzSA (not in libsumatrapdf/libarchive)
+    {
+      dir: "ext/liblzma",
+      patterns: [
+        "common/alone_decoder.c",
+        "common/auto_decoder.c",
+        "common/block_decoder.c",
+        "common/block_header_decoder.c",
+        "common/block_util.c",
+        "common/common.c",
+        "common/filter_common.c",
+        "common/filter_decoder.c",
+        "common/filter_flags_decoder.c",
+        "common/index.c",
+        "common/index_decoder.c",
+        "common/index_hash.c",
+        "common/stream_decoder.c",
+        "common/stream_flags_common.c",
+        "common/stream_flags_decoder.c",
+        "common/vli_decoder.c",
+        "common/vli_size.c",
+        "check/check.c",
+        "check/crc32_fast.c",
+        "check/crc64_fast.c",
+        "lz/lz_decoder.c",
+        "lzma/lzma_decoder.c",
+        "lzma/lzma2_decoder.c",
+        "rangecoder/price_table.c",
+        "delta/delta_common.c",
+        "delta/delta_decoder.c",
+        "simple/simple_coder.c",
+        "simple/simple_decoder.c",
+        "simple/x86.c",
+      ],
+    },
+  ],
+};
+
+export const libwebp: LibDef = {
+  name: "a-libwebp",
+  alwaysOptimize: true,
+  defines: [],
+  includes: ["ext/a-libwebp"],
+  files: [{ dir: "ext/a-libwebp", patterns: ["libwebp.c"] }],
+};
+
+export const dav1d: LibDef = {
+  name: "dav1d",
+  alwaysOptimize: true,
+  defines: ["_CRT_SECURE_NO_WARNINGS", "ARCH_X86_32=0", "ARCH_X86_64=1", "HAVE_ASM=0"],
+  // NOTE: do NOT include ext/dav1d/include/compat/msvc — it shadows GCC's
+  // native <stdatomic.h> with an MSVC-only version
+  includes: ["ext/dav1d", "ext/dav1d/include"],
+  files: [
+    {
+      dir: "ext/dav1d/src",
+      patterns: [
+        "lib.c",
+        "thread_task.c",
+        "cdf.c",
+        "cpu.c",
+        "ctx.c",
+        "data.c",
+        "decode.c",
+        "dequant_tables.c",
+        "getbits.c",
+        "intra_edge.c",
+        "itx_1d.c",
+        "lf_mask.c",
+        "log.c",
+        "mem.c",
+        "msac.c",
+        "obu.c",
+        "pal.c",
+        "picture.c",
+        "qm.c",
+        "ref.c",
+        "refmvs.c",
+        "scan.c",
+        "tables.c",
+        "warpmv.c",
+        "wedge.c",
+        "win32/thread.c",
+        "sumatra_bitdepth_8.c",
+        "sumatra_bitdepth_8_2.c",
+        "sumatra_bitdepth_16.c",
+        "sumatra_bitdepth_16_2.c",
+      ],
+    },
+    // x86 C files — only cpu.c; skip msac_init.c and refmvs_init.c as they
+    // reference asm symbols and we build with HAVE_ASM=0 (no NASM)
+    {
+      dir: "ext/dav1d/src/x86",
+      patterns: ["cpu.c"],
+    },
+  ],
+};
+
+export const jxldec: LibDef = {
+  name: "jxldec",
+  alwaysOptimize: true,
+  defines: ["_CRT_SECURE_NO_WARNINGS"],
+  includes: [],
+  files: [{ dir: "ext/jxldec", patterns: ["jxl.c"] }],
+};
+
+// HEIC/HEIF/AVIF decoder amalgamation (replaces libheif). HEVC is pure-C;
+// AV1 uses dav1d; unci zlib/brotli needs a-zlib / brotli at link time.
+// heic.c uses SSE4.1 intrinsics (_mm_mullo_epi32); gcc needs -msse4.1
+// (MSVC enables SSE2+ by default on x64).
+export const heicdec: LibDef = {
+  name: "heicdec",
+  alwaysOptimize: true,
+  extraCflags: ["-msse4.1"],
+  defines: ["_CRT_SECURE_NO_WARNINGS", "HEIC_HAVE_DAV1D", "HEIC_HAVE_ZLIB", "HEIC_HAVE_BROTLI"],
+  includes: ["ext/heicdec", "ext/dav1d/include", "ext/a-zlib", "ext/a-brotli"],
+  files: [
+    {
+      dir: "ext/heicdec",
+      patterns: ["heic.c", "heic.h"],
+    },
+  ],
+};
+
+const mupdfThirdPartySources: LibDef = {
+  name: "mupdf-third-party-sources",
+  alwaysOptimize: true,
+  defines: [
+    "_CRT_SECURE_NO_WARNINGS",
+    // freetype
+    "FT2_BUILD_LIBRARY",
+    'FT_CONFIG_MODULES_H="slimftmodules.h"',
+    'FT_CONFIG_OPTIONS_H="slimftoptions.h"',
+    "FT_CONFIG_OPTION_USE_BROTLI",
+    // harfbuzz
+    "HAVE_FALLBACK=1",
+    "HAVE_OT",
+    "HAVE_FREETYPE",
+    // libjpeg-turbo: this build does not assemble the NASM SIMD sources, so
+    // force the pure-C code path (no jsimd_* references).
+    "WITHOUT_SIMD",
+  ],
+  includes: [
+    "ext/libjpeg-turbo/src",
+    "ext/mupdf/scripts/freetype",
+    "ext/a-freetype/include",
+    "ext/a-lcms2",
+    "ext/a-harfbuzz",
+    "ext/a-mujs",
+    "ext/a-extract",
+    "ext/a-brotli",
+    "ext/a-zlib",
+  ],
+  // plain malloc/free wrappers (src/mupdf/mupdf_load_system_font.c) so that harfbuzz
+  // allocations don't depend on mupdf's thread-local fz_hb_secret context
+  // being set; HAVE_ATEXIT (frees harfbuzz singletons at exit) is debug-only,
+  // it only matters for leak detection
+  debugExtraDefines: [
+    "HAVE_ATEXIT",
+    "hb_malloc_impl=sumatra_hb_malloc",
+    "hb_calloc_impl=sumatra_hb_calloc",
+    "hb_realloc_impl=sumatra_hb_realloc",
+    "hb_free_impl=sumatra_hb_free",
+  ],
+  releaseExtraDefines: [
+    "hb_malloc_impl=sumatra_hb_malloc",
+    "hb_calloc_impl=sumatra_hb_calloc",
+    "hb_realloc_impl=sumatra_hb_realloc",
+    "hb_free_impl=sumatra_hb_free",
+  ],
+  files: [
+    // ── libjpeg-turbo 3.x: core (precision-independent) sources.
+    //    NASM SIMD is skipped here; WITHOUT_SIMD forces the pure-C path. ──
+    {
+      dir: "ext/libjpeg-turbo/src",
+      patterns: [
+        "jaricom.c",
+        "jcapimin.c",
+        "jcarith.c",
+        "jchuff.c",
+        "jcicc.c",
+        "jcinit.c",
+        "jclhuff.c",
+        "jcmarker.c",
+        "jcmaster.c",
+        "jcomapi.c",
+        "jcparam.c",
+        "jcphuff.c",
+        "jctrans.c",
+        "jdapimin.c",
+        "jdarith.c",
+        "jdatadst.c",
+        "jdatasrc.c",
+        "jdhuff.c",
+        "jdicc.c",
+        "jdinput.c",
+        "jdlhuff.c",
+        "jdmarker.c",
+        "jdmaster.c",
+        "jdphuff.c",
+        "jdtrans.c",
+        "jerror.c",
+        "jfdctflt.c",
+        "jmemmgr.c",
+        "jmemnobs.c",
+        "jpeg_nbits.c",
+      ],
+    },
+    // ── libjpeg-turbo 3.x: 8-bit precision wrappers only (no 12/16-bit) ──
+    {
+      dir: "ext/libjpeg-turbo/src/wrapper",
+      patterns: [
+        "jcapistd-8.c",
+        "jccoefct-8.c",
+        "jccolor-8.c",
+        "jcdctmgr-8.c",
+        "jcdiffct-8.c",
+        "jclossls-8.c",
+        "jcmainct-8.c",
+        "jcprepct-8.c",
+        "jcsample-8.c",
+        "jdapistd-8.c",
+        "jdcoefct-8.c",
+        "jdcolor-8.c",
+        "jddctmgr-8.c",
+        "jddiffct-8.c",
+        "jdlossls-8.c",
+        "jdmainct-8.c",
+        "jdmerge-8.c",
+        "jdpostct-8.c",
+        "jdsample-8.c",
+        "jfdctfst-8.c",
+        "jfdctint-8.c",
+        "jidctflt-8.c",
+        "jidctfst-8.c",
+        "jidctint-8.c",
+        "jidctred-8.c",
+        "jquant1-8.c",
+        "jquant2-8.c",
+        "jutils-8.c",
+      ],
+    },
+    // ── freetype ──
+    { dir: "ext/a-freetype", patterns: ["freetype.c"] },
+    // ── lcms2 ──
+    { dir: "ext/a-lcms2", patterns: ["lcms2.c"] },
+    // ── harfbuzz ──
+    { dir: "ext/a-harfbuzz", patterns: ["harfbuzz.cc"] },
+    // ── brotli ──
+    { dir: "ext/a-brotli", patterns: ["brotli.c"] },
+  ],
+};
+
+function sourceFiles(...indexes: number[]): FileGroup[] {
+  return indexes.map((index) => structuredClone(mupdfThirdPartySources.files[index]));
+}
+
+function thirdPartyLib(args: {
+  name: string;
+  defines?: string[];
+  includes?: string[];
+  files: FileGroup[];
+  debugExtraDefines?: string[];
+  releaseExtraDefines?: string[];
+}): LibDef {
+  return {
+    name: args.name,
+    alwaysOptimize: true,
+    defines: args.defines ?? [],
+    includes: args.includes ?? [],
+    files: args.files,
+    debugExtraDefines: args.debugExtraDefines,
+    releaseExtraDefines: args.releaseExtraDefines,
+  };
+}
+
+export const libjpegTurbo = thirdPartyLib({
+  name: "libjpeg-turbo",
+  defines: ["_CRT_SECURE_NO_WARNINGS", "WITHOUT_SIMD"],
+  includes: ["ext/libjpeg-turbo/src"],
+  files: sourceFiles(0, 1),
+});
+
+export const jbig2dec = thirdPartyLib({
+  name: "a-jbig2dec",
+  defines: ["_CRT_SECURE_NO_WARNINGS", "HAVE_STRING_H=1", "JBIG_NO_MEMENTO"],
+  includes: ["ext/a-jbig2dec"],
+  files: [{ dir: "ext/a-jbig2dec", patterns: ["jbig2dec.c"] }],
+});
+
+export const openjpeg = thirdPartyLib({
+  name: "a-openjpeg",
+  defines: ["_CRT_SECURE_NO_WARNINGS", "USE_JPIP", "OPJ_STATIC", "OPJ_EXPORTS"],
+  includes: ["ext/a-openjpeg"],
+  files: [{ dir: "ext/a-openjpeg", patterns: ["openjpeg.c"] }],
+});
+
+export const freetype = thirdPartyLib({
+  name: "a-freetype",
+  defines: ["FT2_BUILD_LIBRARY", 'FT_CONFIG_MODULES_H="slimftmodules.h"', 'FT_CONFIG_OPTIONS_H="slimftoptions.h"'],
+  includes: ["ext/mupdf/scripts/freetype", "ext/a-freetype/include", "ext/a-brotli"],
+  files: sourceFiles(2),
+});
+
+export const lcms2 = thirdPartyLib({
+  name: "a-lcms2",
+  includes: ["ext/a-lcms2"],
+  files: sourceFiles(3),
+});
+
+const harfbuzzAllocDefines = [
+  "hb_malloc_impl=sumatra_hb_malloc",
+  "hb_calloc_impl=sumatra_hb_calloc",
+  "hb_realloc_impl=sumatra_hb_realloc",
+  "hb_free_impl=sumatra_hb_free",
+];
+
+export const harfbuzz = thirdPartyLib({
+  name: "a-harfbuzz",
+  defines: ["_CRT_SECURE_NO_WARNINGS", "HAVE_FALLBACK=1", "HAVE_OT", "HAVE_FREETYPE"],
+  includes: ["ext/a-harfbuzz", "ext/mupdf/scripts/freetype", "ext/a-freetype/include"],
+  files: sourceFiles(4),
+  debugExtraDefines: ["HAVE_ATEXIT", ...harfbuzzAllocDefines],
+  releaseExtraDefines: harfbuzzAllocDefines,
+});
+
+export const mujs = thirdPartyLib({
+  name: "a-mujs",
+  includes: ["ext/a-mujs"],
+  files: [{ dir: "ext/a-mujs", patterns: ["mujs.c"] }],
+});
+
+export const extract = thirdPartyLib({
+  name: "a-extract",
+  // mupdf provides memento.obj; skip extract's amalgamated memento body so the
+  // final link does not get duplicate Memento symbols
+  defines: ["EXTRACT_NO_OWN_MEMENTO"],
+  includes: ["ext/a-extract", "ext/a-zlib"],
+  files: [{ dir: "ext/a-extract", patterns: ["extract.c"] }],
+});
+
+export const brotli = thirdPartyLib({
+  name: "a-brotli",
+  includes: ["ext/a-brotli"],
+  files: sourceFiles(5, 6, 7),
+});
+
+export const cmarkGfm = thirdPartyLib({
+  name: "cmark-gfm",
+  defines: ["CMARK_GFM_STATIC_DEFINE", "_CRT_SECURE_NO_WARNINGS"],
+  includes: ["ext/cmark-gfm/src", "ext/cmark-gfm/extensions", "ext/mupdf/scripts/cmark-gfm"],
+  files: [
+    {
+      dir: "ext/cmark-gfm/src",
+      patterns: [
+        "arena.c",
+        "blocks.c",
+        "buffer.c",
+        "cmark.c",
+        "cmark_ctype.c",
+        "footnotes.c",
+        "houdini_href_e.c",
+        "houdini_html_e.c",
+        "houdini_html_u.c",
+        "html.c",
+        "inlines.c",
+        "iterator.c",
+        "linked_list.c",
+        "map.c",
+        "node.c",
+        "plugin.c",
+        "references.c",
+        "registry.c",
+        "scanners.c",
+        "syntax_extension.c",
+        "utf8.c",
+      ],
+    },
+    {
+      dir: "ext/cmark-gfm/extensions",
+      patterns: [
+        "autolink.c",
+        "core-extensions.c",
+        "ext_scanners.c",
+        "strikethrough.c",
+        "table.c",
+        "tagfilter.c",
+        "tasklist.c",
+        "autoheaderid.c",
+      ],
+    },
+  ],
+});
+
+// mupdf core library (mixed debug/release optimization)
+export const mupdf: LibDef = {
+  name: "mupdf",
+  alwaysOptimize: false,
+  // deskew.c/skew.c use SSE4.1 intrinsics
+  extraCflags: ["-msse4.1"],
+  defines: [
+    "USE_JPIP",
+    "OPJ_EXPORTS",
+    "HAVE_LCMS2MT=1",
+    "HAVE_WEBP=1",
+    "OPJ_STATIC",
+    "SHARE_JPEG",
+    "TOFU_CJK_LANG",
+    "FZ_ENABLE_SVG=1",
+    "FZ_ENABLE_BROTLI=1",
+    "FZ_ENABLE_BARCODE=0",
+    "FZ_ENABLE_JS=1",
+    "FZ_ENABLE_HYPHEN=0",
+    "CMARK_GFM_STATIC_DEFINE",
+  ],
+  includes: [
+    "src/mupdf",
+    "ext/mupdf/include",
+    "ext/cmark-gfm/src",
+    "ext/cmark-gfm/extensions",
+    "ext/mupdf/scripts/cmark-gfm",
+    "ext/mupdf/generated",
+    "ext/a-jbig2dec",
+    "ext/libjpeg-turbo/src",
+    "ext/a-openjpeg",
+    "ext/mupdf/scripts/freetype",
+    "ext/a-freetype/include",
+    "ext/a-mujs",
+    "ext/a-brotli",
+    "ext/a-harfbuzz",
+    "ext/a-lcms2",
+    "ext/a-gumbo",
+    "ext/a-extract",
+    "ext/a-zlib",
+    "ext/a-libarchive",
+    "ext/a-libwebp",
+  ],
+  files: [
+    // our additions to mupdf (not patches): see src/mupdf/README.md
+    { dir: "src/mupdf", patterns: ["mupdf_load_system_font.c", "noto_sumatra.c", "pkcs7-windows.c"] },
+    { dir: "ext/mupdf/source/cbz", patterns: ["mucbz.c", "muimg.c"] },
+    {
+      dir: "ext/mupdf/source/fitz",
+      patterns: [
+        "archive.c",
+        "barcode.c",
+        "bbox-device.c",
+        "bidi.c",
+        "bidi-std.c",
+        "bitmap.c",
+        "brotli.c",
+        "buffer.c",
+        "color-fast.c",
+        "color-icc-create.c",
+        "color-lcms.c",
+        "colorspace.c",
+        "compress.c",
+        "compressed-buffer.c",
+        "context.c",
+        "crypt-aes.c",
+        "crypt-arc4.c",
+        "crypt-md5.c",
+        "crypt-sha2.c",
+        "deskew.c",
+        "device.c",
+        "directory.c",
+        "document.c",
+        "document-all.c",
+        "draw-affine.c",
+        "draw-blend.c",
+        "draw-device.c",
+        "draw-edge.c",
+        "draw-edgebuffer.c",
+        "draw-glyph.c",
+        "draw-mesh.c",
+        "draw-paint.c",
+        "draw-path.c",
+        "draw-rasterize.c",
+        "draw-scale-simple.c",
+        "draw-unpack.c",
+        "encode-basic.c",
+        "encode-fax.c",
+        "encode-jpx.c",
+        "encodings.c",
+        "error.c",
+        "filter-basic.c",
+        "filter-brotli.c",
+        "filter-dct.c",
+        "filter-fax.c",
+        "filter-flate.c",
+        "filter-jbig2.c",
+        "filter-leech.c",
+        "filter-lzw.c",
+        "filter-predict.c",
+        "filter-sgi.c",
+        "filter-thunder.c",
+        "font.c",
+        "ftoa.c",
+        "geometry.c",
+        "getopt.c",
+        "glyph.c",
+        "glyphbox.c",
+        "gz-doc.c",
+        "halftone.c",
+        "harfbuzz.c",
+        "hash.c",
+        "heap.c",
+        "hyphen.c",
+        "image.c",
+        "jmemcust.c",
+        "json.c",
+        "link.c",
+        "list-device.c",
+        "load-bmp.c",
+        "load-gif.c",
+        "load-jbig2.c",
+        "load-jpeg.c",
+        "load-jpx.c",
+        "load-jxr-win.c",
+        "load-png.c",
+        "load-pnm.c",
+        "load-psd.c",
+        "load-tiff.c",
+        "load-webp.c",
+        "log.c",
+        "cull-device.c",
+        "memento.c",
+        "memory.c",
+        "ocr-device.c",
+        "options.c",
+        "outline.c",
+        "output.c",
+        "output-cbz.c",
+        "output-csv.c",
+        "output-docx.c",
+        "output-jpeg.c",
+        "output-pcl.c",
+        "output-pclm.c",
+        "output-pdfocr.c",
+        "output-png.c",
+        "output-pnm.c",
+        "output-ps.c",
+        "output-psd.c",
+        "output-pwg.c",
+        "output-svg.c",
+        "path.c",
+        "pixmap.c",
+        "pool.c",
+        "printf.c",
+        "random.c",
+        "skew.c",
+        "separation.c",
+        "shade.c",
+        "stext-boxer.c",
+        "stext-classify.c",
+        "stext-device.c",
+        "stext-iterator.c",
+        "stext-output.c",
+        "stext-para.c",
+        "stext-raft.c",
+        "stext-search.c",
+        "stext-table.c",
+        "store.c",
+        "stream-open.c",
+        "stream-read.c",
+        "string.c",
+        "strtof.c",
+        "svg-device.c",
+        "test-device.c",
+        "text.c",
+        "text-decoder.c",
+        "time.c",
+        "trace-device.c",
+        "track-usage.c",
+        "transition.c",
+        "tree.c",
+        "ucdn.c",
+        "uncfb.c",
+        "unlibarchive.c",
+        "subset-cff.c",
+        "subset-ttf.c",
+        "untar.c",
+        "unzip.c",
+        "util.c",
+        "warp.c",
+        "writer.c",
+        "xml-write.c",
+        "xml.c",
+        "xmltext-device.c",
+        "zip.c",
+      ],
+    },
+    {
+      dir: "ext/mupdf/source/html",
+      patterns: [
+        "css-apply.c",
+        "css-parse.c",
+        "epub-doc.c",
+        "html-doc.c",
+        "md.c",
+        "html-font.c",
+        "html-layout.c",
+        "html-outline.c",
+        "html-parse.c",
+        "mobi.c",
+        "office.c",
+        "story-writer.c",
+        "txt.c",
+        "xml-dom.c",
+      ],
+    },
+    {
+      dir: "ext/mupdf/source/pdf",
+      patterns: [
+        "pdf-af.c",
+        "pdf-annot.c",
+        "pdf-appearance.c",
+        "pdf-clean.c",
+        "pdf-clean-file.c",
+        "pdf-cmap.c",
+        "pdf-cmap-load.c",
+        "pdf-cmap-parse.c",
+        "pdf-colorspace.c",
+        "pdf-crypt.c",
+        "pdf-device.c",
+        "pdf-event.c",
+        "pdf-font.c",
+        "pdf-font-add.c",
+        "pdf-form.c",
+        "pdf-function.c",
+        "pdf-graft.c",
+        "pdf-image.c",
+        "pdf-image-rewriter.c",
+        "pdf-interpret.c",
+        "pdf-js.c",
+        "pdf-label.c",
+        "pdf-layer.c",
+        "pdf-layout.c",
+        "pdf-lex.c",
+        "pdf-link.c",
+        "pdf-metrics.c",
+        "pdf-nametree.c",
+        "pdf-object.c",
+        "pdf-op-buffer.c",
+        "pdf-op-color.c",
+        "pdf-op-filter.c",
+        "pdf-op-run.c",
+        "pdf-op-vectorize.c",
+        "pdf-outline.c",
+        "pdf-page.c",
+        "pdf-parse.c",
+        "pdf-pattern.c",
+        "pdf-recolor.c",
+        "pdf-repair.c",
+        "pdf-resources.c",
+        "pdf-run.c",
+        "pdf-shade.c",
+        "pdf-shade-recolor.c",
+        "pdf-signature.c",
+        "pdf-store.c",
+        "pdf-stream.c",
+        "pdf-struct.c",
+        "pdf-subset.c",
+        "pdf-type3.c",
+        "pdf-unicode.c",
+        "pdf-util.c",
+        "pdf-write.c",
+        "pdf-xobject.c",
+        "pdf-xref.c",
+        "pdf-zugferd.c",
+      ],
+    },
+    {
+      dir: "ext/mupdf/source/svg",
+      patterns: ["svg-color.c", "svg-doc.c", "svg-parse.c", "svg-run.c"],
+    },
+    {
+      dir: "ext/mupdf/source/xps",
+      patterns: [
+        "xps-common.c",
+        "xps-doc.c",
+        "xps-glyphs.c",
+        "xps-gradient.c",
+        "xps-image.c",
+        "xps-link.c",
+        "xps-outline.c",
+        "xps-path.c",
+        "xps-resource.c",
+        "xps-tile.c",
+        "xps-util.c",
+        "xps-zip.c",
+      ],
+    },
+    { dir: "ext/mupdf/source/reflow", patterns: ["*.c"] },
+    {
+      dir: "ext/mupdf/source/tools",
+      patterns: [
+        "muconvert.c",
+        "mudraw.c",
+        "mugrep.c",
+        "murun.c",
+        "mutrace.c",
+        "pdfaudit.c",
+        "pdfbake.c",
+        "pdfclean.c",
+        "pdfcreate.c",
+        "pdfextract.c",
+        "pdfinfo.c",
+        "pdfmerge.c",
+        "pdfpages.c",
+        "pdfposter.c",
+        "pdfrecolor.c",
+        "pdfshow.c",
+        "pdfsign.c",
+        "pdftrim.c",
+      ],
+    },
+    { dir: "ext/mupdf/source/helpers/mu-threads", patterns: ["mu-threads.c"] },
+  ],
+};

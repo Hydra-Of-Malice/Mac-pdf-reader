@@ -1,0 +1,296 @@
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
+   License: GPLv3 */
+
+#include "base/Base.h"
+#include "base/File.h"
+#include "base/FileWatcher.h"
+#include "base/GuessFileType.h"
+
+#include "gui/UIModels.h"
+
+#include "Settings.h"
+#include "DocController.h"
+#include "EngineBase.h"
+#include "EngineAll.h"
+#include "AppSettings.h"
+#include "ChmModel.h"
+#include "MarkdownModel.h"
+#include "DisplayModel.h"
+#include "SumatraPDF.h"
+#include "MainWindow.h"
+#include "Selection.h"
+#include "ReadAloud.h"
+#include "ReadingAutoScroll.h"
+#include "ReadingBar.h"
+#include "Translations.h"
+#include "AnnotEditToolbar.h"
+#include "WindowTab.h"
+
+WindowTab::WindowTab(MainWindow* win) {
+    this->win = win;
+}
+
+void WindowTab::SetFilePath(Str path) {
+    type = Type::Document;
+    bool changed = filePath && !path::IsSame(filePath, path);
+    if (changed && IsOpenCachePath(filePath)) {
+        file::Delete(filePath);
+    }
+    if (changed) {
+        str::FreePtr(&pendingFindText);
+    }
+    str::ReplaceWithCopy(&filePath, path);
+}
+
+void WindowTab::SetDisplayName(Str name) {
+    str::ReplaceWithCopy(&displayName, name);
+}
+
+bool WindowTab::IsAboutTab() const {
+    ReportIf(type == WindowTab::Type::None);
+    return type == WindowTab::Type::About;
+}
+
+bool WindowTab::IsFavoritesTab() const {
+    ReportIf(type == WindowTab::Type::None);
+    return type == WindowTab::Type::Favorites;
+}
+
+// About or Favorites: no document controller
+bool WindowTab::IsNonDocumentTab() const {
+    return IsAboutTab() || IsFavoritesTab();
+}
+
+WindowTab::~WindowTab() {
+    logf("~WindowTab: 0x%p, dm: 0x%p\n", this, AsFixed());
+    // whatever a close path forgot, nothing may be left pointing at a tab that
+    // is going away (the read-aloud playback bar holds one)
+    ReadAloudForgetTab(this);
+    ReadingAutoScrollForgetTab(this);
+    ReadingBarForgetTab(this);
+    // Drop MainWindow pointers into this tab / its controller before we free
+    // them: DestroyWindow during WebView teardown can re-enter the canvas
+    // WndProc, which reads win->ctrl / CurrentTab().
+    if (win) {
+        if (win->ctrl == ctrl) {
+            win->ctrl = nullptr;
+        }
+        if (win->currentTabTemp == this) {
+            win->currentTabTemp = nullptr;
+        }
+    }
+    // Full browser teardown next (not mere hide). DestroyWindow pumps; with
+    // win->ctrl already nulled (and isBeingClosed on window close), canvas
+    // re-entry must not touch a freed DisplayModel.
+    if (AsChm()) {
+        AsChm()->DestroyParentHwnd();
+    } else if (AsMarkdown()) {
+        AsMarkdown()->DestroyParentHwnd();
+    }
+    if (hwndPDFInfo) {
+        DestroyWindow(hwndPDFInfo);
+        hwndPDFInfo = nullptr;
+    }
+    if (hwndPDFOutline) {
+        DestroyWindow(hwndPDFOutline);
+        hwndPDFOutline = nullptr;
+    }
+    CloseAnnotationUiForTab(this);
+    FileWatcherUnsubscribe(watcher);
+    delete selectionOnPage;
+    // technically we only need to clear ctrl == gMostRecentlyOpenedDoc
+    // but gMostRecentlyOpenedDoc is only for dde commands
+    // so doesn't need to be kept for long
+    gMostRecentlyOpenedDoc = nullptr;
+    // waits for in-flight renders off the UI thread; deletes on the UI thread
+    DeleteControllerAsync(ctrl);
+    ctrl = nullptr;
+    if (pendingLoadArgs) {
+        // LoadArgs dtor releases any leftover engine; drop ctrl first so we do
+        // not double-delete through both paths if both were set
+        delete pendingLoadArgs->ctrl;
+        pendingLoadArgs->ctrl = nullptr;
+        SafeEngineRelease(&pendingLoadArgs->engine);
+    }
+    delete pendingLoadArgs;
+    if (IsOpenCachePath(filePath)) {
+        file::Delete(filePath);
+    }
+    str::Free(filePath);
+    filePath = {};
+    str::Free(displayName);
+    displayName = {};
+    str::Free(frameTitle);
+    str::Free(loadErrorReason);
+    str::Free(pendingFindText);
+    frameTitle = {};
+    str::Free(readAloudText);
+    readAloudText = {};
+    if (readAloudHighlight) {
+        ReadAloudHighlightFree(readAloudHighlight);
+        delete readAloudHighlight;
+    }
+    for (AIChatTabState& st : aiChat) {
+        str::Free(st.sessionId);
+        st.sessionId = {};
+        if (st.process) {
+            TerminateProcess(st.process, 0);
+            CloseHandle(st.process);
+        }
+    }
+}
+
+bool WindowTab::IsDocLoaded() const {
+    return ctrl != nullptr;
+}
+
+DisplayModel* WindowTab::AsFixed() const {
+    return ctrl ? ctrl->AsFixed() : nullptr;
+}
+
+ChmModel* WindowTab::AsChm() const {
+    return ctrl ? ctrl->AsChm() : nullptr;
+}
+
+MarkdownModel* WindowTab::AsMarkdown() const {
+    return ctrl ? ctrl->AsMarkdown() : nullptr;
+}
+
+Kind WindowTab::GetEngineType() const {
+    if (ctrl && ctrl->AsFixed()) {
+        return ctrl->AsFixed()->GetEngine()->kind;
+    }
+    return nullptr;
+}
+
+// only if AsFixed()
+EngineBase* WindowTab::GetEngine() const {
+    if (ctrl && ctrl->AsFixed()) {
+        return ctrl->AsFixed()->GetEngine();
+    }
+    return nullptr;
+}
+
+Str WindowTab::GetTabTitle() const {
+    if (displayName) {
+        return displayName;
+    }
+    if (len(filePath) == 0) {
+        if (IsAboutTab()) {
+            return StrL("Home");
+        }
+        if (IsFavoritesTab()) {
+            // same label as Favorites menu / sidebar header
+            return Tr("Favorites");
+        }
+        return StrL("");
+    }
+    TempStr embeddedFileName = ParseEmbeddedPdfName(filePath).fileName;
+    if (embeddedFileName) {
+        return embeddedFileName;
+    }
+    if (gSettings->fullPathInTitle) {
+        return filePath;
+    }
+    return path::GetBaseNameTemp(filePath);
+}
+
+void WindowTab::MoveDocBy(int dx, int dy) const {
+    if (!ctrl) {
+        return;
+    }
+    DisplayModel* dm = ctrl->AsFixed();
+    ReportIf(!dm);
+    if (!dm) {
+        return;
+    }
+    ReportIf(win->linkOnLastButtonDown);
+    if (win->linkOnLastButtonDown) {
+        return;
+    }
+    if (0 != dx) {
+        dm->ScrollXBy(dx);
+    }
+    if (0 != dy) {
+        dm->ScrollYBy(dy, false);
+    }
+
+    if (win && !win->readAloudScrollFromCode) {
+        ReadAloudOnUserViewChanged(win);
+    }
+}
+
+// the zoom ToggleZoom() would switch to. Split out so the command palette can
+// name it without repeating (and drifting from) the cycle
+float WindowTab::NextToggleZoom() const {
+    // TODO: maybe move to DocController?
+    float currZoom = ctrl ? ctrl->GetZoomVirtual() : kInvalidZoom;
+    if (kZoomFitPage == currZoom) {
+        return kZoomFitWidth;
+    }
+    if (kZoomFitWidth == currZoom) {
+        return kZoomFitHeight;
+    }
+    if (kZoomFitHeight == currZoom) {
+        return kZoomFitContent;
+    }
+    if (kZoomFitContent == currZoom) {
+        return kZoomFitVisible;
+    }
+    if (kZoomFitVisible == currZoom) {
+        return kZoomShrinkToFit;
+    }
+    return kZoomFitPage;
+}
+
+void WindowTab::ToggleZoom() const {
+    ReportIf(!ctrl);
+    if (!IsDocLoaded()) {
+        return;
+    }
+    ctrl->SetZoomVirtual(NextToggleZoom(), nullptr);
+}
+
+bool SaveDataToFile(HWND hwndParent, Str fileName, Str data) {
+    if (!CanAccessDisk()) {
+        return false;
+    }
+
+    // ReportIf(fileName && str::SliceFromChar(fileName, '/'));
+
+    OPENFILENAME ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwndParent;
+
+    WCHAR dstFileName[MAX_PATH] = {};
+    if (fileName) {
+        str::BufSet(dstFileName, dimof(dstFileName), fileName);
+    }
+    ofn.lpstrFile = dstFileName;
+    ofn.nMaxFile = dimof(dstFileName);
+
+    // Prepare the file filters (use \1 instead of \0 so that the
+    // double-zero terminated string isn't cut by the string handling
+    // methods too early on)
+    TempStr fileFilterA = fmt("%s\1*.*\1", Tr("All files"));
+    TempWStr fileFilter = ToWStrTemp(fileFilterA);
+    wstr::TransCharsInPlace(fileFilter, WStrL(L"\1"), WStrL(L"\0"));
+    ofn.lpstrFilter = fileFilter.s;
+
+    ofn.nFilterIndex = 1;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+
+    bool ok = GetSaveFileNameW(&ofn);
+    if (!ok) {
+        return false;
+    }
+    TempStr path = ToUtf8Temp(dstFileName);
+    ok = file::WriteFile(path, data);
+    // https://github.com/sumatrapdfreader/sumatrapdf/issues/1336
+#if 0
+    if (ok && tab && IsUntrustedFile(tab->filePath, gPluginURL)) {
+        file::SetZoneIdentifier(dstFileName);
+    }
+#endif
+    return ok;
+}
