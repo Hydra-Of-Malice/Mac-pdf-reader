@@ -51,6 +51,9 @@ djvudec         main       2026-08-01
   https://github.com/kjk/djvudec
   commit c8bf1b3e6704fd99d6feaba8d8ebc417e013bdb8
   amalgamated dist/djvu.c + dist/djvu.h only
+  local change (re-apply on update; upstream to github.com/kjk/djvudec): djvu.c compose_bg_native_build()
+  checks djvu_compute_red() before rendering the BG44 layer; a damaged header claiming a huge layer made the
+  render take a minute, only for compose_background_from_native() to reject the size (found by fuzzing)
 
 libwebp         1.6.0      2025-06-30
   https://github.com/webmproject/libwebp

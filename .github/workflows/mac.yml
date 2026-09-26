@@ -84,6 +84,13 @@ jobs:
         continue-on-error: true
         run: bun tests/mac/run-engine-tests.ts --driver out/mac-core-dbg-clang/test_mac_engine --json out/mac-engine-results.json
 
+      # Mutated fixtures (truncated, bit flips, damaged headers) must not crash or hang the engines: a small fixed
+      # subset; reproducers land in tests/tmp/mac-fuzz/repro. Reported, not gating.
+      - name: Fuzz subset
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: bun tests/mac/fuzz-engine.ts --driver out/mac-core-dbg-clang/test_mac_engine --ci
+
       - name: Debug build
         id: debug
         if: ${{ !cancelled() }}
@@ -137,6 +144,7 @@ jobs:
           name: SumatraPDF-mac-${{ matrix.arch }}
           path: |
             out/mac-engine-results.json
+            tests/tmp/mac-fuzz/repro
             out/**/*.tar.gz
             out/**/*.dmg
             out/**/*.zip
@@ -144,12 +152,10 @@ jobs:
           retention-days: 14
 
       # The debug app's built-in self-test (src/mac/MacSelfTest.mm): opens every manifest fixture the way Finder
-      # does, drives menus, find, sidebar, links, copy and close/reopen, snapshots pages. Last, so the builds above
-      # are uploaded even when it fails.
-      # Drives the real app through every manifest fixture; reported, not gating (yet).
+      # does, drives menus, find, sidebar, links, copy, print and close/reopen, snapshots pages. Gating; last, so
+      # the builds above are uploaded even when it fails.
       - name: App self-test
         if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
-        continue-on-error: true
         timeout-minutes: 40
         run: |
           app=$(find out -maxdepth 3 -type d -name SumatraPDF.app -path "*dbg*" | head -1)
@@ -169,8 +175,8 @@ jobs:
             tail -100 "$out/app.log"
             exit 1
           fi
-          # known failures (tracked elsewhere) are reported but don't fail the step
-          python3 - "$out/report.json" "$rc" "cbr-password" <<'EOF'
+          # known failures (space-separated case ids, tracked elsewhere) are reported but don't fail the step
+          python3 - "$out/report.json" "$rc" "" <<'EOF'
           import json, sys
           r = json.load(open(sys.argv[1], encoding="utf-8"))
           rc = int(sys.argv[2])

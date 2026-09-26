@@ -890,3 +890,19 @@ export function makeLit(title: string, items: LitItem[]): Uint8Array {
   if (w.length !== dirOff) throw new Error(`bad LIT header size ${w.length}`);
   return concat([w.bytes(), dir, ...files.map((f) => f.data)]);
 }
+
+// Uncompressed MOBI of nChapters chapters (~4 KB each, separated by <mbp:pagebreak/>), generated at test time:
+// big enough to be split into parts. The last chapter holds the word "serval".
+export function makeLargeMobi(nChapters: number): Uint8Array {
+  const parts: string[] = ["<html><head></head><body>"];
+  for (let c = 1; c <= nChapters; c++) {
+    parts.push(`<h1>Chapter ${c}</h1>`);
+    for (let p = 1; p <= 40; p++) {
+      parts.push(`<p>Chapter ${c} paragraph ${p}: the quick brown fox jumps over the lazy dog.</p>`);
+    }
+    if (c === nChapters) parts.push("<p>The last word is serval.</p>");
+    parts.push("<mbp:pagebreak/>");
+  }
+  parts.push("</body></html>");
+  return makeMobi(`Large ${nChapters} chapter fixture`, parts.join(""), [], false);
+}

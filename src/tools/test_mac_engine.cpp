@@ -13,6 +13,7 @@
 #include <time.h>
 #include <signal.h>
 #include <unistd.h>
+#include <dlfcn.h>
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #endif
@@ -228,12 +229,21 @@ static void CheckLayout(void* doc, int nPages) {
     MacDocumentLayout layout{};
     bool ok = MacLayoutDocument(doc, &params, &layout);
     int shown = 0;
+    // continuous layout: pages go down the canvas, never at negative or wrapped-around positions
+    bool sane = ok && layout.canvasWidth > 0 && layout.canvasHeight > 0;
+    int prevY = 0;
     for (int i = 0; ok && i < layout.pageCount; i++) {
-        shown += layout.pages[i].shown ? 1 : 0;
+        const MacLayoutPage& p = layout.pages[i];
+        shown += p.shown ? 1 : 0;
+        if (p.y < prevY || p.width < 0 || p.height < 0) {
+            sane = false;
+        }
+        prevY = p.y;
     }
     Key("layout");
-    printf("{\"ok\":%s,\"pageCount\":%d,\"canvas\":[%d,%d],\"shown\":%d,\"renderZoom\":%.3f}", ok ? "true" : "false",
-           layout.pageCount, layout.canvasWidth, layout.canvasHeight, shown, ok ? layout.pages[0].renderZoom : 0.0);
+    printf("{\"ok\":%s,\"pageCount\":%d,\"canvas\":[%d,%d],\"shown\":%d,\"renderZoom\":%.3f,\"sane\":%s}",
+           ok ? "true" : "false", layout.pageCount, layout.canvasWidth, layout.canvasHeight, shown,
+           ok ? layout.pages[0].renderZoom : 0.0, sane ? "true" : "false");
     bool countOk = ok && layout.pageCount == nPages;
     MacFreeDocumentLayout(&layout);
 
@@ -569,15 +579,17 @@ static void Stress(void* doc, int nPages, int nRequests) {
     KeyNum("stressRequestMs", NowMs() - start);
 }
 
-// ASan / UBSan runtime, when linked: prints the current thread's stack
-extern "C" void __sanitizer_print_stack_trace() __attribute__((weak));
+// ASan / UBSan runtime's __sanitizer_print_stack_trace, when linked. Looked up at runtime:
+// a weak undefined reference links on Linux but not with Apple's ld64.
+using PrintStackFn = void (*)();
+static PrintStackFn gPrintStack = nullptr;
 
 // -fuzz: a stuck engine call gets its stack printed instead of just a timeout
 static void OnWatchdog(int) {
     const char msg[] = "watchdog: no progress, stack of the stuck call:\n";
     write(2, msg, sizeof(msg) - 1);
-    if (__sanitizer_print_stack_trace) {
-        __sanitizer_print_stack_trace();
+    if (gPrintStack) {
+        gPrintStack();
     }
     _exit(3);
 }
@@ -609,6 +621,7 @@ int main(int argc, char** argv) {
             renderAll = true;
             gWaitMs = kFuzzWaitMs;
             gLinkScanMaxCells = kFuzzLinkScanMaxCells;
+            gPrintStack = (PrintStackFn)dlsym(RTLD_DEFAULT, "__sanitizer_print_stack_trace");
             signal(SIGALRM, OnWatchdog);
             alarm(kFuzzWatchdogSecs);
         } else if (argv[i][0] != '-' && !path) {

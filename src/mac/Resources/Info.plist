@@ -204,6 +204,11 @@
         <string>com.microsoft.bmp</string>
         <string>org.webmproject.webp</string>
         <string>public.jpeg-2000</string>
+        <string>com.truevision.tga-image</string>
+        <string>public.heic</string>
+        <string>public.heif</string>
+        <string>public.avif</string>
+        <string>public.jpeg-xl</string>
       </array>
     </dict>
   </array>

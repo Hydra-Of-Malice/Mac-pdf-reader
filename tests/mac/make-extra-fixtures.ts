@@ -205,7 +205,14 @@ save(
   "animated.gif",
   makeGif(64, 48, [
     { x: 0, y: 0, w: 64, h: 48, px: gifPattern(2) },
-    { x: 32, y: 8, w: 24, h: 32, px: (x, y) => ((x >> 2) + (y >> 2)) % 2 === 0 ? 3 : kGifTransparent, transparent: true },
+    {
+      x: 32,
+      y: 8,
+      w: 24,
+      h: 32,
+      px: (x, y) => (((x >> 2) + (y >> 2)) % 2 === 0 ? 3 : kGifTransparent),
+      transparent: true,
+    },
     { x: 8, y: 16, w: 16, h: 16, px: () => 4, disposal: 2 },
   ]),
 );
@@ -229,7 +236,9 @@ function findTool(names: string[]): string | null {
 function run(args: string[], cwd: string): boolean {
   const r = Bun.spawnSync(args, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   if (r.exitCode !== 0) {
-    console.error(`  ${args.join(" ")} failed (${r.exitCode}): ${r.stderr.toString().trim()} ${r.stdout.toString().trim()}`);
+    console.error(
+      `  ${args.join(" ")} failed (${r.exitCode}): ${r.stderr.toString().trim()} ${r.stdout.toString().trim()}`,
+    );
     return false;
   }
   return true;
@@ -432,9 +441,10 @@ function resolveFilepos(tmpl: string): string {
 
 {
   const filler = (n: number, what: string) =>
-    Array.from({ length: n }, (_, i) => `<p>${what} paragraph ${i + 1} with enough words to fill a few lines.</p>`).join(
-      "",
-    );
+    Array.from(
+      { length: n },
+      (_, i) => `<p>${what} paragraph ${i + 1} with enough words to fill a few lines.</p>`,
+    ).join("");
   const html = resolveFilepos(
     `<html><head><guide><reference type="toc" title="Table of Contents" filepos={toc} /></guide></head><body>` +
       `<h1>HUFF/CDIC fixture</h1><p>The quoll hunts at night.</p>` +
@@ -460,7 +470,10 @@ function resolveFilepos(tmpl: string): string {
 {
   const html = bytes(`<html><body><p>Secret text of a protected book.</p></body></html>`);
   save("drm.azw", makeMobiEx("DRM fixture", html, [], { type: 2, compression: 1, drm: true }));
-  save("encrypted.mobi", makeMobiEx("Encrypted fixture", html, [], { type: 2, compression: 1, encryption: 2, drm: true }));
+  save(
+    "encrypted.mobi",
+    makeMobiEx("Encrypted fixture", html, [], { type: 2, compression: 1, encryption: 2, drm: true }),
+  );
 }
 
 // ---- AZW4 (Kindle Print Replica): a PDF inside a MOBI wrapper ----

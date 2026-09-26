@@ -118,11 +118,23 @@ static SizeF PageSizeAfterRotation(const DocumentLayoutPage* page, int rotation)
 // Transform().Round() (ceil of the scaled box). The old (int)(size * zoom +
 // 0.499) can be 1px smaller than the tile, so with PageSpacing 0 the canvas
 // background shows as a hairline between comic pages (issue #6018).
+// Damaged files can claim absurd page sizes: cap pixel sizes and running
+// positions far below int overflow. No real document gets near these.
+constexpr float kMaxPagePx = 1 << 24;
+constexpr int kMaxLayoutPos = 1 << 29;
+
 static Size PagePixelSize(SizeF pageSize, float zoom) {
     if (zoom <= 0 || pageSize.dx <= 0 || pageSize.dy <= 0) {
         return {};
     }
-    return RectF(0, 0, pageSize.dx * zoom, pageSize.dy * zoom).Round().Size();
+    float dx = std::min(pageSize.dx * zoom, kMaxPagePx);
+    float dy = std::min(pageSize.dy * zoom, kMaxPagePx);
+    return RectF(0, 0, dx, dy).Round().Size();
+}
+
+static int AdvancePos(int pos, int delta) {
+    i64 res = (i64)pos + (i64)delta;
+    return res > kMaxLayoutPos ? kMaxLayoutPos : (int)res;
 }
 
 static float ZoomRealFromVirtualForPage(const DocumentLayout& layout, float zoomVirtual, int pageNo) {
@@ -338,7 +350,7 @@ static void RelayoutFacingWithSpreads(DocumentLayout& layout, bool isFitContent)
                 col++;
             }
         }
-        currPosY += rowMaxPageDy + params.pageSpacing.dy;
+        currPosY = AdvancePos(currPosY, rowMaxPageDy + params.pageSpacing.dy);
     }
 
     int canvasDy = currPosY + params.windowMargin.bottom - params.pageSpacing.dy;
@@ -498,14 +510,14 @@ void DocumentLayout::Relayout(const DocumentLayoutParams& newParams) {
         pageInARow++;
         ReportIf(pageInARow > columns);
         if (pageInARow == columns) {
-            currPosY += rowMaxPageDy + params.pageSpacing.dy;
+            currPosY = AdvancePos(currPosY, rowMaxPageDy + params.pageSpacing.dy);
             rowMaxPageDy = 0;
             pageInARow = 0;
         }
     }
 
     if (pageInARow != 0) {
-        currPosY += rowMaxPageDy + params.pageSpacing.dy;
+        currPosY = AdvancePos(currPosY, rowMaxPageDy + params.pageSpacing.dy);
     }
     int canvasDy = currPosY + params.windowMargin.bottom - params.pageSpacing.dy;
 

@@ -404,6 +404,11 @@ static MacDocument* OpenDocumentImpl(void* passwordParent, const char* path, Mac
     PageRenderEngine use = chaptered ? PageRenderEngine::Shared : PageRenderEngine::Clone;
     document->renderer =
         PageRenderService::Create(model->GetEngine(), MkFunc0(OnPageReady, document), kMacRenderCacheBytes, use);
+    if (!document->renderer && use == PageRenderEngine::Clone) {
+        // some engines can't be copied, e.g. a password-protected comic archive re-opened without its password
+        document->renderer = PageRenderService::Create(model->GetEngine(), MkFunc0(OnPageReady, document),
+                                                       kMacRenderCacheBytes, PageRenderEngine::Shared);
+    }
     if (!document->renderer) {
         // the engine owns the ToC tree
         delete document->textSelection;

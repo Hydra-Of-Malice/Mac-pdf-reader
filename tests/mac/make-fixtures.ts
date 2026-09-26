@@ -1,10 +1,12 @@
 // Generates the synthetic fixtures in tests/mac/fixtures/ used by tests/mac/run-engine-tests.ts.
 //
-// Regenerate: bun tests/mac/make-fixtures.ts
+// Regenerate: bun tests/mac/make-fixtures.ts [--force]
 //
-// Most files are written by the tiny writers in tests/mac/fixture-lib.ts. A few need external tools
-// (looked up on PATH, plus FIXTURE_TOOLS_DIR if set); when a tool is missing the committed file is kept:
-//   - qpdf (encrypted PDFs), rar (RAR5 CBR), 7z (CB7), c44/cjb2/djvm/djvused (DjVu)
+// Most files are written by the tiny writers in tests/mac/fixture-lib.ts, deterministically; a file is only
+// rewritten when its bytes change. A few need external tools (looked up on PATH, plus FIXTURE_TOOLS_DIR if set),
+// whose output isn't reproducible (salts, stamps): an existing tool-made file is kept unless --force is passed,
+// and when a tool is missing the committed file is kept:
+//   - qpdf (encrypted PDFs), rar (RAR5 CBR), 7z (CB7, password CBZs), c44/cjb2/djvm/djvused (DjVu)
 // sample-rar4.cbr is written by makeRar4Store() (RAR 4.x, store method): rar 7.x can't create RAR4.
 // On Ubuntu without root the tools can be unpacked from the distro archive:
 //   apt-get download qpdf libqpdf29t64 rar 7zip djvulibre-bin libdjvulibre21
@@ -20,6 +22,7 @@ import { tmpdir } from "node:os";
 import {
   bytes,
   concat,
+  crc32,
   makeBmp,
   makeLit,
   makeMobi,
@@ -46,9 +49,28 @@ mkdirSync(outDir, { recursive: true });
 const written: string[] = [];
 const skipped: string[] = [];
 
+const force = process.argv.includes("--force");
+const unchanged: string[] = [];
+const kept: string[] = [];
+
+// writes a fixture only when its bytes change, so regenerating doesn't churn the repo
 function save(name: string, data: Uint8Array | string) {
-  writeFileSync(join(outDir, name), typeof data === "string" ? bytes(data) : data);
+  const d = typeof data === "string" ? bytes(data) : data;
+  const path = join(outDir, name);
+  if (existsSync(path) && Buffer.compare(readFileSync(path), Buffer.from(d)) === 0) {
+    unchanged.push(name);
+    return;
+  }
+  writeFileSync(path, d);
   written.push(name);
+}
+
+// external tools salt or stamp their output (AES salts, archive headers), so a committed
+// tool-made fixture is only rebuilt with --force
+function keepToolOutput(name: string): boolean {
+  if (force || !existsSync(join(outDir, name))) return false;
+  kept.push(name);
+  return true;
 }
 
 const red: Rgb = [220, 40, 40];
@@ -424,6 +446,25 @@ save("sample.cbt", makeTar(comicPages));
 save("corrupt.cbz", concat([bytes("PK\x03\x04"), new Uint8Array(300).fill(0x5a)]));
 save("empty.cbz", new Uint8Array(0));
 save("sample-rar4.cbr", makeRar4Store(comicPages));
+
+// pages whose PNG headers claim 48 x 2130706432 px: summing their heights must not overflow the layout
+function hugeClaimPng(): Uint8Array {
+  const png = smallPng(red).slice();
+  const dv = new DataView(png.buffer);
+  dv.setUint32(20, 0x7f000000); // IHDR height
+  dv.setUint32(29, crc32(png.subarray(12, 29))); // IHDR crc (type + data)
+  return png;
+}
+save(
+  "huge-pages.cbz",
+  makeZip(
+    Array.from({ length: 200 }, (_, i) => ({
+      name: `p${String(i).padStart(3, "0")}.png`,
+      data: hugeClaimPng(),
+      store: true,
+    })),
+  ),
+);
 save("corrupt.cbr", concat([bytes("Rar!\x1a\x07\x00"), new Uint8Array(300).fill(0x33)]));
 
 // ---- text-ish formats rendered by mupdf ----
@@ -514,8 +555,9 @@ withTools("encrypted pdf", ["qpdf"], (t, work) => {
     ["encrypted-aes256.pdf", "256"],
   ];
   for (const [name, bits] of variants) {
+    if (keepToolOutput(name)) continue;
     const aes = bits === "128" ? ["--use-aes=y"] : [];
-    const dst = join(outDir, name);
+    const dst = join(work, name);
     const args = [
       t.qpdf!,
       "--static-id",
@@ -529,7 +571,7 @@ withTools("encrypted pdf", ["qpdf"], (t, work) => {
       src,
       dst,
     ];
-    if (run(args, work)) written.push(name);
+    if (run(args, work)) save(name, readFileSync(dst));
   }
 });
 
@@ -540,22 +582,29 @@ withTools("cbr", ["rar"], (t, work) => {
     ["password.cbr", ["-ma5", "-psumatra"]],
   ];
   for (const [name, opts] of variants) {
-    const dst = join(outDir, name);
-    rmSync(dst, { force: true });
-    if (run([t.rar!, "a", "-idq", "-ep", "-tl", ...opts, dst, ...names], work)) written.push(name);
+    if (keepToolOutput(name)) continue;
+    const dst = join(work, name);
+    if (run([t.rar!, "a", "-idq", "-ep", "-tl", ...opts, dst, ...names], work)) save(name, readFileSync(dst));
   }
 });
 
-withTools("cb7", ["7z"], (t, work) => {
+withTools("7z", ["7z"], (t, work) => {
   const names = writeComicPages(work);
-  const dst = join(outDir, "sample.cb7");
-  rmSync(dst, { force: true });
-  if (run([t["7z"]!, "a", "-t7z", "-bd", "-mtm=off", "-mtc=off", "-mta=off", dst, ...names], work)) {
-    written.push("sample.cb7");
+  const variants: [string, string[]][] = [
+    ["sample.cb7", ["-t7z", "-mtm=off", "-mtc=off", "-mta=off"]],
+    // password-protected comic zips: traditional PKWARE encryption, and WinZip AES
+    ["password-zipcrypto.cbz", ["-tzip", "-psumatra", "-mem=ZipCrypto"]],
+    ["password-aes.cbz", ["-tzip", "-psumatra", "-mem=AES256"]],
+  ];
+  for (const [name, opts] of variants) {
+    if (keepToolOutput(name)) continue;
+    const dst = join(work, name);
+    if (run([t["7z"]!, "a", "-bd", ...opts, dst, ...names], work)) save(name, readFileSync(dst));
   }
 });
 
 withTools("djvu", ["c44", "cjb2", "djvm", "djvused"], (t, work) => {
+  if (keepToolOutput("sample.djvu")) return;
   const w = 600;
   const h = 800;
   // page 1: color photo-like image (IW44), page 2: bitonal (JB2)
@@ -589,13 +638,13 @@ title "DjVu mac fixture"
 save
 `;
   if (!run([t.djvused!, "sample.djvu", "-f", "/dev/stdin"], work, script)) return;
-  writeFileSync(join(outDir, "sample.djvu"), readFileSync(join(work, "sample.djvu")));
-  written.push("sample.djvu");
+  save("sample.djvu", readFileSync(join(work, "sample.djvu")));
 });
 save("corrupt.djvu", concat([bytes("AT&TFORM\x00\x00\x10\x00DJVU"), new Uint8Array(400).fill(0x11)]));
 
-console.log(`wrote ${written.length} fixtures to ${outDir}`);
+console.log(`wrote ${written.length} fixtures to ${outDir}, ${unchanged.length} unchanged`);
 for (const n of written) console.log(`  ${n}`);
+if (kept.length > 0) console.log(`kept tool-made fixtures (--force rebuilds them): ${kept.join(", ")}`);
 if (skipped.length > 0) {
   console.log("skipped (kept committed file):");
   for (const s of skipped) console.log(`  ${s}`);

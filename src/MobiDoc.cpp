@@ -1622,20 +1622,119 @@ static void CollectFilepos(Str html, Vec<int>& res) {
 // page-break-before is ignored by the chaptered EPUB layout, page-break-after works
 static const Str kMobiPageBreak = StrL("<div style=\"page-break-after:always\"></div>");
 
+// deeper ToC levels become siblings: MuPDF rejects overly nested NCX files
+constexpr int kMaxMobiNcxDepth = 64;
+
+// a big book is split into parts (EPUB chapters) MuPDF lays out on demand
+constexpr int kMinMobiPartBytes = 256 * 1024;
+
+struct MobiParts {
+    Vec<int> splitAt;  // byte offset in the html of the <mbp:pagebreak> a part starts at
+    Vec<int> splitPos; // the same, in filepos units
+
+    int PartOf(int filepos) const {
+        int part = 0;
+        while (part < len(splitPos) && splitPos[part] <= filepos) {
+            part++;
+        }
+        return part;
+    }
+};
+
+static TempStr MobiPartNameTemp(int part) {
+    return part == 0 ? str::DupTemp(StrL("index.html")) : fmt("part%d.html", part + 1);
+}
+
+// elements that don't keep a split from happening: void, auto-closed or the document's own
+static bool MobiIgnoredForSplit(Str name) {
+    static const char* kNames[] = {"html",  "head", "body", "p",    "li",  "dt",    "dd",    "tr",
+                                   "td",    "th",   "br",   "img",  "hr",  "meta",  "link",  "input",
+                                   "param", "col",  "area", "base", "wbr", "embed", "source"};
+    for (const char* n : kNames) {
+        if (str::EqI(name, Str((char*)n))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Where a book of more than 2 * kMinMobiPartBytes is split: at <mbp:pagebreak>s
+// at least kMinMobiPartBytes apart where no element other than html / body / an
+// auto-closed one (p, li, ...) is open, so no formatting is cut in two.
+static void FindMobiSplits(Str html, bool offsetIsChar, MobiParts& parts) {
+    int n = len(html);
+    if (n < 2 * kMinMobiPartBytes) {
+        return;
+    }
+    Vec<Str> open;
+    int lastSplit = 0;
+    int pos = 0;
+    int counted = 0;
+    int i = 0;
+    while (i < n) {
+        if (html.s[i] != '<') {
+            i++;
+            continue;
+        }
+        if (str::StartsWith(Str(html.s + i, n - i), StrL("<!--"))) {
+            int end = str::IndexOf(Str(html.s + i, n - i), StrL("-->"));
+            i = end < 0 ? n : i + end + 3;
+            continue;
+        }
+        int end = SkipPastTagEnd(html, i);
+        bool closing = i + 1 < n && html.s[i + 1] == '/';
+        int nameStart = i + (closing ? 2 : 1);
+        int nameEnd = nameStart;
+        while (nameEnd < end && !str::IsWs(html.s[nameEnd]) && html.s[nameEnd] != '>' && html.s[nameEnd] != '/') {
+            nameEnd++;
+        }
+        Str name(html.s + nameStart, nameEnd - nameStart);
+        bool selfClosing = end >= 2 && html.s[end - 2] == '/';
+        if (str::EqI(name, StrL("mbp:pagebreak"))) {
+            if (!closing && len(open) == 0 && i - lastSplit >= kMinMobiPartBytes) {
+                for (; counted < i; counted++) {
+                    if (!offsetIsChar || ((u8)html.s[counted] & 0xc0) != 0x80) {
+                        pos++;
+                    }
+                }
+                VecAppend(parts.splitAt, i);
+                VecAppend(parts.splitPos, pos);
+                lastSplit = i;
+            }
+        } else if (len(name) == 0 || name.s[0] == '!' || name.s[0] == '?' || MobiIgnoredForSplit(name)) {
+            // comments, doctype, void and auto-closed elements
+        } else if (closing) {
+            for (int k = len(open) - 1; k >= 0; k--) {
+                if (str::EqI(open[k], name)) {
+                    open.len = k;
+                    break;
+                }
+            }
+        } else if (!selfClosing) {
+            VecAppend(open, name);
+        }
+        i = end;
+    }
+}
+
 // <img recindex="00003"> and src="kindle:embed:0003?..." become src="img/3".
 // <a filepos=N> becomes a link to <a id="fpN"> inserted at text offset N (in
 // characters for a book converted from CP-1252). <mbp:pagebreak/> becomes a CSS
 // page break, kept only between content so leading, doubled or trailing breaks
 // don't make blank pages: what follows a break is held back until content shows up.
-static void AppendMobiHtmlForEpub(str::Builder& out, Str html, const Vec<int>& targets, bool offsetIsChar) {
+// At a split the book continues in the next part.
+static void MobiHtmlToParts(Str html, const Vec<int>& targets, const MobiParts& parts, bool offsetIsChar,
+                            StrVec& partsOut) {
     int n = len(html);
     int i = 0;
     int pos = 0; // offset in the original text
     int nextTarget = 0;
+    int nextSplit = 0;
     bool inTag = false;
     bool inLink = false;
     bool hasContent = false;
     bool pendingBreak = false;
+    str::Builder out;
     str::Builder held;
     // due anchors go right before the next text or image: an empty element before
     // a heading can end up on the previous page
@@ -1650,6 +1749,23 @@ static void AppendMobiHtmlForEpub(str::Builder& out, Str html, const Vec<int>& t
     while (i < n) {
         Str rest(html.s + i, n - i);
         char c = html.s[i];
+        if (nextSplit < len(parts.splitAt) && i == parts.splitAt[nextSplit]) {
+            // one root element per part: MuPDF would read a well-formed fragment as XML
+            // and keep only its first element
+            out.Append(ToStr(held));
+            out.Append(ToStr(anchors));
+            out.Append(StrL("</body></html>"));
+            partsOut.Append(ToStr(out));
+            out.Reset();
+            out.Append(StrL("<html><body>"));
+            held.Reset();
+            anchors.Reset();
+            pendingBreak = false;
+            hasContent = false;
+            nextSplit++;
+            advance(SkipPastTagEnd(html, i));
+            continue;
+        }
         while (!inTag && nextTarget < len(targets) && targets[nextTarget] <= pos) {
             anchors.Append(fmt("<a id=\"fp%d\"></a>", targets[nextTarget++]));
         }
@@ -1703,7 +1819,7 @@ static void AppendMobiHtmlForEpub(str::Builder& out, Str html, const Vec<int>& t
             Str v = AttrValueAt(Str(rest.s + len(filepos), len(rest) - len(filepos)), &used);
             int target = ParseFilepos(v);
             if (target >= 0) {
-                w.Append(fmt("href=\"#fp%d\"", target));
+                w.Append(fmt("href=\"%s#fp%d\"", MobiPartNameTemp(parts.PartOf(target)), target));
                 advance(i + len(filepos) + used);
                 continue;
             }
@@ -1716,6 +1832,7 @@ static void AppendMobiHtmlForEpub(str::Builder& out, Str html, const Vec<int>& t
     while (nextTarget < len(targets)) {
         out.Append(fmt("<a id=\"fp%d\"></a>", targets[nextTarget++]));
     }
+    partsOut.Append(ToStr(out));
 }
 
 struct MobiTocCollector : EbookTocVisitor {
@@ -1731,19 +1848,21 @@ struct MobiTocCollector : EbookTocVisitor {
 };
 
 // NCX navMap from the book's ToC page, nested by its levels
-static void AppendMobiNavMap(str::Builder& ncx, const MobiTocCollector& toc) {
+static void AppendMobiNavMap(str::Builder& ncx, const MobiTocCollector& toc, const MobiParts& parts) {
     Vec<int> openLevels;
     for (int i = 0; i < len(toc.titles); i++) {
-        int level = toc.levels[i];
+        int level = std::min(toc.levels[i], kMaxMobiNcxDepth);
         while (len(openLevels) > 0 && VecLast(openLevels) >= level) {
             ncx.Append(StrL("</navPoint>\n"));
             VecPop(openLevels);
         }
         ncx.Append(fmt("<navPoint id=\"n%d\" playOrder=\"%d\"><navLabel><text>", i + 1, i + 1));
         AppendXmlEscaped(ncx, toc.titles.At(i));
-        ncx.Append(StrL("</text></navLabel><content src=\"index.html"));
-        if (toc.targets[i] >= 0) {
-            ncx.Append(fmt("#fp%d", toc.targets[i]));
+        int target = toc.targets[i];
+        ncx.Append(StrL("</text></navLabel><content src=\""));
+        ncx.Append(MobiPartNameTemp(target >= 0 ? parts.PartOf(target) : 0));
+        if (target >= 0) {
+            ncx.Append(fmt("#fp%d", target));
         }
         ncx.Append(StrL("\"/>\n"));
         VecAppend(openLevels, level);
@@ -1800,6 +1919,13 @@ Str MobiToEpubConvert(Str path) {
     if (len(html) == 0) {
         return {};
     }
+    bool offsetIsChar = !drm && doc->textEncoding != CP_UTF8;
+    MobiParts parts;
+    FindMobiSplits(html, offsetIsChar, parts);
+    Vec<int> targets;
+    CollectFilepos(html, targets);
+    StrVec texts;
+    MobiHtmlToParts(html, targets, parts, offsetIsChar, texts);
 
     str::Builder opf;
     opf.Append(
@@ -1814,25 +1940,25 @@ Str MobiToEpubConvert(Str path) {
     if (!drm) {
         doc->ParseToc(&toc);
     }
-    bool hasToc = len(toc.titles) > 0;
     opf.Append(
-        StrL("</dc:creator></metadata>\n"
-             "<manifest><item id=\"text\" href=\"index.html\" media-type=\"application/xhtml+xml\"/>\n"
-             "<item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/></manifest>\n"));
-    opf.Append(hasToc ? StrL("<spine toc=\"ncx\">") : StrL("<spine>"));
-    opf.Append(StrL("<itemref idref=\"text\"/></spine>\n</package>\n"));
+        StrL("</dc:creator></metadata>\n<manifest>\n"
+             "<item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n"));
+    for (int i = 0; i < len(texts); i++) {
+        opf.Append(
+            fmt("<item id=\"t%d\" href=\"%s\" media-type=\"application/xhtml+xml\"/>\n", i, MobiPartNameTemp(i)));
+    }
+    opf.Append(len(toc.titles) > 0 ? StrL("</manifest>\n<spine toc=\"ncx\">\n") : StrL("</manifest>\n<spine>\n"));
+    for (int i = 0; i < len(texts); i++) {
+        opf.Append(fmt("<itemref idref=\"t%d\"/>\n", i));
+    }
+    opf.Append(StrL("</spine>\n</package>\n"));
 
     str::Builder ncx;
     ncx.Append(
         StrL("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
              "<ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" version=\"2005-1\"><head/><navMap>\n"));
-    AppendMobiNavMap(ncx, toc);
+    AppendMobiNavMap(ncx, toc, parts);
     ncx.Append(StrL("</navMap></ncx>\n"));
-
-    Vec<int> targets;
-    CollectFilepos(html, targets);
-    str::Builder text;
-    AppendMobiHtmlForEpub(text, html, targets, !drm && doc->textEncoding != CP_UTF8);
 
     str::Builder zipData;
     ZipCreator zc(zipData);
@@ -1840,8 +1966,13 @@ Str MobiToEpubConvert(Str path) {
     ok &= zc.AddFileData(StrL("META-INF/container.xml"), Str(kMobiEpubContainerXml));
     ok &= zc.AddFileData(StrL("content.opf"), ToStrTemp(opf));
     ok &= zc.AddFileData(StrL("toc.ncx"), ToStrTemp(ncx));
-    ok &= zc.AddFileData(StrL("index.html"), ToStr(text));
+    for (int i = 0; ok && i < len(texts); i++) {
+        AutoArenaSavepoint partScope;
+        Str text = texts.At(i);
+        ok = zc.AddFileData(MobiPartNameTemp(i), len(text) > 0 ? text : StrL("<html><body></body></html>"));
+    }
     for (int i = 1; ok && !drm && i <= doc->imagesCount; i++) {
+        AutoArenaSavepoint imageScope;
         Str img = doc->GetImage(i);
         if (len(img) > 0) {
             ok = zc.AddFileData(fmt("img/%d", i), img);

@@ -7,7 +7,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { makeLargePdf } from "./fixture-lib.ts";
+import { makeLargeMobi, makeLargePdf } from "./fixture-lib.ts";
 
 interface LinkExpect {
   kind: string;
@@ -91,10 +91,11 @@ function parseArgs() {
 
 function ensureGenerated(f: Fixture, absPath: string) {
   if (!f.generate || existsSync(absPath)) return;
-  const m = /^large-pdf-(\d+)$/.exec(f.generate);
+  const m = /^large-(pdf|mobi)-(\d+)$/.exec(f.generate);
   if (!m) throw new Error(`${f.id}: unknown generator ${f.generate}`);
   mkdirSync(dirname(absPath), { recursive: true });
-  writeFileSync(absPath, makeLargePdf(Number(m[1])));
+  const n = Number(m[2]);
+  writeFileSync(absPath, m[1] === "pdf" ? makeLargePdf(n) : makeLargeMobi(n));
 }
 
 function driverArgs(f: Fixture, absPath: string): string[] {
@@ -159,6 +160,7 @@ function checkOpened(f: Fixture, r: any, fail: (s: string) => void) {
   if (f.minPages !== undefined && pages < f.minPages) fail(`pages ${pages} < ${f.minPages}`);
   if (r.badPageSizes) fail(`${r.badPageSizes} pages without a size`);
   if (!r.layout?.ok || !r.layoutPageCountOk) fail("continuous layout failed");
+  if (r.layout?.sane === false) fail(`continuous layout has pages at bad positions (canvas ${r.layout.canvas})`);
   if (!r.layoutSinglePageRotated) fail("single page rotated layout failed");
   if (!r.render1?.ok) fail("sync render of page 1 failed");
   else if (!(r.render1.inkRatio > 0)) fail("page 1 renders blank");
@@ -264,6 +266,8 @@ async function runFixture(driver: string, f: Fixture, defTimeout: number): Promi
   if (f.expect === "open") {
     if (!r.open) fail(`did not open: ${r.error}`);
     else checkOpened(f, r, fail);
+  } else if (f.expect === "any" && r.open && r.layout?.sane === false) {
+    fail(`continuous layout has pages at bad positions (canvas ${r.layout.canvas})`);
   } else if (f.expect === "fail") {
     if (r.open) fail("opened but should fail");
     else if (!r.error) fail("failed without an error message");

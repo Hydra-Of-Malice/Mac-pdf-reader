@@ -1,5 +1,5 @@
 {
-  "comment": "Expectations for tests/mac/run-engine-tests.ts. Paths are relative to the repo root. expect: open | fail | any (any = must not crash or hang). target: false = format not planned for the mac port. Fixtures in tests/mac/fixtures are made by tests/mac/make-fixtures.ts; large-2000.pdf is generated at test time.",
+  "comment": "Expectations for tests/mac/run-engine-tests.ts. regress/*: tests/mac/fuzz-engine.ts reproducers of fixed crashes and hangs. Paths are relative to the repo root. expect: open | fail | any (any = must not crash or hang). target: false = format not planned for the mac port. Fixtures in tests/mac/fixtures are made by tests/mac/make-fixtures.ts; large-2000.pdf and large-500.mobi are generated at test time; tests/mac/make-extra-fixtures.ts makes the image, MOBI and CHM fixtures it lists.",
   "fixtures": [
     {
       "id": "pdf-text",
@@ -175,6 +175,16 @@
       "search": "DRM"
     },
     {
+      "id": "mobi-large-500-chapters",
+      "format": "MOBI",
+      "path": "tests/tmp/mac-fixtures/large-500.mobi",
+      "generate": "large-mobi-500",
+      "expect": "open",
+      "minPages": 1000,
+      "search": "serval",
+      "timeoutMs": 300000
+    },
+    {
       "id": "azw4-print-replica",
       "format": "AZW4",
       "path": "tests/mac/fixtures/print-replica.azw4",
@@ -192,6 +202,23 @@
       "pages": 5,
       "tocMin": 1
     },
+    {
+      "id": "cbz-password-zipcrypto",
+      "format": "CBZ",
+      "path": "tests/mac/fixtures/password-zipcrypto.cbz",
+      "expect": "open",
+      "password": "sumatra",
+      "pages": 3
+    },
+    {
+      "id": "cbz-password-aes",
+      "format": "CBZ",
+      "path": "tests/mac/fixtures/password-aes.cbz",
+      "expect": "open",
+      "password": "sumatra",
+      "pages": 3
+    },
+    { "id": "cbz-huge-page-claims", "format": "CBZ", "path": "tests/mac/fixtures/huge-pages.cbz", "expect": "any" },
     { "id": "cbz-corrupt", "format": "CBZ", "path": "tests/mac/fixtures/corrupt.cbz", "expect": "fail" },
     { "id": "cbz-empty", "format": "CBZ", "path": "tests/mac/fixtures/empty.cbz", "expect": "fail" },
     { "id": "cbr-rar4", "format": "CBR", "path": "tests/mac/fixtures/sample-rar4.cbr", "expect": "open", "pages": 3 },
@@ -395,6 +422,25 @@
       "expect": "open",
       "minPages": 1,
       "search": "wallaby"
+    },
+    {
+      "id": "regress-djvu-huge-iw44-layer",
+      "format": "DjVu",
+      "path": "tests/mac/fixtures/regress/djvu-huge-iw44-layer.djvu",
+      "expect": "any",
+      "timeoutMs": 20000
+    },
+    {
+      "id": "regress-chm-link-invalid-utf8",
+      "format": "CHM",
+      "path": "tests/mac/fixtures/regress/chm-link-invalid-utf8.chm",
+      "expect": "any"
+    },
+    {
+      "id": "regress-epub-link-invalid-utf8",
+      "format": "EPUB",
+      "path": "tests/mac/fixtures/regress/epub-link-invalid-utf8.epub",
+      "expect": "any"
     },
     {
       "id": "postscript",

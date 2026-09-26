@@ -96,8 +96,8 @@ from the `.dmg` (or the unpacked `.zip`) to `/Applications`.
 - Per-format engine tests through the app's bridge (`src/mac/SumatraMacEngine.h`):
   `bun tests/mac/run-engine-tests.ts --driver out/mac-core-dbg-clang/test_mac_engine [--only <id>] [--json f.json]`
   over `tests/mac/fixtures/manifest.json`. See [formats.md](formats.md).
-- In-app self-test (drives the real Cocoa app through every manifest fixture: open, render, navigation, zoom,
-  rotation, sidebar, find, links, copy, reopen):
+- In-app self-test (drives the real Cocoa app through every manifest fixture: open in the background, render,
+  navigation, zoom, rotation, sidebar, find and the find bar, links, select all and copy, print to PDF, reopen):
   `out/mac-dbg-arm64/SumatraPDF.app/Contents/MacOS/SumatraPDF -for-testing -prefs-dir /tmp/sp -self-test
 /tmp/sp/report.json -self-test-manifest tests/mac/fixtures/manifest.json` (exit code 0 = pass; PNG snapshots next
   to the report).
@@ -141,7 +141,7 @@ CoreFoundation`: `src/mupdf/mupdf_load_system_font_mac.c` (MuPDF's system-font h
 - `windows`: `bun cmd/run-unit-tests.ts -dbg` (the port touches shared code).
 - `build` (arm64 on macos-15, x64 on macos-15-intel): `-mac-core`, the format test matrix (reported), `-mac -dbg`, a
   launch smoke test (the app must still run 15 s after opening a PDF; screenshot uploaded), `-mac -rel`, and the
-  in-app self-test (reported). Artifacts: `SumatraPDF-mac-<arch>` (`.tar.gz`, `.zip`, `.dmg`), `smoke-<arch>`,
+  in-app self-test (gating). Artifacts: `SumatraPDF-mac-<arch>` (`.tar.gz`, `.zip`, `.dmg`), `smoke-<arch>`,
   `selftest-<arch>`, kept 14 days. They are ad-hoc signed only; see Gatekeeper below.
 
 `.github/workflows/mac-daily.yml` runs `bun cmd/build.ts -mac -asan` daily.

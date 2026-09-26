@@ -9100,6 +9100,10 @@ bool IsEngineMupdfSupportedFileType(FileType kind) {
 // would load a different format (e.g. the AZW4 a PDF was extracted from). A
 // PDF's bytes come from GetFileData(), other docs keep a copy.
 static void KeepCloneSource(EngineMupdf* e, Str data, Str name) {
+#if OS_WIN
+    // Windows keeps cloning from FilePath() (and doesn't pay for the extra copy)
+    return;
+#endif
     if (len(data) == 0) {
         return;
     }
