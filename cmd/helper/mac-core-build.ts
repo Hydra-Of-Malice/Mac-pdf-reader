@@ -28,6 +28,7 @@ import {
   defaultJobs,
   guiMacSources,
   hostArch,
+  MAC_FRAMEWORK_SOURCES,
   kMacMinVersion,
   macTarget,
   runTestUtil,
@@ -92,7 +93,7 @@ function nativeTools(cc: CoreCompiler, outDir: string): BuildTools {
 
 function nativeTarget(): PosixTarget {
   if (process.platform === "darwin") return macTarget(hostArch());
-  if (process.platform === "linux") return { os: "linux", arch: hostArch(), flags: [] };
+  if (process.platform === "linux") return { os: "linux", arch: hostArch(), flags: [], frameworks: false };
   throw new Error(`-mac-core runs on Linux or macOS (this is ${process.platform}); from Windows use WSL`);
 }
 
@@ -136,7 +137,8 @@ export async function buildMacCore(opts: MacCoreOptions): Promise<void> {
 // zig's clang with Apple's libc headers but no frameworks
 function crossTarget(arch: MacArch): PosixTarget {
   const zigArch = arch === "arm64" ? "aarch64" : "x86_64";
-  return { os: "mac", arch, flags: ["-target", `${zigArch}-macos.${kMacMinVersion}`, "-Wno-nullability-completeness"] };
+  const flags = ["-target", `${zigArch}-macos.${kMacMinVersion}`, "-Wno-nullability-completeness"];
+  return { os: "mac", arch, flags, frameworks: false };
 }
 
 async function crossCompileArch(opts: MacCrossOptions, arch: MacArch): Promise<void> {
@@ -158,7 +160,8 @@ async function crossCompileArch(opts: MacCrossOptions, arch: MacArch): Promise<v
   const missing = objs.filter((o) => !existsSync(o));
   if (missing.length > 0) throw new Error(`missing objects: ${missing.join(", ")}`);
   console.log(`macOS ${arch}: ${libs.length} libraries, ${sorted.length} app / test sources compiled`);
-  console.log(`skipped (need AppKit, not available to zig): ${cocoaSources().join(" ")}`);
+  const skipped = [...MAC_FRAMEWORK_SOURCES, ...cocoaSources()].join(" ");
+  console.log(`skipped (need Apple frameworks, not available to zig): ${skipped}`);
 }
 
 export async function buildMacCross(opts: MacCrossOptions): Promise<void> {

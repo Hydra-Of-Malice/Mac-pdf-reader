@@ -99,6 +99,14 @@ from the `.dmg` (or the unpacked `.zip`) to `/Applications`.
   `out/mac-dbg-arm64/SumatraPDF.app/Contents/MacOS/SumatraPDF -for-testing -prefs-dir /tmp/sp -self-test
 /tmp/sp/report.json -self-test-manifest tests/mac/fixtures/manifest.json` (exit code 0 = pass; PNG snapshots next
   to the report).
+  - `-for-testing`: no session restore, user defaults (sidebar, window frame, toolbar) neither read nor written,
+    settings in a temporary folder removed on quit.
+  - `-prefs-dir <dir>`: keep `SumatraPDF-settings.txt` in `<dir>` instead.
+  - `-self-test <report.json>`: run the self-test, write the JSON report and PNGs, quit with 0 (pass) / 1 (fail);
+    3 means the watchdog fired. Documents on the command line are tested too (expected to open).
+  - `-self-test-manifest <manifest.json>`: expectations (pages, passwords, search words); without paths, every
+    fixture in it. `-self-test-find <word>`: search word for documents not in the manifest.
+    `-self-test-timeout <seconds>`: watchdog, default 1500.
 - Remote Mac over ssh: `SUMATRA_MAC_HOST=user@host SUMATRA_MAC_DIR=src/sumatrapdf bun cmd/build.ts -mac-remote
 -branch <pushed-branch> -dbg`.
 - Manual checks before a release: [MANUAL-TEST-CHECKLIST.md](MANUAL-TEST-CHECKLIST.md).

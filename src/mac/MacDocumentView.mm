@@ -9,6 +9,7 @@
 #import "mac/MacDocumentView.h"
 
 static const CGFloat kDragThreshold = 4.0;
+static const CGFloat kSpinnerSize = 32.0;
 static const double kPrintDpi = 300.0;
 static const double kMaxPrintPixels = 64.0 * 1024 * 1024;
 
@@ -99,6 +100,7 @@ enum class DragMode {
 };
 
 @implementation SumatraDocumentView {
+    NSProgressIndicator* _spinner;
     NSTrackingArea* _trackingArea;
     DragMode _dragMode;
     NSPoint _lastDragWindowPoint;
@@ -128,7 +130,42 @@ enum class DragMode {
     }
     [_pages release];
     [_message release];
+    [_spinner release];
     [super dealloc];
+}
+
+- (void)placeSpinner {
+    NSRect r = [self visibleRect];
+    [_spinner setFrameOrigin:NSMakePoint(floor(NSMidX(r) - kSpinnerSize / 2.0), floor(NSMidY(r) - kSpinnerSize - 24))];
+}
+
+- (void)setBusy:(BOOL)busy {
+    if (_busy == busy) {
+        return;
+    }
+    _busy = busy;
+    if (!busy) {
+        [_spinner stopAnimation:nil];
+        [_spinner setHidden:YES];
+        return;
+    }
+    if (!_spinner) {
+        _spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0, 0, kSpinnerSize, kSpinnerSize)];
+        [_spinner setStyle:NSProgressIndicatorStyleSpinning];
+        [_spinner setDisplayedWhenStopped:NO];
+        [_spinner setAccessibilityLabel:@"Opening document"];
+        [self addSubview:_spinner];
+    }
+    [self placeSpinner];
+    [_spinner setHidden:NO];
+    [_spinner startAnimation:nil];
+}
+
+- (void)setFrameSize:(NSSize)size {
+    [super setFrameSize:size];
+    if (_busy) {
+        [self placeSpinner];
+    }
 }
 
 - (void)setPages:(NSArray*)pages {

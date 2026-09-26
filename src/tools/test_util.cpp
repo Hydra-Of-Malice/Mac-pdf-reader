@@ -103,6 +103,43 @@ static void ThreadStackTest() {
     utassert(check.recursionSum == kRecursionDepth + 1);
 }
 
+//--- Base_posix.cpp: code pages, normalization
+
+static void CodePageTest() {
+    const char* cp1251 = "\xcf\xf0\xe8\xe2\xe5\xf2\x2c\x20\xea\xe0\xea\x20\xe4\xe5\xeb\xe0\x3f\x20\xdd\xf2\xee\x20\xf2"
+                         "\xe5\xf1\xf2\xee\xe2\xfb\xe9\x20\xf2\xe5\xea\xf1\xf2\x2e";
+    const char* koi8r = "\xf0\xd2\xc9\xd7\xc5\xd4\x2c\x20\xcb\xc1\xcb\x20\xc4\xc5\xcc\xc1\x3f\x20\xfc\xd4\xcf\x20\xd4"
+                        "\xc5\xd3\xd4\xcf\xd7\xd9\xca\x20\xd4\xc5\xcb\xd3\xd4\x2e";
+    const char* sjis = "\x82\xb1\x82\xf1\x82\xc9\x82\xbf\x82\xcd\x81\x41\x82\xb1\x82\xea\x82\xcd\x93\xfa\x96\x7b\x8c"
+                       "\xea\x82\xcc\x83\x65\x83\x4c\x83\x58\x83\x67\x82\xc5\x82\xb7\x81\x42";
+    const char* gbk = "\xd5\xe2\xca\xc7\xd2\xbb\xb8\xf6\xd6\xd0\xce\xc4\xb5\xc4\xb2\xe2\xca\xd4\xce\xc4\xb1\xbe\xa3\xac"
+                      "\xce\xd2\xc3\xc7\xd4\xda\xd5\xe2\xc0\xef\xcb\xb5\xbb\xb0\xa1\xa3";
+    const char* korean = "\xbe\xc8\xb3\xe7\xc7\xcf\xbc\xbc\xbf\xe4\x20\xc7\xd1\xb1\xb9\xbe\xee\x20\xc5\xd8\xbd\xba\xc6"
+                         "\xae\xc0\xd4\xb4\xcf\xb4\xd9";
+    utassert(GuessTextCodepage(StrL("plain ascii"), CP_ACP) == CP_UTF8);
+    utassert(GuessTextCodepage(StrL("caf\xc3\xa9 au lait"), CP_ACP) == CP_UTF8);
+    utassert(GuessTextCodepage(StrL("caf\xe9 au lait"), CP_ACP) == CP_ACP);
+    utassert(GuessTextCodepage(Str(cp1251), CP_ACP) == 1251);
+    utassert(GuessTextCodepage(Str(koi8r), CP_ACP) == 20866);
+    utassert(GuessTextCodepage(Str(sjis), CP_ACP) == 932);
+    utassert(GuessTextCodepage(Str(gbk), CP_ACP) == 936);
+    utassert(GuessTextCodepage(Str(korean), CP_ACP) == 949);
+
+    // "Привет" through iconv both ways
+    TempStr utf8 = strconv::ToMultiByteTemp(Str(cp1251, 6), 1251, CP_UTF8);
+    utassert(str::Eq(utf8, StrL("\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82")));
+    TempStr back = strconv::ToMultiByteTemp(utf8, CP_UTF8, 1251);
+    utassert(str::Eq(back, Str(cp1251, 6)));
+
+    // U+FB01 (fi ligature) -> "fi"; Linux has no normalization tables
+    TempStr nfkc = NormalizeString(StrL("\xef\xac\x81"), 5);
+#if OS_MAC
+    utassert(str::Eq(nfkc, StrL("fi")));
+#else
+    utassert(len(nfkc) == 0 || str::Eq(nfkc, StrL("fi")));
+#endif
+}
+
 int main(int argc, char** argv) {
     bool forAi = false;
     for (int i = 1; i < argc; i++) {
@@ -141,6 +178,7 @@ int main(int argc, char** argv) {
     SimpleLogTest();
     TextSelection_UnitTests();
     ThreadStackTest();
+    CodePageTest();
 
     int res = utassert_print_results();
     DestroyTempArena();

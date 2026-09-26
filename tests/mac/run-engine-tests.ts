@@ -35,6 +35,9 @@ interface Fixture {
   lastPageLandscape?: boolean;
   stress?: number;
   timeoutMs?: number;
+  // chaptered doc whose page count must grow after open; search / last toc item / last page must work past the
+  // initial count
+  growth?: boolean;
 }
 
 interface RunResult {
@@ -130,9 +133,27 @@ function lastStage(stderr: string): string {
   return stages.length > 0 ? stages[stages.length - 1]![1]! : "";
 }
 
+function checkGrowth(f: Fixture, r: any, fail: (s: string) => void) {
+  const initial = r.pages ?? 0;
+  const settled = r.pagesSettled ?? 0;
+  if (!(settled > initial)) fail(`page count didn't grow after open (${initial} -> ${settled})`);
+  if (!(r.pageReadyCallbacksAtSettle > 0)) fail("no page-ready callback for the page count change");
+  if (!(r.renderLast?.ok && r.renderLast.inkRatio > 0)) fail(`last page ${settled} doesn't render`);
+  if (f.search && !(r.search?.page > initial)) fail(`'${f.search}' not found past the initial ${initial} pages`);
+  const items = r.toc?.items ?? [];
+  const last = items[items.length - 1];
+  if (!(last?.page > initial && last?.page <= settled)) {
+    fail(`last toc item points to page ${last?.page}, want ${initial + 1}..${settled}`);
+  }
+}
+
 function checkOpened(f: Fixture, r: any, fail: (s: string) => void) {
-  // chaptered (EPUB) documents can grow as chapters get laid out
-  const pages = Math.max(r.pages ?? 0, r.pagesAtEnd ?? 0);
+  // chaptered (EPUB) documents grow as chapters get laid out; checks use the settled count
+  const pages = Math.max(r.pages ?? 0, r.pagesSettled ?? 0, r.pagesAtEnd ?? 0);
+  if ((r.pagesAtEnd ?? pages) !== (r.pagesSettled ?? pages)) {
+    fail(`page count still changed after settling: ${r.pagesSettled} -> ${r.pagesAtEnd}`);
+  }
+  if (f.growth) checkGrowth(f, r, fail);
   if (f.pages !== undefined && pages !== f.pages) fail(`pages ${pages} != ${f.pages}`);
   if (f.minPages !== undefined && pages < f.minPages) fail(`pages ${pages} < ${f.minPages}`);
   if (r.badPageSizes) fail(`${r.badPageSizes} pages without a size`);

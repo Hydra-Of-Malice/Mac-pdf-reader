@@ -10,10 +10,12 @@
 
 #include <fcntl.h>
 #include <math.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "mac/SumatraMacEngine.h"
 #include "mac/MacPrefs.h"
+#include "gui/mac/GuiMacBridge.h"
 #import "mac/MacDocumentView.h"
 #import "mac/MacPanels.h"
 #import "mac/MacSelfTest.h"
@@ -41,6 +43,9 @@ static const NSUInteger kMaxHistory = 50;
 static const NSInteger kTabMenuSeparatorTag = 7001;
 static const NSUInteger kMaxTabLabelChars = 24;
 static const CGFloat kFindBarHeight = 30;
+static const int kMaxConcurrentOpens = 4;
+static const int kSelectAllSyncPages = 50;
+static const double kLoadingIndicatorDelay = 0.3;
 
 static const CGFloat kSidebarDefaultWidth = 220;
 static const CGFloat kSidebarMinWidth = 140;
@@ -295,10 +300,75 @@ static BOOL IsRiskyLinkTarget(NSString* path) {
     return [fm isExecutableFileAtPath:path];
 }
 
+#pragma mark - Opening in the background
+
+@class SumatraTabState;
+
+// A document being opened on a loader thread (MacOpenDocumentAsync). Main
+// thread only, except -passwordForFile:attempt:, which the loader calls.
+@interface SumatraOpenRequest : NSObject
+@property(nonatomic, copy) NSString* path;
+@property(nonatomic, assign) SumatraTabState* tab; // nil once the tab is gone
+@property(nonatomic, assign) id owner;             // the app delegate
+@property(nonatomic, assign) SumatraSelfTest* selfTest;
+@property(nonatomic) BOOL cancelled;
+- (const char*)passwordForFile:(const char*)fileName attempt:(int)attempt;
+@end
+
+@implementation SumatraOpenRequest {
+    char* _password; // last answer; the bridge copies it right away
+    BOOL _showPassword;
+}
+
+- (void)dealloc {
+    [self forgetPassword];
+    [_path release];
+    [super dealloc];
+}
+
+- (void)forgetPassword {
+    if (_password) {
+        memset(_password, 0, strlen(_password));
+        free(_password);
+        _password = nullptr;
+    }
+}
+
+// Loader thread. The prompt runs on the main thread (app-modal), which never
+// waits for a loader, so this can't deadlock; a closed tab isn't prompted for.
+- (const char*)passwordForFile:(const char*)fileName attempt:(int)attempt {
+    if (_selfTest) {
+        return [_selfTest passwordForAttempt:attempt];
+    }
+    __block char* password = nullptr;
+    __block bool show = _showPassword;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+      if (_cancelled || !fileName) {
+          return;
+      }
+      bool remember = false;
+      int len = 0;
+      MacGuiShowPasswordDialog(nullptr, fileName, (int)strlen(fileName), attempt > 1, false, false, show, &remember,
+                               &show, &password, &len);
+    });
+    _showPassword = show;
+    [self forgetPassword];
+    _password = password;
+    return _password;
+}
+
+@end
+
+static const char* AskPassword(void* context, const char* fileName, int attempt) {
+    return [(SumatraOpenRequest*)context passwordForFile:fileName attempt:attempt];
+}
+
 #pragma mark - Tab state
 
 @interface SumatraTabState : NSObject
 @property(nonatomic) void* document; // owned; closed with MacCloseDocument
+@property(nonatomic, retain) SumatraOpenRequest* loadRequest; // set while the document is opening
+@property(nonatomic) int requestedPage;                       // go here once opened (bookmarks)
 @property(nonatomic, copy) NSString* path;
 @property(nonatomic, copy) NSString* canonicalPath;
 @property(nonatomic) int pageCount;
@@ -315,6 +385,8 @@ static BOOL IsRiskyLinkTarget(NSString* path) {
 @property(nonatomic) double scrollX;
 @property(nonatomic) double scrollY;
 @property(nonatomic) int findToken;
+@property(nonatomic) int selectAllToken; // text being prepared for Select All
+@property(nonatomic) int selectAllPercent;
 @property(nonatomic) int historyIndex;
 @property(nonatomic, retain) NSMutableArray* history; // NSNumber page numbers
 @property(nonatomic, retain) NSDate* modificationDate;
@@ -334,6 +406,9 @@ static BOOL IsRiskyLinkTarget(NSString* path) {
 }
 
 - (void)dealloc {
+    [_loadRequest setCancelled:YES];
+    [_loadRequest setTab:nil];
+    [_loadRequest release];
     [_path release];
     [_canonicalPath release];
     [_history release];
@@ -442,6 +517,8 @@ static BOOL IsRiskyLinkTarget(NSString* path) {
 - (void)openPaths:(NSArray*)paths;
 - (void)pageRenderReady;
 - (void)findFinishedForDocument:(void*)document token:(int)token found:(BOOL)found;
+- (void)openRequest:(SumatraOpenRequest*)request finished:(void*)document error:(MacOpenError)error;
+- (void)textPreparedForDocument:(void*)document token:(int)token done:(int)done total:(int)total;
 @end
 
 typedef void (^SumatraAlertDone)(NSModalResponse response);
@@ -463,6 +540,18 @@ static void PageRenderReady(void* context) {
 // delegate matches document and token against its tabs before using either.
 static void FindDone(void* context, void* document, int token, bool found) {
     [(SumatraAppDelegate*)context findFinishedForDocument:document token:token found:found ? YES : NO];
+}
+
+// Main queue; may arrive after the document was closed (checked by token).
+static void TextPrepared(void* context, void* document, int token, int done, int total) {
+    [(SumatraAppDelegate*)context textPreparedForDocument:document token:token done:done total:total];
+}
+
+// Main thread; balances the retain taken when the open started.
+static void OpenDone(void* context, void* document, MacOpenError error) {
+    SumatraOpenRequest* request = (SumatraOpenRequest*)context;
+    [(SumatraAppDelegate*)[request owner] openRequest:request finished:document error:error];
+    [request release];
 }
 
 @implementation SumatraAppDelegate {
@@ -526,6 +615,9 @@ static void FindDone(void* context, void* document, int token, bool found) {
     int _selfTestExitCode;
     BOOL _visibleRendered;
     int _lastOpenError;
+
+    NSMutableArray* _openQueue; // SumatraOpenRequest not started yet
+    int _opensRunning;
 }
 
 #pragma mark - Launch and shutdown
@@ -567,6 +659,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
     _closedPaths = [[NSMutableArray alloc] init];
     _pendingOpen = [[NSMutableArray alloc] init];
     _alertQueue = [[NSMutableArray alloc] init];
+    _openQueue = [[NSMutableArray alloc] init];
     _imageCache = [[NSMutableDictionary alloc] init];
 
     NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
@@ -688,13 +781,22 @@ static void FindDone(void* context, void* document, int token, bool found) {
     }
     MacPrefsBeginSession();
     for (SumatraTabState* tab in _tabs) {
+        if (!tab.document) {
+            // still opening: keep its saved state
+            MacPrefsAppendSession(FsPath(tab.path), nullptr);
+            continue;
+        }
         MacPrefsViewState state = [self prefsStateForTab:tab];
         MacPrefsAppendSession(FsPath(tab.path), &state);
     }
     MacPrefsFinishSession((int)MAX(activeIndex, (NSInteger)0));
 
+    // loader threads still running are abandoned; their documents never arrive
+    [_openQueue removeAllObjects];
     [self deactivateActiveTab];
     for (SumatraTabState* tab in _tabs) {
+        [tab.loadRequest setCancelled:YES];
+        [tab.loadRequest setTab:nil];
         [self saveTabState:tab];
         void* doc = tab.document;
         tab.document = nullptr;
@@ -872,6 +974,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
     [_closedPaths release];
     [_pendingOpen release];
     [_alertQueue release];
+    [_openQueue release];
     [_imageCache release];
     [_findText release];
     [_commandLine release];
@@ -1024,6 +1127,8 @@ static void FindDone(void* context, void* document, int token, bool found) {
     return -1;
 }
 
+// Adds a tab at once and opens the document on a loader thread (at most
+// kMaxConcurrentOpens at a time); -completeOpen: fills the tab in.
 - (BOOL)openPath:(NSString*)path {
     path = ResolveDocumentPath(path);
     if ([path length] == 0) {
@@ -1035,51 +1140,128 @@ static void FindDone(void* context, void* document, int token, bool found) {
         return YES;
     }
 
-    MacOpenError err = MacOpenError::None;
-    _openDepth++;
-    void* doc = MacOpenDocumentEx((void*)_window, FsPath(path), PageRenderReady, self, &err);
-    _openDepth--;
-    if (!doc) {
-        [self reportOpenError:err path:path];
-        return NO;
-    }
-    // a password prompt runs a modal loop; the same file may have been opened meanwhile
-    existing = [self tabIndexForPath:path];
-    if (existing >= 0) {
-        [_sidebar documentWillClose:doc];
-        MacCloseDocument(doc);
-        [self activateTabAtIndex:existing];
-        return YES;
-    }
-
     SumatraTabState* tab = [[[SumatraTabState alloc] init] autorelease];
-    tab.document = doc;
     tab.path = path;
     tab.canonicalPath = CanonicalPath(path);
-    tab.pageCount = MacPageCount(doc);
-    tab.modificationDate = ModificationDate(path);
     tab.needsInitialScroll = YES;
-    MacPrefsViewState state = {};
-    if (MacPrefsOpenDocument(FsPath(path), &state) && state.valid) {
-        tab.continuous = state.continuous ? YES : NO;
-        tab.rotation = ((state.rotation % 360) + 360) % 360 / 90 * 90;
-        tab.currentPage = MAX(1, MIN(tab.pageCount, state.pageNo));
-        // like the Windows app, a page that no longer exists loses the position
-        BOOL samePage = state.pageNo == tab.currentPage;
-        tab.hasScrollState = YES;
-        tab.scrollPage = tab.currentPage;
-        tab.scrollX = samePage ? state.scrollX : -1;
-        tab.scrollY = samePage ? state.scrollY : -1;
-        if (state.zoomVirtual > 0) {
-            tab.zoom = MAX(kZoomMin, MIN(kZoomMax, (CGFloat)(state.zoomVirtual / 100.0)));
-        } else {
-            tab.zoom = state.zoomVirtual == kMacZoomFitWidth ? kMacZoomFitWidth : kMacZoomFitPage;
-        }
-    }
+    SumatraOpenRequest* request = [[[SumatraOpenRequest alloc] init] autorelease];
+    request.path = path;
+    request.tab = tab;
+    request.owner = self;
+    request.selfTest = _selfTest;
+    tab.loadRequest = request;
+    [_openQueue addObject:request];
     [_tabs addObject:tab];
     [self activateTabAtIndex:(int)[_tabs count] - 1];
     [_window makeKeyAndOrderFront:nil];
+    [self startQueuedOpens];
     return YES;
+}
+
+- (void)startQueuedOpens {
+    while (_opensRunning < kMaxConcurrentOpens && [_openQueue count] > 0) {
+        SumatraOpenRequest* request = [[[_openQueue objectAtIndex:0] retain] autorelease];
+        [_openQueue removeObjectAtIndex:0];
+        if (request.cancelled) {
+            continue;
+        }
+        [request retain]; // released by OpenDone()
+        if (MacOpenDocumentAsync(FsPath(request.path), AskPassword, request, PageRenderReady, self, OpenDone, request)) {
+            _opensRunning++;
+            continue;
+        }
+        [request release];
+        // no loader thread: open here, with app-modal password prompts
+        MacOpenError err = MacOpenError::None;
+        _openDepth++;
+        void* doc = MacOpenDocumentEx((void*)_window, FsPath(request.path), PageRenderReady, self, &err);
+        _openDepth--;
+        [self completeOpen:request document:doc error:err];
+    }
+}
+
+- (void)openRequest:(SumatraOpenRequest*)request finished:(void*)document error:(MacOpenError)error {
+    _opensRunning--;
+    [self completeOpen:request document:document error:error];
+    [self startQueuedOpens];
+}
+
+// The tab gets its document, or goes away with an error; a document whose tab
+// was closed meanwhile is closed.
+- (void)completeOpen:(SumatraOpenRequest*)request document:(void*)doc error:(MacOpenError)err {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(showLoadingIndicator:) object:request];
+    SumatraTabState* tab = request.tab;
+    if (request.cancelled || !tab || tab.loadRequest != request) {
+        if (doc) {
+            [_sidebar documentWillClose:doc];
+            MacCloseDocument(doc);
+        }
+        return;
+    }
+    tab.loadRequest = nil;
+    if (!doc) {
+        NSUInteger idx = [_tabs indexOfObjectIdenticalTo:tab];
+        NSString* path = [[tab.path retain] autorelease];
+        if (idx != NSNotFound) {
+            [self removeTabAtIndex:(int)idx rememberClosed:NO];
+        }
+        [self reportOpenError:err path:path];
+        return;
+    }
+
+    tab.document = doc;
+    tab.pageCount = MacPageCount(doc);
+    tab.modificationDate = ModificationDate(tab.path);
+    [self applySavedState:tab];
+    if (tab.requestedPage > 0) {
+        tab.currentPage = MAX(1, MIN(tab.pageCount, tab.requestedPage));
+        tab.hasScrollState = NO;
+        tab.requestedPage = 0;
+    }
+    if (tab != _active) {
+        [self refreshTabSelector];
+        return;
+    }
+    [_documentView setBusy:NO];
+    [_documentView setMessage:nil];
+    [_sidebar documentChanged];
+    [self restoreViewForActiveTab];
+    [self startWatchingActiveTab];
+    [self refreshTabSelector];
+    [self updateWindowTitle];
+    [self updatePageControls];
+}
+
+- (void)applySavedState:(SumatraTabState*)tab {
+    MacPrefsViewState state = {};
+    if (!MacPrefsOpenDocument(FsPath(tab.path), &state) || !state.valid) {
+        return;
+    }
+    tab.continuous = state.continuous ? YES : NO;
+    tab.rotation = ((state.rotation % 360) + 360) % 360 / 90 * 90;
+    tab.currentPage = MAX(1, MIN(tab.pageCount, state.pageNo));
+    // like the Windows app, a page that no longer exists loses the position
+    BOOL samePage = state.pageNo == tab.currentPage;
+    tab.hasScrollState = YES;
+    tab.scrollPage = tab.currentPage;
+    tab.scrollX = samePage ? state.scrollX : -1;
+    tab.scrollY = samePage ? state.scrollY : -1;
+    if (state.zoomVirtual > 0) {
+        tab.zoom = MAX(kZoomMin, MIN(kZoomMax, (CGFloat)(state.zoomVirtual / 100.0)));
+    } else {
+        tab.zoom = state.zoomVirtual == kMacZoomFitWidth ? kMacZoomFitWidth : kMacZoomFitPage;
+    }
+}
+
+// Opening takes a while: say so in the document area.
+- (void)showLoadingIndicator:(SumatraOpenRequest*)request {
+    SumatraTabState* tab = request.tab;
+    if (request.cancelled || !tab || tab != _active || tab.document) {
+        return;
+    }
+    NSString* name = [[NSFileManager defaultManager] displayNameAtPath:tab.path];
+    [_documentView setMessage:[NSString stringWithFormat:@"Opening “%@”…", name]];
+    [_documentView setBusy:YES];
 }
 
 - (MacPrefsViewState)prefsStateForTab:(SumatraTabState*)tab {
@@ -1101,7 +1283,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
 }
 
 - (void)saveTabState:(SumatraTabState*)tab {
-    if (!tab.path) {
+    if (!tab.path || !tab.document) {
         return;
     }
     MacPrefsViewState state = [self prefsStateForTab:tab];
@@ -1109,6 +1291,11 @@ static void FindDone(void* context, void* document, int token, bool found) {
 }
 
 #pragma mark - Tabs
+
+// The active tab once its document has opened.
+- (SumatraTabState*)loadedTab {
+    return _active.document ? _active : nil;
+}
 
 - (NSInteger)activeIndex {
     if (!_active) {
@@ -1124,7 +1311,9 @@ static void FindDone(void* context, void* document, int token, bool found) {
     for (NSInteger i = 0; i < count; i++) {
         SumatraTabState* tab = [_tabs objectAtIndex:(NSUInteger)i];
         [_tabSelector setLabel:ShortTabLabel([tab.path lastPathComponent]) forSegment:i];
-        [_tabSelector setToolTip:tab.path forSegment:i];
+        [_tabSelector setImage:tab.loadRequest ? ToolbarImage(@"hourglass", @"Opening", @"…") : nil forSegment:i];
+        NSString* tip = tab.loadRequest ? [NSString stringWithFormat:@"%@ (opening…)", tab.path] : tab.path;
+        [_tabSelector setToolTip:tip forSegment:i];
     }
     NSInteger active = [self activeIndex];
     if (active >= 0) {
@@ -1144,6 +1333,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
     tab.scrollOrigin = [[_scrollView contentView] bounds].origin;
     tab.hasScrollOrigin = YES;
     tab.findToken = 0;
+    [self stopSelectAll:tab];
     [self stopWatching];
     MacFindCancel(tab.document);
     MacCancelPendingRenders(tab.document);
@@ -1170,9 +1360,15 @@ static void FindDone(void* context, void* document, int token, bool found) {
     _lastNotifiedPage = 0;
     [_documentView setMessage:nil];
 
+    if (tab.loadRequest) {
+        [self performSelector:@selector(showLoadingIndicator:)
+                   withObject:tab.loadRequest
+                   afterDelay:kLoadingIndicatorDelay];
+    }
+
     // documents in background tabs aren't watched; catch up on activation
     NSDate* date = ModificationDate(tab.path);
-    if (tab.modificationDate && date && ![date isEqualToDate:tab.modificationDate]) {
+    if (tab.document && tab.modificationDate && date && ![date isEqualToDate:tab.modificationDate]) {
         [self reloadTab:tab];
         if (_active != tab) {
             return;
@@ -1191,6 +1387,9 @@ static void FindDone(void* context, void* document, int token, bool found) {
 - (void)restoreViewForActiveTab {
     SumatraTabState* tab = _active;
     [self updateLayout];
+    if (!tab.document) {
+        return;
+    }
     if (tab.needsInitialScroll || !tab.hasScrollOrigin) {
         tab.needsInitialScroll = NO;
         if (tab.hasScrollState) {
@@ -1205,6 +1404,11 @@ static void FindDone(void* context, void* document, int token, bool found) {
 }
 
 - (void)closeTabAtIndex:(int)index {
+    [self removeTabAtIndex:index rememberClosed:YES];
+}
+
+// Closes a tab; one still opening stops waiting for its document.
+- (void)removeTabAtIndex:(int)index rememberClosed:(BOOL)remember {
     if (index < 0 || index >= (int)[_tabs count]) {
         return;
     }
@@ -1213,12 +1417,19 @@ static void FindDone(void* context, void* document, int token, bool found) {
         NSBeep();
         return;
     }
+    SumatraOpenRequest* request = tab.loadRequest;
+    if (request) {
+        request.cancelled = YES;
+        request.tab = nil;
+        [_openQueue removeObjectIdenticalTo:request];
+        tab.loadRequest = nil;
+    }
     BOOL wasActive = tab == _active;
     if (wasActive) {
         [self deactivateActiveTab];
     }
     [self saveTabState:tab];
-    if (tab.path) {
+    if (remember && tab.path) {
         [_closedPaths removeObject:tab.path];
         [_closedPaths addObject:tab.path];
         while ([_closedPaths count] > kMaxClosedTabs) {
@@ -1239,6 +1450,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
         [self activateTabAtIndex:MIN(index, (int)[_tabs count] - 1)];
         return;
     }
+    [_documentView setMessage:nil];
     [_sidebar documentChanged];
     [self refreshTabSelector];
     [self showEmptyState];
@@ -1254,6 +1466,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
 }
 
 - (void)showEmptyState {
+    [_documentView setBusy:NO];
     [_documentView setPages:nil];
     [_documentView setFrameSize:[[_scrollView contentView] bounds].size];
     [self updateWindowTitle];
@@ -1275,7 +1488,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
 
 - (void)updatePageControls {
     SumatraTabState* tab = _active;
-    BOOL has = tab != nil;
+    BOOL has = tab.document != nullptr;
     if ([_pageField currentEditor] == nil) {
         [_pageField setStringValue:has ? [NSString stringWithFormat:@"%d", tab.currentPage] : @""];
     }
@@ -1284,6 +1497,9 @@ static void FindDone(void* context, void* document, int token, bool found) {
     [_searchField setEnabled:has];
     [_findBarField setEnabled:has];
     NSString* subtitle = has ? [NSString stringWithFormat:@"Page %d of %d", tab.currentPage, tab.pageCount] : @"";
+    if (has && tab.selectAllToken != 0) {
+        subtitle = [NSString stringWithFormat:@"Selecting text… %d%%", tab.selectAllPercent];
+    }
     if ([_window respondsToSelector:@selector(setSubtitle:)]) {
         [_window performSelector:@selector(setSubtitle:) withObject:subtitle];
     }
@@ -1320,7 +1536,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
 - (void)startWatchingActiveTab {
     [self stopWatching];
     NSString* path = _active.path;
-    if (!path) {
+    if (!path || !_active.document) {
         return;
     }
     int fd = open(FsPath(path), O_EVTONLY);
@@ -1352,7 +1568,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
 }
 
 - (void)reloadIfChanged:(NSString*)path {
-    SumatraTabState* tab = _active;
+    SumatraTabState* tab = [self loadedTab];
     if (!tab || ![tab.path isEqualToString:path]) {
         return;
     }
@@ -1391,6 +1607,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
     tab.currentPage = MAX(1, MIN(tab.pageCount, tab.currentPage));
     tab.modificationDate = ModificationDate(tab.path);
     tab.findToken = 0;
+    tab.selectAllToken = 0;
     [tab.history removeAllObjects];
     tab.historyIndex = 0;
     if (!isActive) {
@@ -1492,7 +1709,22 @@ static void FindDone(void* context, void* document, int token, bool found) {
     }
 }
 
+- (NSArray*)selectionRectsForPage:(const MacLayoutPage*)lp {
+    MacDisplayRect* rects = nullptr;
+    int count = MacCopySelectionRects(_active.document, lp->pageNo, lp->layoutZoom, _active.rotation, &rects);
+    NSMutableArray* result = count > 0 ? [NSMutableArray arrayWithCapacity:(NSUInteger)count] : nil;
+    for (int i = 0; i < count; i++) {
+        MacDisplayRect r = rects[i];
+        [result addObject:[NSValue valueWithRect:NSMakeRect(lp->x + r.x, lp->y + r.y, r.width, r.height)]];
+    }
+    free(rects);
+    return result;
+}
+
 - (NSArray*)highlightRects:(Highlight)kind forPage:(const MacLayoutPage*)lp {
+    if (kind == Highlight::Selection) {
+        return [self selectionRectsForPage:lp];
+    }
     void* doc = _active.document;
     int rotation = _active.rotation;
     int count =
@@ -1533,7 +1765,14 @@ static void FindDone(void* context, void* document, int token, bool found) {
 - (void)layoutOnce {
     SumatraTabState* tab = _active;
     _visibleRendered = NO;
-    if (!tab || !tab.document) {
+    if (tab && !tab.document) {
+        // still opening (-showLoadingIndicator: may add a spinner)
+        [_documentView setPages:nil];
+        [_documentView setFrameSize:[[_scrollView contentView] bounds].size];
+        [self updatePageControls];
+        return;
+    }
+    if (!tab) {
         [self showEmptyState];
         return;
     }
@@ -1542,6 +1781,12 @@ static void FindDone(void* context, void* document, int token, bool found) {
         [_documentView setPages:nil];
         [_documentView setMessage:@"The document could not be laid out."];
         return;
+    }
+    // chaptered ebooks can gain pages after opening; the bridge then sends a
+    // page-ready callback, which lays out again
+    if (layout.pageCount != tab.pageCount) {
+        tab.pageCount = layout.pageCount;
+        [_sidebar documentChanged];
     }
     NSSize canvas = NSMakeSize(layout.canvasWidth, layout.canvasHeight);
     if (!NSEqualSizes([_documentView frame].size, canvas)) {
@@ -1605,6 +1850,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
     MacFreeDocumentLayout(&layout);
 
     _visibleRendered = allExact && [pages count] > 0;
+    [_documentView setBusy:NO];
     [_documentView setMessage:nil];
     [_documentView setPages:pages];
     [self pageStateChanged];
@@ -1717,7 +1963,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
 
 // Scrolls so pageNo's top (or bottom) edge is at the top (bottom) of the view.
 - (void)showPage:(int)pageNo position:(PagePosition)position {
-    SumatraTabState* tab = _active;
+    SumatraTabState* tab = [self loadedTab];
     if (!tab) {
         return;
     }
@@ -1849,7 +2095,7 @@ static BOOL SwapsAxes(int rotation) {
 
 // A jump (link, outline, go to page, first/last page, find) that Back undoes.
 - (void)goToPage:(int)pageNo {
-    SumatraTabState* tab = _active;
+    SumatraTabState* tab = [self loadedTab];
     if (!tab) {
         return;
     }
@@ -1859,7 +2105,7 @@ static BOOL SwapsAxes(int rotation) {
 }
 
 - (void)scrollVerticallyBy:(CGFloat)dy {
-    SumatraTabState* tab = _active;
+    SumatraTabState* tab = [self loadedTab];
     if (!tab) {
         return;
     }
@@ -1897,6 +2143,9 @@ static BOOL SwapsAxes(int rotation) {
 - (NSString*)documentAccessibilityLabel {
     if (!_active) {
         return @"No document open";
+    }
+    if (!_active.document) {
+        return [NSString stringWithFormat:@"Opening %@", [_active.path lastPathComponent]];
     }
     return [NSString stringWithFormat:@"%@, page %d of %d", [_active.path lastPathComponent], _active.currentPage,
                                       _active.pageCount];
@@ -2002,7 +2251,7 @@ static BOOL SwapsAxes(int rotation) {
 // Single page mode: the wheel moves to the next/previous page at the page
 // edges, once per gesture (or per interval for mouse wheels).
 - (BOOL)documentWheelFlip:(NSEvent*)event {
-    SumatraTabState* tab = _active;
+    SumatraTabState* tab = [self loadedTab];
     if (!tab || tab.continuous) {
         return NO;
     }
@@ -2046,6 +2295,7 @@ static BOOL SwapsAxes(int rotation) {
         return;
     }
     MacClearSelection(doc);
+    [self stopSelectAll:_active];
     MacFindCancel(doc);
     MacFindClear(doc);
     _active.findToken = 0;
@@ -2117,6 +2367,7 @@ static BOOL SwapsAxes(int rotation) {
     s.findPending = tab.findToken != 0;
     s.findPage = MacFindResultPage(tab.document);
     s.hasSelection = MacHasSelection(tab.document);
+    s.selecting = tab.selectAllToken != 0;
     NSRect f = [self frameOfPage:tab.currentPage zoom:nullptr];
     if (!NSIsEmptyRect(f)) {
         NSPoint origin = [[_scrollView contentView] bounds].origin;
@@ -2124,6 +2375,24 @@ static BOOL SwapsAxes(int rotation) {
         s.pageOffsetY = origin.y - f.origin.y;
     }
     return s;
+}
+
+// Printing without panels to a PDF file (pages first..last), like Print › Save as PDF.
+- (BOOL)selfTestPrintToPDF:(NSString*)path firstPage:(int)first lastPage:(int)last {
+    if (!_active.document || _printingDocument) {
+        return NO;
+    }
+    NSPrintInfo* info = [[[NSPrintInfo sharedPrintInfo] copy] autorelease];
+    NSMutableDictionary* dict = [info dictionary];
+    [dict setObject:NSPrintSaveJob forKey:NSPrintJobDisposition];
+    [dict setObject:[NSURL fileURLWithPath:path] forKey:NSPrintJobSavingURL];
+    [dict setObject:[NSNumber numberWithBool:NO] forKey:NSPrintAllPages];
+    [dict setObject:[NSNumber numberWithInt:first] forKey:NSPrintFirstPage];
+    [dict setObject:[NSNumber numberWithInt:last] forKey:NSPrintLastPage];
+    NSPrintOperation* operation = [self printOperationWithInfo:info];
+    [operation setShowsPrintPanel:NO];
+    [operation setShowsProgressPanel:NO];
+    return [self runPrintOperation:operation];
 }
 
 // What quitting and launching again does to the settings file.
@@ -2612,7 +2881,7 @@ static NSArray* ToolbarAllowedItems() {
 }
 
 - (void)startFind:(NSString*)text direction:(MacFindDirection)direction {
-    SumatraTabState* tab = _active;
+    SumatraTabState* tab = [self loadedTab];
     if (!tab || [text length] == 0) {
         return;
     }
@@ -2768,7 +3037,7 @@ static NSArray* ToolbarAllowedItems() {
 }
 
 - (void)setZoom:(CGFloat)zoom anchorClipPoint:(NSPoint)clipPoint {
-    SumatraTabState* tab = _active;
+    SumatraTabState* tab = [self loadedTab];
     if (!tab) {
         return;
     }
@@ -2833,7 +3102,7 @@ static NSArray* ToolbarAllowedItems() {
 }
 
 - (void)rotateBy:(int)degrees {
-    SumatraTabState* tab = _active;
+    SumatraTabState* tab = [self loadedTab];
     if (!tab) {
         return;
     }
@@ -2855,7 +3124,7 @@ static NSArray* ToolbarAllowedItems() {
 }
 
 - (void)setContinuous:(BOOL)continuous {
-    SumatraTabState* tab = _active;
+    SumatraTabState* tab = [self loadedTab];
     if (!tab || tab.continuous == continuous) {
         return;
     }
@@ -3098,27 +3367,37 @@ static NSArray* ToolbarAllowedItems() {
 
 // Fit-to-paper printing through the engine's print render path. App-modal;
 // the document can't be closed or reloaded until it finishes.
-- (IBAction)printDocument:(id)sender {
-    (void)sender;
+- (NSPrintOperation*)printOperationWithInfo:(NSPrintInfo*)info {
     SumatraTabState* tab = _active;
-    if (!tab || _printingDocument) {
-        return;
-    }
     SumatraPrintView* view = [[[SumatraPrintView alloc] initWithDocument:tab.document
                                                                pageCount:tab.pageCount
                                                                 rotation:tab.rotation] autorelease];
-    NSPrintInfo* info = [[[NSPrintInfo sharedPrintInfo] copy] autorelease];
     [info setTopMargin:kPrintMargin];
     [info setBottomMargin:kPrintMargin];
     [info setLeftMargin:kPrintMargin];
     [info setRightMargin:kPrintMargin];
     NSPrintOperation* operation = [NSPrintOperation printOperationWithView:view printInfo:info];
     [operation setJobTitle:[tab.path lastPathComponent]];
+    return operation;
+}
+
+- (BOOL)runPrintOperation:(NSPrintOperation*)operation {
+    _printingDocument = _active.document;
+    BOOL ok = [operation runOperation];
+    _printingDocument = nullptr;
+    return ok;
+}
+
+- (IBAction)printDocument:(id)sender {
+    (void)sender;
+    if (!_active.document || _printingDocument) {
+        return;
+    }
+    NSPrintInfo* info = [[[NSPrintInfo sharedPrintInfo] copy] autorelease];
+    NSPrintOperation* operation = [self printOperationWithInfo:info];
     [operation setShowsPrintPanel:YES];
     [operation setShowsProgressPanel:YES];
-    _printingDocument = tab.document;
-    [operation runOperation];
-    _printingDocument = nullptr;
+    [self runPrintOperation:operation];
 }
 
 - (IBAction)copy:(id)sender {
@@ -3142,10 +3421,53 @@ static NSArray* ToolbarAllowedItems() {
     return [NSPasteboard generalPasteboard];
 }
 
+// Long documents: the page text is extracted on a worker first (progress in
+// the window subtitle, Esc cancels), so the UI doesn't stall.
 - (IBAction)selectAll:(id)sender {
     (void)sender;
-    MacSelectAll([self documentHandle]);
+    SumatraTabState* tab = [self loadedTab];
+    if (!tab || tab.selectAllToken != 0) {
+        return;
+    }
+    if (tab.pageCount > kSelectAllSyncPages) {
+        int token = MacPrepareTextStart(tab.document, TextPrepared, self);
+        if (token != 0) {
+            tab.selectAllToken = token;
+            tab.selectAllPercent = 0;
+            [self setFindBusy:YES];
+            [self updatePageControls];
+            return;
+        }
+    }
+    MacSelectAll(tab.document);
     [self updateLayout];
+}
+
+- (void)textPreparedForDocument:(void*)document token:(int)token done:(int)done total:(int)total {
+    SumatraTabState* tab = [self loadedTab];
+    if (!tab || tab.document != document || tab.selectAllToken != token) {
+        return;
+    }
+    if (done < total) {
+        tab.selectAllPercent = total > 0 ? (int)((long long)done * 100 / total) : 0;
+        [self updatePageControls];
+        return;
+    }
+    tab.selectAllToken = 0;
+    [self setFindBusy:tab.findToken != 0];
+    MacSelectAll(tab.document);
+    [self updateLayout];
+    [self updatePageControls];
+}
+
+- (void)stopSelectAll:(SumatraTabState*)tab {
+    if (tab.selectAllToken == 0) {
+        return;
+    }
+    tab.selectAllToken = 0;
+    MacPrepareTextCancel(tab.document);
+    [self setFindBusy:tab.findToken != 0];
+    [self updatePageControls];
 }
 
 - (IBAction)goToNextPage:(id)sender {
@@ -3251,7 +3573,11 @@ static NSArray* ToolbarAllowedItems() {
             return;
         }
     }
-    [self goToPage:pageNo];
+    if (_active.document) {
+        [self goToPage:pageNo];
+    } else {
+        _active.requestedPage = pageNo;
+    }
 }
 
 - (IBAction)showCommandPalette:(id)sender {
@@ -3283,7 +3609,7 @@ static NSArray* ToolbarAllowedItems() {
 
 - (BOOL)canPerformAction:(SEL)action {
     SumatraTabState* tab = _active;
-    BOOL has = tab != nil;
+    BOOL has = tab.document != nullptr;
     if (action == @selector(goToPrevPage:) || action == @selector(goToFirstPage:)) {
         return has && tab.currentPage > 1;
     }

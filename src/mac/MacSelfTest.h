@@ -26,6 +26,7 @@ struct SumatraTestState {
     bool findPending;
     int findPage; // page of the current find hit, 0 if none
     bool hasSelection;
+    bool selecting; // Select All is extracting text in the background
     bool findBarVisible;
     bool sidebarVisible;
     int thumbnails; // sidebar thumbnails on screen with an image
@@ -43,6 +44,7 @@ struct SumatraTestState {
 - (struct SumatraTestState)selfTestState;
 - (void)openPaths:(NSArray*)paths;
 - (void)selfTestReloadPrefs;
+- (BOOL)selfTestPrintToPDF:(NSString*)path firstPage:(int)first lastPage:(int)last;
 - (void)selfTestFinished:(int)exitCode;
 @end
 

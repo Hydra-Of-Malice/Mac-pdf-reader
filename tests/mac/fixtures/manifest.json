@@ -101,6 +101,27 @@
       "tocFirst": "Chapter One",
       "links": [{ "kind": "page" }, { "kind": "url", "value": "https://www.sumatrapdfreader.org/" }]
     },
+    {
+      "id": "epub-chapters-growth",
+      "format": "EPUB",
+      "path": "tests/mac/fixtures/chapters.epub",
+      "expect": "open",
+      "minPages": 5,
+      "growth": true,
+      "search": "narwhal",
+      "tocMin": 4,
+      "tocFirst": "Chapter 1"
+    },
+    {
+      "id": "lit-sample",
+      "format": "LIT",
+      "path": "tests/mac/fixtures/sample.lit",
+      "expect": "open",
+      "minPages": 2,
+      "search": "okapi",
+      "links": [{ "kind": "page" }],
+      "props": { "title": "LIT mac fixture" }
+    },
     { "id": "epub-repo-5846", "format": "EPUB", "path": "tests/issue-5846.epub", "expect": "open", "minPages": 1 },
     { "id": "epub-repo-6095", "format": "EPUB", "path": "tests/issue-6095.epub", "expect": "open", "minPages": 2 },
     { "id": "epub-corrupt", "format": "EPUB", "path": "tests/mac/fixtures/corrupt.epub", "expect": "any" },
@@ -125,6 +146,27 @@
     },
     { "id": "azw3-repo-4315", "format": "MOBI", "path": "tests/issue-4315.azw3", "expect": "open", "pages": 2 },
     { "id": "mobi-corrupt", "format": "MOBI", "path": "tests/mac/fixtures/corrupt.mobi", "expect": "any" },
+    {
+      "id": "mobi-huffcdic",
+      "format": "MOBI",
+      "path": "tests/mac/fixtures/huffcdic.mobi",
+      "expect": "open",
+      "minPages": 3,
+      "search": "quoll",
+      "searchPage": 1,
+      "tocMin": 3,
+      "tocFirst": "Chapter One",
+      "links": [{ "kind": "page" }]
+    },
+    {
+      "id": "azw4-print-replica",
+      "format": "AZW4",
+      "path": "tests/mac/fixtures/print-replica.azw4",
+      "expect": "open",
+      "pages": 2,
+      "search": "tarsier",
+      "searchPage": 2
+    },
     { "id": "cbz-sample", "format": "CBZ", "path": "tests/mac/fixtures/sample.cbz", "expect": "open", "pages": 3 },
     {
       "id": "cbz-repo-1201",
@@ -180,6 +222,29 @@
     },
     { "id": "chm-repo-lzx-malformed", "format": "CHM", "path": "tests/issue-chm-lzx.chm", "expect": "any" },
     {
+      "id": "chm-sample",
+      "format": "CHM",
+      "path": "tests/mac/fixtures/sample.chm",
+      "expect": "open",
+      "minPages": 3,
+      "search": "kinkajou",
+      "searchPage": 1,
+      "tocMin": 3,
+      "tocFirst": "CHM Home",
+      "links": [{ "kind": "page" }, { "kind": "url", "value": "https://www.sumatrapdfreader.org/" }]
+    },
+    {
+      "id": "chm-large-1025-topics",
+      "format": "CHM",
+      "path": "tests/mac/fixtures/large.chm",
+      "expect": "open",
+      "minPages": 1025,
+      "search": "ocelot",
+      "tocMin": 1025,
+      "tocFirst": "Part 1",
+      "timeoutMs": 300000
+    },
+    {
       "id": "xps-sample",
       "format": "XPS",
       "path": "tests/mac/fixtures/sample.xps",
@@ -209,7 +274,32 @@
     { "id": "bmp", "format": "Image", "path": "tests/mac/fixtures/sample.bmp", "expect": "open", "pages": 1 },
     { "id": "tga", "format": "Image", "path": "tests/mac/fixtures/sample.tga", "expect": "open", "pages": 1 },
     { "id": "jpeg", "format": "Image", "path": "tests/issue-6236.jpg", "expect": "open", "pages": 1 },
-    { "id": "gif", "format": "Image", "path": "tests/issue-6150.gif", "expect": "open", "minPages": 1 },
+    { "id": "gif", "format": "Image", "path": "tests/mac/fixtures/sample.gif", "expect": "open", "pages": 1 },
+    {
+      "id": "gif-animated",
+      "format": "Image",
+      "path": "tests/mac/fixtures/animated.gif",
+      "expect": "open",
+      "pages": 3
+    },
+    { "id": "gif-repo-6150-malformed", "format": "Image", "path": "tests/issue-6150.gif", "expect": "any" },
+    { "id": "jp2", "format": "Image", "path": "tests/mac/fixtures/sample.jp2", "expect": "open", "pages": 1 },
+    { "id": "heic", "format": "Image", "path": "tests/mac/fixtures/sample.heic", "expect": "open", "pages": 1 },
+    { "id": "avif", "format": "Image", "path": "tests/mac/fixtures/sample.avif", "expect": "open", "pages": 1 },
+    {
+      "id": "cbz-mixed-images",
+      "format": "CBZ",
+      "path": "tests/mac/fixtures/mixed-images.cbz",
+      "expect": "open",
+      "pages": 9
+    },
+    {
+      "id": "image-folder",
+      "format": "Image",
+      "path": "tests/mac/fixtures/image-folder",
+      "expect": "open",
+      "pages": 3
+    },
     { "id": "webp", "format": "Image", "path": "tests/issue-6245-data/halves.webp", "expect": "open", "pages": 1 },
     { "id": "jxl", "format": "Image", "path": "tests/issue-6245-data/keong_macan.jxl", "expect": "open", "pages": 1 },
     { "id": "tiff-2-pages", "format": "TIFF", "path": "tests/mac/fixtures/sample.tif", "expect": "open", "pages": 2 },

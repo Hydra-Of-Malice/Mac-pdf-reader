@@ -53,6 +53,8 @@ static char* DupCString(const char* s) {
 }
 
 struct MacFindWorker;
+struct MacLayoutNotify;
+struct MacTextWorker;
 
 struct MacDocument {
     ReaderModel* model = nullptr;
@@ -60,6 +62,8 @@ struct MacDocument {
     TextSelection* textSelection = nullptr;
     TextSearch* textSearch = nullptr;
     MacFindWorker* find = nullptr;
+    MacLayoutNotify* layoutNotify = nullptr;
+    MacTextWorker* text = nullptr;
     TocTree* toc = nullptr;
     Vec<TocItem*> tocItems;
     Vec<int> tocDepths;
@@ -74,11 +78,102 @@ static MacDocument* AsDocument(void* document) {
 }
 
 static void StopFindWorker(MacDocument* doc);
+static void StopTextWorker(MacDocument* doc);
 
 static void OnPageReady(MacDocument* document) {
     if (document->onPageReady) {
         document->onPageReady(document->callbackContext);
     }
+}
+
+// Chaptered (reflowable) engines lay chapters out lazily: after open the page
+// count grows and later page numbers shift. Engine callbacks come from any
+// thread and can outlive the document, so they go through this object, freed
+// once both the document and the engine let go of it.
+struct MacLayoutNotify {
+    AtomicInt refs = 2; // the document's and the engine's
+    Mutex mutex;
+    MacDocument* doc = nullptr; // null once the document is closed
+};
+
+static void ReleaseLayoutNotify(MacLayoutNotify* n) {
+    if (AtomicIntDec(&n->refs) == 0) {
+        delete n;
+    }
+}
+
+// Main thread (only it clears n->doc). Page-ready makes the app re-query
+// MacPageCount() and relayout.
+static void RunLayoutChangedTask(MacLayoutNotify* n) {
+    if (n->doc) {
+        OnPageReady(n->doc);
+    }
+    ReleaseLayoutNotify(n);
+}
+
+// Any thread: cached renders are keyed by page numbers that may have shifted.
+static void OnEngineLayoutChanged(MacLayoutNotify* n) {
+    AutoUnlockMutex lock(&n->mutex);
+    if (!n->doc) {
+        return;
+    }
+    if (n->doc->renderer) {
+        n->doc->renderer->NewGeneration();
+    }
+    AtomicIntInc(&n->refs);
+    PlatformPostTask(MkFunc0(RunLayoutChangedTask, n));
+}
+
+// Main thread: publish the page counts the background pass found; that fires
+// OnEngineLayoutChanged.
+static void RunPublishChaptersTask(MacLayoutNotify* n) {
+    if (n->doc) {
+        n->doc->model->GetEngine()->PublishWarmedChapters();
+    }
+    ReleaseLayoutNotify(n);
+}
+
+static void OnChapterLayoutProgress(MacLayoutNotify* n, ChapterLayoutProgress* p) {
+    if (!p || !p->finished) {
+        return;
+    }
+    AutoUnlockMutex lock(&n->mutex);
+    if (!n->doc) {
+        return;
+    }
+    AtomicIntInc(&n->refs);
+    PlatformPostTask(MkFunc0(RunPublishChaptersTask, n));
+}
+
+static void OnLayoutEngineDestroyed(MacLayoutNotify* n, EngineBase*) {
+    ReleaseLayoutNotify(n);
+}
+
+// Counts the remaining chapters in the background (like Windows) so the page
+// total converges soon after open.
+static void WatchChapterLayout(MacDocument* doc) {
+    EngineBase* engine = doc->model->GetEngine();
+    auto* n = new MacLayoutNotify();
+    n->doc = doc;
+    doc->layoutNotify = n;
+    engine->SetOnLayoutChanged(MkFunc0(OnEngineLayoutChanged, n));
+    engine->SetOnChapterLayoutProgress(MkFunc1(OnChapterLayoutProgress, n));
+    engine->SetOnDestroy(MkFunc1(OnLayoutEngineDestroyed, n));
+    engine->StartBackgroundChapterLayout();
+}
+
+static void UnwatchChapterLayout(MacDocument* doc) {
+    MacLayoutNotify* n = doc->layoutNotify;
+    if (!n) {
+        return;
+    }
+    doc->model->GetEngine()->CancelBackgroundChapterLayout();
+    {
+        AutoUnlockMutex lock(&n->mutex);
+        n->doc = nullptr;
+    }
+    doc->layoutNotify = nullptr;
+    ReleaseLayoutNotify(n);
 }
 
 static void AppendTocItems(MacDocument* document, TocItem* item, int depth) {
@@ -206,14 +301,17 @@ static bool CopyPixmap(Pixmap* pixmap, MacRenderedPage* page) {
 static MacPasswordCallback gPasswordCallback = nullptr;
 static void* gPasswordContext = nullptr;
 
-// Non-interactive PasswordUI: asks gPasswordCallback; a null answer cancels.
+// Non-interactive PasswordUI: asks callback (gPasswordCallback unless the
+// open passed its own); a null answer cancels.
 struct CallbackPasswordUI : PasswordUI {
+    MacPasswordCallback callback = nullptr;
+    void* context = nullptr;
     int attempt = 0;
 
     Str GetPassword(Str filePath, u8*, u8[32], bool* saveKey) override {
         *saveKey = false;
         TempStr name = path::GetBaseNameTemp(filePath);
-        const char* pwd = gPasswordCallback(gPasswordContext, CStrTemp(name), ++attempt);
+        const char* pwd = callback(context, CStrTemp(name), ++attempt);
         return pwd ? str::Dup(Str((char*)pwd)) : Str{};
     }
 };
@@ -262,7 +360,8 @@ static MacOpenError ClassifyOpenFailure(Str path, bool prompted);
 // Engines keep prompting until the password is right or the prompt is
 // cancelled, so a failure after a prompt means the user gave up.
 static MacDocument* OpenDocumentImpl(void* passwordParent, const char* path, MacPageReadyCallback onPageReady,
-                                     void* callbackContext, MacOpenError* errorOut) {
+                                     void* callbackContext, MacOpenError* errorOut,
+                                     MacPasswordCallback askPassword = nullptr, void* passwordContext = nullptr) {
     *errorOut = MacOpenError::None;
     if (!path || !path[0]) {
         *errorOut = MacOpenError::NotFound;
@@ -272,7 +371,9 @@ static MacDocument* OpenDocumentImpl(void* passwordParent, const char* path, Mac
     Str filePath((char*)path);
     MacDialogPasswordUI dialogUI((NativeWnd)passwordParent);
     CallbackPasswordUI callbackUI;
-    PasswordUI* pwdUI = gPasswordCallback ? (PasswordUI*)&callbackUI : &dialogUI;
+    callbackUI.callback = askPassword ? askPassword : gPasswordCallback;
+    callbackUI.context = askPassword ? passwordContext : gPasswordContext;
+    PasswordUI* pwdUI = callbackUI.callback ? (PasswordUI*)&callbackUI : &dialogUI;
     ReaderModel* model = ReaderModel::Create(filePath, pwdUI);
     if (!model) {
         bool prompted = dialogUI.prompts > 0 || callbackUI.attempt > 0;
@@ -289,8 +390,11 @@ static MacDocument* OpenDocumentImpl(void* passwordParent, const char* path, Mac
     }
     document->onPageReady = onPageReady;
     document->callbackContext = callbackContext;
+    // a render copy would paginate lazily laid out chapters on its own, so they'd disagree on page numbers
+    bool chaptered = model->GetEngine()->HasChapters();
+    PageRenderEngine use = chaptered ? PageRenderEngine::Shared : PageRenderEngine::Clone;
     document->renderer =
-        PageRenderService::Create(model->GetEngine(), MkFunc0(OnPageReady, document), kMacRenderCacheBytes);
+        PageRenderService::Create(model->GetEngine(), MkFunc0(OnPageReady, document), kMacRenderCacheBytes, use);
     if (!document->renderer) {
         // the engine owns the ToC tree
         delete document->textSelection;
@@ -299,6 +403,9 @@ static MacDocument* OpenDocumentImpl(void* passwordParent, const char* path, Mac
         delete document;
         *errorOut = MacOpenError::RendererFailed;
         return nullptr;
+    }
+    if (chaptered) {
+        WatchChapterLayout(document);
     }
     return document;
 }
@@ -537,6 +644,36 @@ bool MacSelectionRect(void* document, int pageNo, int index, double zoom, int ro
     return TransformResultRect(doc, doc->textSelection->result, pageNo, index, zoom, rotation, rect);
 }
 
+// All selection rectangles on pageNo in one pass (MacSelectionRect() scans the
+// whole selection per call). Free *rectsOut with free().
+int MacCopySelectionRects(void* document, int pageNo, double zoom, int rotation, MacDisplayRect** rectsOut) {
+    *rectsOut = nullptr;
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !doc->textSelection) {
+        return 0;
+    }
+    const TextSel& result = doc->textSelection->result;
+    int count = ResultRectCount(result, pageNo);
+    if (count == 0) {
+        return 0;
+    }
+    auto* rects = (MacDisplayRect*)malloc(sizeof(MacDisplayRect) * (size_t)count);
+    if (!rects) {
+        return 0;
+    }
+    EngineBase* engine = doc->model->GetEngine();
+    int n = 0;
+    for (int i = 0; i < result.len && n < count; i++) {
+        if (result.pages[i] != pageNo) {
+            continue;
+        }
+        RectF r = engine->Transform(ToRectF(result.rects[i]), pageNo, (float)zoom, rotation);
+        rects[n++] = {r.x, r.y, r.dx, r.dy};
+    }
+    *rectsOut = rects;
+    return n;
+}
+
 char* MacCopySelectionText(void* document) {
     MacDocument* doc = AsDocument(document);
     if (!doc || !doc->textSelection || doc->textSelection->result.len == 0) {
@@ -707,7 +844,9 @@ void MacCloseDocument(void* document) {
         return;
     }
     MacDocument* doc = AsDocument(document);
+    UnwatchChapterLayout(doc);
     StopFindWorker(doc);
+    StopTextWorker(doc);
     delete doc->renderer;
     delete doc->textSelection;
     delete doc->textSearch;
@@ -781,6 +920,70 @@ void* MacOpenDocumentEx(void* passwordParent, const char* path, MacPageReadyCall
         *errorOut = err;
     }
     return document;
+}
+
+// Engines recurse deeply (e.g. ebook layout); give the loader the main thread's stack size.
+constexpr size_t kOpenThreadStackBytes = 8 * 1024 * 1024;
+
+struct MacOpenJob {
+    char* path = nullptr;
+    MacPasswordCallback askPassword = nullptr;
+    void* passwordContext = nullptr;
+    MacPageReadyCallback onPageReady = nullptr;
+    void* renderContext = nullptr;
+    MacOpenDoneCallback onDone = nullptr;
+    void* doneContext = nullptr;
+    MacDocument* document = nullptr;
+    MacOpenError error = MacOpenError::None;
+};
+
+static void FinishOpenJob(MacOpenJob* job) {
+    job->onDone(job->doneContext, job->document, job->error);
+    free(job->path);
+    delete job;
+}
+
+static void* RunOpenJob(void* data) {
+    auto* job = (MacOpenJob*)data;
+    job->document = OpenDocumentImpl(nullptr, job->path, job->onPageReady, job->renderContext, &job->error,
+                                     job->askPassword, job->passwordContext);
+    PlatformPostTask(MkFunc0(FinishOpenJob, job));
+    DestroyTempArena();
+    return nullptr;
+}
+
+// Opens path on a new thread. askPassword runs on that thread (it must not
+// wait for anything that waits for this open); onDone runs later on the main
+// thread with the handle, or nullptr and the error. Returns false (and never
+// calls onDone) if the thread can't be started.
+bool MacOpenDocumentAsync(const char* path, MacPasswordCallback askPassword, void* passwordContext,
+                          MacPageReadyCallback onPageReady, void* renderContext, MacOpenDoneCallback onDone,
+                          void* doneContext) {
+    if (!path || !askPassword || !onDone) {
+        return false;
+    }
+    auto* job = new MacOpenJob();
+    job->path = DupCString(path);
+    job->askPassword = askPassword;
+    job->passwordContext = passwordContext;
+    job->onPageReady = onPageReady;
+    job->renderContext = renderContext;
+    job->onDone = onDone;
+    job->doneContext = doneContext;
+
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, kOpenThreadStackBytes);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    int err = job->path ? pthread_create(&thread, &attr, RunOpenJob, job) : -1;
+    pthread_attr_destroy(&attr);
+    if (err != 0) {
+        free(job->path);
+        delete job;
+        return false;
+    }
+    return true;
 }
 
 bool MacIsSupportedPath(const char* path) {
@@ -1252,4 +1455,106 @@ bool MacViewPointFromPage(void* document, int pageNo, double pageX, double pageY
     *x = v.x;
     *y = v.y;
     return true;
+}
+
+//--- Select All on long documents: page text is extracted on a worker first
+
+struct MacTextWorker {
+    pthread_t thread;
+    AtomicInt cancel = 0;
+    MacDocument* doc = nullptr;
+    int token = 0;
+    MacTextProgressCallback onProgress = nullptr;
+    void* context = nullptr;
+};
+
+struct MacTextProgress {
+    MacTextProgressCallback onProgress = nullptr;
+    void* context = nullptr;
+    void* document = nullptr;
+    int token = 0;
+    int done = 0;
+    int total = 0;
+};
+
+constexpr int kTextProgressPages = 25;
+static int gTextToken = 0;
+
+static void RunTextProgress(MacTextProgress* p) {
+    p->onProgress(p->context, p->document, p->token, p->done, p->total);
+    delete p;
+}
+
+static void PostTextProgress(MacTextWorker* w, int done, int total) {
+    auto* p = new MacTextProgress();
+    p->onProgress = w->onProgress;
+    p->context = w->context;
+    p->document = w->doc;
+    p->token = w->token;
+    p->done = done;
+    p->total = total;
+    PlatformPostTask(MkFunc0(RunTextProgress, p));
+}
+
+static void* TextWorkerMain(void* data) {
+    auto* w = (MacTextWorker*)data;
+    EngineBase* engine = w->doc->model->GetEngine();
+    int total = engine->PageCount();
+    for (int pageNo = 1; pageNo <= total; pageNo++) {
+        if (AtomicIntGet(&w->cancel) != 0) {
+            DestroyTempArena();
+            return nullptr;
+        }
+        // the engine caches it (thread-safe, like the find worker's reads)
+        engine->GetTextForPage(pageNo);
+        ResetTempArena();
+        if (pageNo % kTextProgressPages == 0 && pageNo < total) {
+            PostTextProgress(w, pageNo, total);
+        }
+    }
+    PostTextProgress(w, total, total);
+    DestroyTempArena();
+    return nullptr;
+}
+
+// Cancels and joins; the page being extracted finishes first.
+static void StopTextWorker(MacDocument* doc) {
+    MacTextWorker* w = doc->text;
+    if (!w) {
+        return;
+    }
+    AtomicIntSet(&w->cancel, 1);
+    pthread_join(w->thread, nullptr);
+    delete w;
+    doc->text = nullptr;
+}
+
+// Extracts every page's text on a worker thread so MacSelectAll() is quick
+// afterwards. onProgress runs on the main thread with the returned token:
+// done < total while working, done == total at the end. A cancelled run may
+// still deliver, so check the token. Returns 0 if not started.
+int MacPrepareTextStart(void* document, MacTextProgressCallback onProgress, void* context) {
+    MacDocument* doc = AsDocument(document);
+    if (!doc || !onProgress) {
+        return 0;
+    }
+    StopTextWorker(doc);
+    auto* w = new MacTextWorker();
+    w->doc = doc;
+    w->token = ++gTextToken;
+    w->onProgress = onProgress;
+    w->context = context;
+    if (pthread_create(&w->thread, nullptr, TextWorkerMain, w) != 0) {
+        delete w;
+        return 0;
+    }
+    doc->text = w;
+    return w->token;
+}
+
+void MacPrepareTextCancel(void* document) {
+    MacDocument* doc = AsDocument(document);
+    if (doc) {
+        StopTextWorker(doc);
+    }
 }

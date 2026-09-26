@@ -12,16 +12,28 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 
 #include "mac/SumatraMacEngine.h"
+
+// base/UITask.h: the bridge posts page-ready / find-done / layout tasks to the
+// main thread; PumpUiTasks() runs them the way the app's run loop does
+namespace uitask {
+void Initialize();
+void DrainQueue();
+} // namespace uitask
 
 constexpr int kMaxPasswords = 4;
 constexpr int kAsyncPages = 8;
 constexpr int kLinkScanPages = 3;
 constexpr int kLinkScanStep = 4;
+constexpr double kLinkScanMaxCells = 400;
 constexpr int kMaxLinks = 16;
 constexpr int kRenderAllMax = 64;
 constexpr int kWaitMs = 30000;
+constexpr int kSettleMs = 300;
 constexpr float kZoomFitWidth = -2.f;
 constexpr char kMissingWord[] = "xq7zzyNotInAnyFixture";
 
@@ -41,7 +53,15 @@ static double NowMs() {
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
 }
 
+static void PumpUiTasks() {
+#if defined(__APPLE__)
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
+#endif
+    uitask::DrainQueue();
+}
+
 static void SleepMs(int ms) {
+    PumpUiTasks();
     usleep((useconds_t)ms * 1000);
 }
 
@@ -433,8 +453,11 @@ static void CheckLinks(void* doc, int nPages) {
         double w = 0;
         double h = 0;
         MacPageSize(doc, pageNo, &w, &h);
-        for (int y = 1; y < (int)h; y += kLinkScanStep) {
-            for (int x = 1; x < (int)w; x += kLinkScanStep) {
+        // coarser grid on huge (e.g. corrupt) pages so the scan stays bounded
+        double stepX = w / kLinkScanStep > kLinkScanMaxCells ? w / kLinkScanMaxCells : kLinkScanStep;
+        double stepY = h / kLinkScanStep > kLinkScanMaxCells ? h / kLinkScanMaxCells : kLinkScanStep;
+        for (double y = 1; y < h; y += stepY) {
+            for (double x = 1; x < w; x += stepX) {
                 MacLink link{};
                 if (!MacLinkAtPoint(doc, pageNo, x, y, 1.0, 0, &link)) {
                     continue;
@@ -482,6 +505,29 @@ static void CheckProperties(void* doc) {
         MacFreeString(value);
     }
     putchar('}');
+}
+
+// Chaptered docs (EPUB) lay out the first chapter at open and count the rest in
+// the background, so the page count grows. Wait until it's stable, delivering the
+// page-ready callbacks the app relayouts on.
+static int SettlePageCount(void* doc) {
+    Stage("settle");
+    int pages = MacPageCount(doc);
+    double start = NowMs();
+    double stableSince = start;
+    while (NowMs() - stableSince < kSettleMs && NowMs() - start < kWaitMs) {
+        SleepMs(10);
+        int n = MacPageCount(doc);
+        if (n != pages) {
+            pages = n;
+            stableSince = NowMs();
+        }
+    }
+    PumpUiTasks();
+    KeyInt("pagesSettled", MacPageCount(doc));
+    KeyInt("pageReadyCallbacksAtSettle", __atomic_load_n(&gPagesReady, __ATOMIC_SEQ_CST));
+    KeyNum("settleMs", NowMs() - start);
+    return MacPageCount(doc);
 }
 
 // every page once (up to kRenderAllMax), for fuzzing: damage often only shows on later pages
@@ -559,6 +605,7 @@ int main(int argc, char** argv) {
         pwd.passwords[pwd.count++] = p;
     }
     MacSetPasswordCallback(OnPassword, &pwd);
+    uitask::Initialize();
 
     putchar('{');
     KeyStr("file", path);
@@ -573,8 +620,8 @@ int main(int argc, char** argv) {
     free(error);
 
     if (doc) {
-        int nPages = MacPageCount(doc);
-        KeyInt("pages", nPages);
+        KeyInt("pages", MacPageCount(doc));
+        int nPages = SettlePageCount(doc);
         CheckPageSizes(doc, nPages);
         CheckLayout(doc, nPages);
         bool page1Renders = CheckRender(doc, nPages);

@@ -717,3 +717,176 @@ export function makePalmDoc(title: string, text: string, compress: boolean): Uin
   const rec0 = palmDocHeader(compress, t.length, recs.length);
   return makePalmDb(title.replace(/\s+/g, "_"), "TEXtREAd", [rec0.bytes(), ...recs]);
 }
+
+// ---- LIT (Microsoft Reader) ----
+
+// An element of LIT's tokenized markup: text, or a tag with attributes and children.
+export type LitNode = string | { tag: string; attrs?: Record<string, string>; children?: LitNode[] };
+
+export interface LitItem {
+  id: string; // internal name
+  file: string; // original path, also its path in the reconstructed EPUB
+  mime: string;
+  spine?: LitNode[]; // spine (HTML) items: their tokenized markup
+  data?: Uint8Array; // other items (images)
+}
+
+// UTF-8 of one code point, as LitUtf8Char() decodes it (codes like 0x8000 need 3 bytes)
+function litChar(c: number): number[] {
+  if (c < 0x80) return [c];
+  if (c < 0x800) return [0xc0 | (c >> 6), 0x80 | (c & 0x3f)];
+  return [0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)];
+}
+
+function litChars(s: string): number[] {
+  const out: number[] = [];
+  for (const ch of s) out.push(...litChar(ch.codePointAt(0)!));
+  return out;
+}
+
+const kLitCustom = 0x8000; // tag / attribute given by name instead of a table code
+const kLitOpening = 1;
+const kLitClosing = 2;
+
+// Tokenized markup (calibre's UnBinary format) using only named tags and attributes, so no tag tables are needed.
+function litTokens(nodes: LitNode[]): number[] {
+  const out: number[] = [];
+  for (const n of nodes) {
+    if (typeof n === "string") {
+      out.push(...litChars(n));
+      continue;
+    }
+    const kids = n.children ?? [];
+    const flags = kids.length > 0 ? kLitOpening : kLitOpening | kLitClosing;
+    out.push(0, flags, ...litChar(kLitCustom), ...litChar(n.tag.length + 1), ...litChars(n.tag));
+    for (const [name, value] of Object.entries(n.attrs ?? {})) {
+      out.push(...litChar(kLitCustom), ...litChar(name.length + 1), ...litChars(name));
+      out.push(...litChar([...value].length + 1), ...litChars(value));
+    }
+    out.push(0);
+    if (kids.length > 0) out.push(...litTokens(kids), 0, kLitClosing, 1);
+  }
+  return out;
+}
+
+// big-endian 7-bit groups, high bit = more follow (LitEncInt)
+function litEncInt(v: number): number[] {
+  const groups: number[] = [];
+  do {
+    groups.unshift(v & 0x7f);
+    v = Math.floor(v / 128);
+  } while (v > 0);
+  return groups.map((g, i) => (i < groups.length - 1 ? g | 0x80 : g));
+}
+
+function litSizedString(s: string): number[] {
+  return [...litChar([...s].length), ...litChars(s)];
+}
+
+// Uncompressed, DRM-free .lit: every file lives in section 0 (no LZX), which LitDoc.cpp reads like any other.
+export function makeLit(title: string, items: LitItem[]): Uint8Array {
+  const files: { name: string; data: Uint8Array }[] = [];
+  const nameList = new ByteWriter();
+  nameList.u16le(0);
+  nameList.u16le(1);
+  const secName = "Uncompressed";
+  nameList.u16le(secName.length);
+  for (const ch of secName) nameList.u16le(ch.charCodeAt(0));
+  nameList.u16le(0);
+  files.push({ name: "::DataSpace/NameList", data: nameList.bytes() });
+
+  // /manifest: root name, then 4 groups (spine, other html, css, images)
+  const man: number[] = [4, ...bytes("root")];
+  const groups = [items.filter((it) => it.spine), [], [], items.filter((it) => !it.spine)];
+  for (const g of groups) {
+    const w = new ByteWriter();
+    w.u32le(g.length);
+    man.push(...w.bytes());
+    for (const it of g) {
+      man.push(0, 0, 0, 0, ...litSizedString(it.id), ...litSizedString(it.file), ...litSizedString(it.mime), 0);
+    }
+  }
+  files.push({ name: "/manifest", data: Uint8Array.from(man) });
+
+  const opf: LitNode = {
+    tag: "package",
+    attrs: { xmlns: "http://www.idpf.org/2007/opf", version: "2.0", "unique-identifier": "id" },
+    children: [
+      {
+        tag: "metadata",
+        attrs: { "xmlns:dc": "http://purl.org/dc/elements/1.1/" },
+        children: [
+          { tag: "dc:identifier", attrs: { id: "id" }, children: ["lit-fixture"] },
+          { tag: "dc:title", children: [title] },
+        ],
+      },
+      {
+        tag: "manifest",
+        children: items.map((it) => ({ tag: "item", attrs: { id: it.id, href: it.file, "media-type": it.mime } })),
+      },
+      {
+        tag: "spine",
+        children: items.filter((it) => it.spine).map((it) => ({ tag: "itemref", attrs: { idref: it.id } })),
+      },
+    ],
+  };
+  files.push({ name: "/meta", data: Uint8Array.from(litTokens([opf])) });
+  for (const it of items) {
+    if (it.spine) files.push({ name: `/data/${it.id}/content`, data: Uint8Array.from(litTokens(it.spine)) });
+    else files.push({ name: `/data/${it.id}`, data: it.data! });
+  }
+
+  // directory: one AOLL chunk listing every file as (section 0, offset, size)
+  const entries: number[] = [];
+  let off = 0;
+  for (const f of files) {
+    const name = bytes(f.name);
+    entries.push(...litEncInt(name.length), ...name, ...litEncInt(0), ...litEncInt(off), ...litEncInt(f.data.length));
+    off += f.data.length;
+  }
+  const chunkSize = Math.max(256, 48 + entries.length + 2 + 16);
+  const chunk = new Uint8Array(chunkSize);
+  chunk.set(bytes("AOLL"), 0);
+  new DataView(chunk.buffer).setUint32(4, chunkSize - 2 - (48 + entries.length), true);
+  chunk.set(entries, 48);
+  new DataView(chunk.buffer).setUint16(chunkSize - 2, files.length, true);
+  const dirHdr = new ByteWriter();
+  dirHdr.raw(bytes("IFCM"));
+  dirHdr.u32le(1);
+  dirHdr.u32le(chunkSize);
+  dirHdr.pad(12);
+  dirHdr.u32le(1); // chunk count
+  dirHdr.pad(4);
+  const dir = concat([dirHdr.bytes(), chunk]);
+
+  const hdrLen = 0x28;
+  const nPieces = 5;
+  const secHdrLen = 56;
+  const dirOff = hdrLen + nPieces * 16 + secHdrLen;
+  const contentOff = dirOff + dir.length;
+  const w = new ByteWriter();
+  w.raw(bytes("ITOLITLS"));
+  w.u32le(1);
+  w.u32le(hdrLen);
+  w.u32le(nPieces);
+  w.u32le(secHdrLen);
+  w.pad(hdrLen - 24);
+  for (let i = 0; i < nPieces; i++) {
+    // piece 1 is the directory: u64 offset, u64 length
+    w.u32le(i === 1 ? dirOff : 0);
+    w.u32le(0);
+    w.u32le(i === 1 ? dir.length : 0);
+    w.u32le(0);
+  }
+  // secondary header: an ITSF block holding the content offset
+  w.u32le(0);
+  w.u32le(8);
+  w.raw(bytes("ITSF"));
+  w.u32le(4);
+  w.pad(8);
+  w.u32le(contentOff);
+  w.u32le(0);
+  w.pad(24);
+  if (w.length !== dirOff) throw new Error(`bad LIT header size ${w.length}`);
+  return concat([w.bytes(), dir, ...files.map((f) => f.data)]);
+}

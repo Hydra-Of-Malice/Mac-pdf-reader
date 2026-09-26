@@ -30,6 +30,8 @@ static const double kLinkScanSteps = 128.0;
 static const double kScrollTolerance = 3.0;
 static const CGFloat kScrollProbe = 60.0;
 static const int kMaxSnapshotSamples = 250;
+static const int kPrintPages = 3;
+static const double kOpenCallMaxMs = 500.0;
 static const NSUInteger kWhiteLevel = 230;
 
 // "case/step" being run, printed by the watchdog
@@ -550,6 +552,12 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     [self beginStep:@"open"];
     double t0 = Now();
     [_host openPaths:@[ path ]];
+    // documents open on a loader thread: the call returns with the tab still opening
+    double callMs = (Now() - t0) * 1000.0;
+    BOOL background = [self state].loading;
+    NSString* how = [NSString stringWithFormat:@"returned after %.0f ms, %@", callMs,
+                                               background ? @"opening in the background" : @"not in the background"];
+    [self step:@"open in background" ok:background && callMs < kOpenCallMaxMs since:t0 detail:how];
     __block BOOL opened = NO;
     BOOL settled = [self waitFor:^BOOL {
       struct SumatraTestState s = [self state];
@@ -624,6 +632,7 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     [self find:StringValue([c objectForKey:@"search"]) page:[[c objectForKey:@"searchPage"] intValue]];
     [self followLink];
     [self selectAndCopy:StringValue([c objectForKey:@"search"])];
+    [self printToPDF];
     [self persistence:[c objectForKey:@"absPath"]];
 }
 
@@ -1080,14 +1089,30 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     NSWindow* window = [_host selfTestWindow];
     [window makeFirstResponder:[_host selfTestDocumentView]];
     NSString* err = [self invoke:@selector(selectAll:)];
+    // long documents prepare the text in the background: the command returns at once
+    double callMs = (Now() - t0) * 1000.0;
+    BOOL background = [self state].selecting;
+    BOOL finished = [self waitFor:^BOOL {
+      return ![self state].selecting;
+    }
+                          seconds:_waitSeconds];
     [self settle];
     BOOL selected = [self state].hasSelection;
     BOOL textDoc = [word length] > 0;
+    NSString* how = [NSString stringWithFormat:@"command returned after %.0f ms%@", callMs,
+                                               background ? @", text prepared in the background" : @""];
+    if (!err && !finished) {
+        err = [NSString stringWithFormat:@"still preparing text; %@", how];
+    }
+    if (!err && background && callMs > kOpenCallMaxMs) {
+        err = [NSString stringWithFormat:@"UI blocked; %@", how];
+    }
     if (err || (textDoc && !selected)) {
         [self step:@"select all" ok:NO since:t0 detail:err ?: @"nothing selected"];
         return;
     }
-    [self step:@"select all" ok:YES since:t0 detail:selected ? @"selected" : @"no text in this document"];
+    NSString* summary = [NSString stringWithFormat:@"%@; %@", selected ? @"selected" : @"no text in this document", how];
+    [self step:@"select all" ok:YES since:t0 detail:summary];
     if (!selected) {
         return;
     }
@@ -1105,6 +1130,32 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     NSString* detail = err ?: [NSString stringWithFormat:@"%lu characters%@", (unsigned long)[text length],
                                                          ok || !textDoc ? @"" : @", search word missing"];
     [self step:@"copy" ok:ok since:t0 detail:detail];
+}
+
+// The print path with a Save-as-PDF job: the PDF must have one page per printed page.
+- (void)printToPDF {
+    [self beginStep:@"print to PDF"];
+    double t0 = Now();
+    int last = MIN([self state].pageCount, kPrintPages);
+    NSString* name = [SafeFileName(_caseId) stringByAppendingString:@"-print.pdf"];
+    NSString* file = [_outDir stringByAppendingPathComponent:name];
+    NSFileManager* fm = [NSFileManager defaultManager];
+    [fm removeItemAtPath:file error:nil];
+    BOOL ran = [_host selfTestPrintToPDF:file firstPage:1 lastPage:last];
+    unsigned long long size = [[fm attributesOfItemAtPath:file error:nil] fileSize];
+    size_t pages = 0;
+    CGPDFDocumentRef pdf = size > 0 ? CGPDFDocumentCreateWithURL((CFURLRef)[NSURL fileURLWithPath:file]) : nullptr;
+    if (pdf) {
+        pages = CGPDFDocumentGetNumberOfPages(pdf);
+        CGPDFDocumentRelease(pdf);
+    }
+    BOOL ok = ran && size > 0 && (int)pages == last;
+    NSString* detail = [NSString stringWithFormat:@"%@: %llu bytes, %d page(s), expected %d%@", name, size, (int)pages,
+                                                  last, ran ? @"" : @", print operation failed"];
+    [self step:@"print to PDF" ok:ok since:t0 detail:detail];
+    if (ok) {
+        [fm removeItemAtPath:file error:nil];
+    }
 }
 
 // Close the tab, write and re-read the settings file, reopen: page, zoom,

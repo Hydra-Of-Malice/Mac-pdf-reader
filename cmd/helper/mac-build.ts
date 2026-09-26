@@ -56,6 +56,8 @@ export interface PosixTarget {
   arch: MacArch;
   // go on every compile and link line: -arch, -mmacosx-version-min, zig's -target
   flags: string[];
+  // Apple's SDK with its frameworks is available (not when cross-compiling with zig)
+  frameworks: boolean;
 }
 
 export interface PosixConfig {
@@ -78,8 +80,12 @@ export function macTarget(arch: MacArch): PosixTarget {
     os: "mac",
     arch,
     flags: ["-arch", arch === "arm64" ? "arm64" : "x86_64", `-mmacosx-version-min=${kMacMinVersion}`],
+    frameworks: true,
   };
 }
+
+// C sources that call Apple frameworks (CoreText, CoreFoundation) from base and mupdf: only for a macOS SDK build
+export const MAC_FRAMEWORK_SOURCES = ["src/base/StrNormalize_mac.c", "src/mupdf/mupdf_load_system_font_mac.c"];
 
 export function defaultJobs(): number {
   return Math.max(1, cpus().length);
@@ -473,6 +479,8 @@ function makeMupdf(t: PosixTarget): LibDef {
   }
   for (const g of lib.files) {
     if (g.dir === "ext/mupdf/source/tools") g.patterns = ["pdfinfo.c"];
+    // system fonts through CoreText
+    if (g.dir === "src/mupdf" && t.frameworks) g.patterns.push("mupdf_load_system_font_mac.c");
   }
   lib.files.push({ dir: "ext/mupdf/source/helpers/pkcs7", patterns: ["pkcs7-openssl.c"] });
   return lib;
@@ -532,9 +540,10 @@ export const SRC_INCLUDES = [
   "ext/a-zlib",
 ];
 
-function baseLib(): LibDef {
+function baseLib(t: PosixTarget): LibDef {
   const groups = new Map<string, string[]>();
-  for (const src of BASE_SOURCES) {
+  const srcs = t.frameworks ? [...BASE_SOURCES, "src/base/StrNormalize_mac.c"] : BASE_SOURCES;
+  for (const src of srcs) {
     const i = src.lastIndexOf("/");
     const dir = src.slice(0, i);
     groups.set(dir, [...(groups.get(dir) ?? []), src.slice(i + 1)]);
@@ -552,7 +561,7 @@ function baseLib(): LibDef {
 // only builds for Windows, elsewhere libarchive reads RAR (src/base/Archive.cpp).
 export function posixLibs(t: PosixTarget, genDir: string): LibDef[] {
   const libs: LibDef[] = [
-    baseLib(),
+    baseLib(t),
     makeMupdf(t),
     structuredClone(libwebp),
     structuredClone(aGumbo),
@@ -735,7 +744,7 @@ export async function compileSources(a: CompileArgs, group: string, srcs: string
 
 export function linkFlags(t: PosixTarget, cfg: PosixConfig): string[] {
   const flags = [...t.flags, ...(cfg.asan ? ["-fsanitize=address"] : [])];
-  if (t.os === "mac") return [...flags, "-liconv"];
+  if (t.os === "mac") return [...flags, "-liconv", "-framework", "CoreText", "-framework", "CoreFoundation"];
   return [...flags, "-lpthread", "-lm"];
 }
 

@@ -13,6 +13,11 @@
 #include <sys/syscall.h>
 #endif
 
+#if OS_MAC
+// StrNormalize_mac.c
+extern "C" char* MacNormalizeUtf8(const char* s, int len, int form);
+#endif
+
 //--- atomics ------------------------------------------------------------------
 
 bool AtomicBoolGet(AtomicBool* p) {
@@ -326,3 +331,149 @@ Str WStrToCodePage(uint codePage, WStr s, Arena* a) {
 }
 
 } // namespace strconv
+
+//--- Unicode normalization, code page guessing ------------------------------
+
+// Returns {} when it can't normalize (Linux has no system Unicode tables)
+TempStr NormalizeString(Str s, int form) {
+#if OS_MAC
+    char* res = MacNormalizeUtf8(s.s, len(s), form);
+    if (!res) {
+        return {};
+    }
+    TempStr tmp = str::DupTemp(Str(res));
+    free(res);
+    return tmp;
+#else
+    (void)s;
+    (void)form;
+    return {};
+#endif
+}
+
+constexpr int kGuessMaxBytes = 64 * 1024;
+
+// Decodes s strictly (an invalid byte sequence fails) from iconv encoding
+// `from`, calling onCodepoint with each code point. Returns their number, -1
+// if s isn't valid in that encoding.
+template <typename Fn>
+static int DecodeStrict(Str s, const char* from, const Fn& onCodepoint) {
+    iconv_t cd = iconv_open("UTF-32LE", from);
+    if (cd == (iconv_t)-1) {
+        return -1;
+    }
+    char* in = s.s;
+    size_t inLeft = (size_t)s.len;
+    u32 buf[1024];
+    int n = 0;
+    bool ok = true;
+    while (inLeft > 0) {
+        char* out = (char*)buf;
+        size_t outLeft = sizeof(buf);
+        size_t r = iconv(cd, &in, &inLeft, &out, &outLeft);
+        int got = (int)((sizeof(buf) - outLeft) / sizeof(u32));
+        for (int i = 0; i < got; i++) {
+            onCodepoint(buf[i]);
+        }
+        n += got;
+        if (r == (size_t)-1 && errno != E2BIG) {
+            // EINVAL is an incomplete sequence at the end: the cut at kGuessMaxBytes
+            ok = errno == EINVAL && inLeft < 4;
+            break;
+        }
+    }
+    iconv_close(cd);
+    return ok ? n : -1;
+}
+
+// common Chinese characters, simplified (GBK) and traditional (Big5)
+static const u32 kCommonHans[] = {0x7684, 0x4E00, 0x662F, 0x4E0D, 0x4E86, 0x5728, 0x4EBA, 0x6709, 0x6211,
+                                  0x4ED6, 0x8FD9, 0x4E2A, 0x4EEC, 0x4E2D, 0x6765, 0x4E0A, 0x5927, 0x4E3A,
+                                  0x548C, 0x56FD, 0x5730, 0x5230, 0x4EE5, 0x8BF4, 0x65F6, 0x8981, 0x5C31};
+static const u32 kCommonHant[] = {0x7684, 0x4E00, 0x662F, 0x4E0D, 0x4E86, 0x5728, 0x4EBA, 0x6709, 0x6211,
+                                  0x4ED6, 0x9019, 0x500B, 0x5011, 0x4E2D, 0x4F86, 0x4E0A, 0x5927, 0x70BA,
+                                  0x548C, 0x570B, 0x5730, 0x5230, 0x4EE5, 0x8AAA, 0x6642, 0x8981, 0x5C31};
+
+template <size_t N>
+static bool IsOneOf(u32 c, const u32 (&set)[N]) {
+    for (u32 v : set) {
+        if (v == c) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// how typical the text decoded as codePage looks for its script: points per
+// code point in the ranges the code page is for, 0 if it doesn't decode
+static int ScoreDoubleByte(Str s, uint codePage) {
+    int score = 0;
+    char name[16];
+    snprintf(name, sizeof(name), "CP%u", codePage);
+    int n = DecodeStrict(s, name, [&](u32 c) {
+        bool kana = c >= 0x3040 && c <= 0x30FF;
+        bool han = c >= 0x4E00 && c <= 0x9FFF;
+        bool hangul = c >= 0xAC00 && c <= 0xD7A3;
+        if (codePage == 932) {
+            score += kana ? 3 : (han ? 1 : 0);
+        } else if (codePage == 949) {
+            score += hangul ? 3 : 0;
+        } else if (codePage == 936) {
+            score += IsOneOf(c, kCommonHans) ? 4 : (han ? 1 : 0);
+        } else if (codePage == 950) {
+            score += IsOneOf(c, kCommonHant) ? 4 : (han ? 1 : 0);
+        }
+    });
+    return n < 0 ? 0 : score;
+}
+
+// Code page of legacy (non-Unicode) text, for what MLang's DetectInputCodepage
+// does on Windows: UTF-8 if it's valid UTF-8, the CJK double-byte code page it
+// decodes as most plausibly, Cyrillic Windows-1251 / KOI8-R by which half of
+// the upper bytes the lower-case letters are in, else defVal.
+uint GuessTextCodepage(Str data, uint defVal) {
+    Str s(data.s, std::min(len(data), kGuessMaxBytes));
+    int nHigh = 0;
+    int nLetters = 0;
+    int nC0toDF = 0;
+    int nE0toFF = 0;
+    for (int i = 0; i < len(s); i++) {
+        u8 c = (u8)s.s[i];
+        if (c >= 0x80) {
+            nHigh++;
+            nC0toDF += c >= 0xC0 && c <= 0xDF;
+            nE0toFF += c >= 0xE0;
+        } else if (isalpha(c)) {
+            nLetters++;
+        }
+    }
+    if (nHigh == 0 || DecodeStrict(s, "UTF-8", [](u32) {}) >= 0) {
+        return CP_UTF8;
+    }
+    // Latin text with a few accented letters: nothing to guess
+    if (nHigh <= nLetters) {
+        return defVal;
+    }
+
+    uint best = 0;
+    int bestScore = 0;
+    for (uint cp : {932u, 936u, 949u, 950u}) {
+        int score = ScoreDoubleByte(s, cp);
+        if (score > bestScore) {
+            best = cp;
+            bestScore = score;
+        }
+    }
+    // a script's characters take 2 bytes each: most upper bytes must be in them
+    if (best && bestScore >= nHigh / 2) {
+        return best;
+    }
+
+    // nearly all upper bytes in 0xC0..0xFF: Cyrillic letters
+    bool cyrillic = nC0toDF + nE0toFF >= nHigh * 9 / 10;
+    if (cyrillic) {
+        // lower case is 0xE0..0xFF in Windows-1251, 0xC0..0xDF in KOI8-R
+        return nE0toFF >= nC0toDF ? 1251 : 20866;
+    }
+    return defVal;
+}

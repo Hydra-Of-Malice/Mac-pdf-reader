@@ -38,16 +38,16 @@ In single page view, scrolling past the top or bottom of a page moves to the pre
 
 ## Find and select
 
-| Keys                  | Action                                         |
-| --------------------- | ---------------------------------------------- |
-| ⌘F                    | find (search field in the toolbar)             |
-| ↩ ⇧↩                  | next / previous match, in the search field     |
-| ⌘G ⇧⌘G                | find next / previous                           |
-| ⌘E                    | use selection for find                         |
-| ⌘C ⌘A                 | copy / select all text                         |
-| double / triple click | select word / line; ⇧click extends             |
-| drag outside text     | move the page                                  |
-| Esc                   | leave full screen, else clear selection/search |
+| Keys                  | Action                                                                  |
+| --------------------- | ----------------------------------------------------------------------- |
+| ⌘F                    | find: the toolbar's search field, or the find bar when it isn't visible |
+| ↩ ⇧↩                  | next / previous match, in the search field                              |
+| ⌘G ⇧⌘G                | find next / previous                                                    |
+| ⌘E                    | use selection for find                                                  |
+| ⌘C ⌘A                 | copy / select all text                                                  |
+| double / triple click | select word / line; ⇧click extends                                      |
+| drag outside text     | move the page                                                           |
+| Esc                   | leave full screen, else clear selection/search; closes the find bar     |
 
 ## Documents and tabs
 

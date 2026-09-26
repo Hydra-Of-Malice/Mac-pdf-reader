@@ -105,11 +105,24 @@ int ReaderModel::PageCount() const {
     return engine ? engine->PageCount() : 0;
 }
 
+// Damaged files can claim absurd page sizes (e.g. an image header saying
+// 48 x 2130706432 px); cap them so layout's int math at high zoom can't overflow.
+static RectF SaneMediabox(RectF box) {
+    constexpr float kMaxPageDim = 1 << 20;
+    if (!(box.dx <= kMaxPageDim)) {
+        box.dx = kMaxPageDim;
+    }
+    if (!(box.dy <= kMaxPageDim)) {
+        box.dy = kMaxPageDim;
+    }
+    return box;
+}
+
 RectF ReaderModel::PageMediabox(int pageNo) const {
     if (!engine || pageNo < 1 || pageNo > engine->PageCount()) {
         return {};
     }
-    return engine->PageMediabox(pageNo);
+    return SaneMediabox(engine->PageMediabox(pageNo));
 }
 
 float ReaderModel::FileDPI() const {
@@ -131,7 +144,7 @@ bool ReaderModel::Layout(const DocumentLayoutParams& params, DocumentLayout* lay
 
     layout->Reset(pageCount);
     for (int pageNo = 1; pageNo <= pageCount; pageNo++) {
-        layout->SetPageMediaBox(pageNo, engine->PageMediabox(pageNo));
+        layout->SetPageMediaBox(pageNo, SaneMediabox(engine->PageMediabox(pageNo)));
     }
     layout->Relayout(params);
     return true;

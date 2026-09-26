@@ -21,6 +21,7 @@ import {
   bytes,
   concat,
   makeBmp,
+  makeLit,
   makeMobi,
   makeRar4Store,
   makePalmDoc,
@@ -34,6 +35,7 @@ import {
   makeZip,
   patternPixels,
   prng,
+  type LitNode,
   type Rgb,
 } from "./fixture-lib.ts";
 
@@ -159,6 +161,99 @@ const epub = makeEpub();
 save("sample.epub", epub);
 save("corrupt.epub", epub.subarray(0, Math.floor(epub.length * 0.6)));
 save("empty.epub", new Uint8Array(0));
+
+// Several multi-page chapters: MuPDF lays out only the first one at open, so the page count grows afterwards
+// (tests the bridge's page-count updates). The last chapter's word must be found past the initial count.
+function makeChaptersEpub(): Uint8Array {
+  const words = ["gazelle", "ibex", "lemur", "narwhal"];
+  const filler = Array.from(
+    { length: 45 },
+    (_, i) => `<p>Paragraph ${i + 1} of this chapter fills up another line.</p>`,
+  );
+  const chapter = (i: number) =>
+    `<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter ${i + 1}</title></head>` +
+    `<body><h1 id="c${i + 1}">Chapter ${i + 1}</h1><p>The ${words[i]} appears in chapter ${i + 1}.</p>${filler.join("")}</body></html>
+`;
+  const ids = words.map((_, i) => `ch${i + 1}`);
+  return makeZip([
+    { name: "mimetype", data: "application/epub+zip", store: true },
+    {
+      name: "META-INF/container.xml",
+      data: `<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>
+`,
+    },
+    {
+      name: "content.opf",
+      data:
+        `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">` +
+        `<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">chapters</dc:identifier><dc:title>Chapters fixture</dc:title></metadata>` +
+        `<manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>` +
+        ids.map((id) => `<item id="${id}" href="${id}.xhtml" media-type="application/xhtml+xml"/>`).join("") +
+        `</manifest><spine toc="ncx">${ids.map((id) => `<itemref idref="${id}"/>`).join("")}</spine></package>
+`,
+    },
+    {
+      name: "toc.ncx",
+      data:
+        `<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head/><docTitle><text>Chapters</text></docTitle><navMap>` +
+        ids
+          .map(
+            (id, i) =>
+              `<navPoint id="n${i + 1}" playOrder="${i + 1}"><navLabel><text>Chapter ${i + 1}</text></navLabel><content src="${id}.xhtml#c${i + 1}"/></navPoint>`,
+          )
+          .join("") +
+        `</navMap></ncx>
+`,
+    },
+    ...ids.map((id, i) => ({ name: `${id}.xhtml`, data: chapter(i) })),
+  ]);
+}
+save("chapters.epub", makeChaptersEpub());
+
+// ---- LIT ----
+
+{
+  const page = (title: string, body: LitNode[]): LitNode[] => [
+    {
+      tag: "html",
+      attrs: { xmlns: "http://www.w3.org/1999/xhtml" },
+      children: [
+        { tag: "head", children: [{ tag: "title", children: [title] }] },
+        { tag: "body", children: body },
+      ],
+    },
+  ];
+  save(
+    "sample.lit",
+    makeLit("LIT mac fixture", [
+      {
+        id: "ch1",
+        file: "ch1.html",
+        mime: "application/xhtml+xml",
+        spine: page("LIT chapter one", [
+          { tag: "h1", children: ["LIT Chapter One"] },
+          { tag: "p", children: ["The aardvark digs at night."] },
+          { tag: "p", children: [{ tag: "a", attrs: { href: "ch2.html#c2" }, children: ["Go to chapter two"] }] },
+          { tag: "p", children: [{ tag: "img", attrs: { src: "img.png", alt: "pattern" } }] },
+        ]),
+      },
+      {
+        id: "ch2",
+        file: "ch2.html",
+        mime: "application/xhtml+xml",
+        spine: page("LIT chapter two", [
+          { tag: "h1", attrs: { id: "c2" }, children: ["LIT Chapter Two"] },
+          { tag: "p", children: ["The okapi lives in the forest."] },
+        ]),
+      },
+      { id: "img", file: "img.png", mime: "image/png", data: smallPng(green) },
+    ]),
+  );
+}
 
 // ---- FB2 / FBZ ----
 

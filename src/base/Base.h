@@ -2307,6 +2307,12 @@ TempStr AnsiToUtf8Temp(Str src);
 Str ToUtf8(WStr s, Arena* a = nullptr);
 WStr ToWStr(Str s, Arena* a = nullptr);
 
+#if !OS_WIN
+// Windows declares these in Win.h. form is a NORM_FORM value (5 = NFKC)
+TempStr NormalizeString(Str s, int form);
+uint GuessTextCodepage(Str data, uint defVal = CP_ACP);
+#endif
+
 //--- Scoped.h ------------------------------------------------------------------
 
 // include Base.h instead of including directly

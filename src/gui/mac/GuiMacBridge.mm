@@ -72,6 +72,16 @@ void MacGuiPostTask(void (*fn)(void*), void* data) {
 bool MacGuiShowPasswordDialog(void* parent, const char* fileName, int fileNameLen, bool isRetry, bool canRemember,
                               bool rememberPassword, bool showPassword, bool* rememberPasswordOut,
                               bool* showPasswordOut, char** passwordOut, int* passwordLenOut) {
+    // documents may open on a loader thread; AppKit is main-thread only
+    if (![NSThread isMainThread]) {
+        __block bool accepted = false;
+        dispatch_sync(dispatch_get_main_queue(), ^{
+          accepted = MacGuiShowPasswordDialog(parent, fileName, fileNameLen, isRetry, canRemember, rememberPassword,
+                                              showPassword, rememberPasswordOut, showPasswordOut, passwordOut,
+                                              passwordLenOut);
+        });
+        return accepted;
+    }
     (void)parent;
     if (passwordOut) {
         *passwordOut = nullptr;

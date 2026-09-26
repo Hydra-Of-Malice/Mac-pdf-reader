@@ -172,11 +172,18 @@ static void RenderWorker(PageRenderServiceData* data) {
     }
 }
 
-PageRenderService* PageRenderService::Create(EngineBase* engine, const Func0& onPageReady, i64 maxBytes) {
+PageRenderService* PageRenderService::Create(EngineBase* engine, const Func0& onPageReady, i64 maxBytes,
+                                             PageRenderEngine use) {
     if (!engine || maxBytes <= 0) {
         return nullptr;
     }
-    EngineBase* clone = engine->Clone();
+    EngineBase* clone = nullptr;
+    if (use == PageRenderEngine::Shared) {
+        engine->AddRef();
+        clone = engine;
+    } else {
+        clone = engine->Clone();
+    }
     if (!clone) {
         return nullptr;
     }

@@ -7,7 +7,7 @@
 // --ci: the small, fixed, fast subset CI runs (seed 1, 3 variants of each small fixture).
 // A given --seed / --count always produces the same variants. Exit code 1 if anything crashed or hung.
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { cpus } from "node:os";
 import { extname, join } from "node:path";
 import { prng } from "./fixture-lib.ts";
@@ -34,6 +34,7 @@ interface Outcome {
   stage: string;
   ms: number;
   log?: string;
+  opened?: boolean;
 }
 
 const repoRoot = join(import.meta.dir, "..", "..");
@@ -251,7 +252,7 @@ async function runDriver(driver: string, v: Variant, timeoutMs: number): Promise
   const code = await proc.exited;
   clearTimeout(timer);
   const drain = (p: Promise<string>) => Promise.race([p, Bun.sleep(2000).then(() => "")]);
-  const [, stderr] = await Promise.all([drain(stdoutP), drain(stderrP)]);
+  const [stdout, stderr] = await Promise.all([drain(stdoutP), drain(stderrP)]);
   const ms = performance.now() - start;
   const stages = [...stderr.matchAll(/^stage: (.*)$/gm)];
   const stage = stages.length > 0 ? stages[stages.length - 1]![1]! : "";
@@ -277,7 +278,7 @@ async function runDriver(driver: string, v: Variant, timeoutMs: number): Promise
       log,
     };
   }
-  return { variant: v, kind: "ok", detail: "", stage, ms };
+  return { variant: v, kind: "ok", detail: "", stage, ms, opened: stdout.includes('"open":true') };
 }
 
 function saveRepro(o: Outcome, stderrNote: string) {
@@ -310,7 +311,8 @@ async function main() {
   for (const f of manifest.fixtures as Fixture[]) {
     if (f.generate || seen.has(f.path) || (o.only && !f.id.includes(o.only))) continue;
     const abs = join(repoRoot, f.path);
-    if (!existsSync(abs)) continue;
+    // image folders etc.: only single files are mutated
+    if (!existsSync(abs) || !statSync(abs).isFile()) continue;
     const data = new Uint8Array(readFileSync(abs));
     if (data.length === 0 || (o.ci && data.length > kCiMaxFixtureSize)) continue;
     seen.add(f.path);
@@ -349,15 +351,18 @@ async function main() {
   await Promise.all(Array.from({ length: o.jobs }, worker));
 
   // per format summary; problems grouped by signature
-  const byFormat = new Map<string, { runs: number; bad: number }>();
+  const byFormat = new Map<string, { runs: number; bad: number; opened: number }>();
   for (const r of outcomes) {
-    const s = byFormat.get(r.variant.fixture.format) ?? { runs: 0, bad: 0 };
+    const s = byFormat.get(r.variant.fixture.format) ?? { runs: 0, bad: 0, opened: 0 };
     s.runs++;
+    if (r.opened) s.opened++;
     if (r.kind !== "ok") s.bad++;
     byFormat.set(r.variant.fixture.format, s);
   }
   console.log("\nformat      runs  crashes+hangs");
-  for (const [fmt, s] of byFormat) console.log(`${fmt.padEnd(11)} ${String(s.runs).padEnd(5)} ${s.bad}`);
+  for (const [fmt, s] of byFormat) {
+    console.log(`${fmt.padEnd(11)} ${String(s.runs).padEnd(5)} ${String(s.opened).padEnd(7)} ${s.bad}`);
+  }
   const bad = outcomes.filter((r) => r.kind !== "ok");
   const groups = new Map<string, Outcome[]>();
   for (const r of bad) {

@@ -62,8 +62,9 @@ float EngineMupdfSetEbookLayoutAspect(float dyOverDx) {
     return prev;
 }
 
-// in mupdf_load_system_font.c
+// in mupdf_load_system_font.c / mupdf_load_system_font_mac.c
 extern "C" void install_load_windows_font_funcs(fz_context* ctx);
+extern "C" void install_load_mac_font_funcs(fz_context* ctx);
 
 static AnnotationType AnnotationTypeFromPdfAnnot(enum pdf_annot_type tp) {
     return (AnnotationType)tp;
@@ -3691,6 +3692,8 @@ EngineMupdf::EngineMupdf() {
 
 #if OS_WIN
     install_load_windows_font_funcs(_ctx);
+#elif OS_MAC
+    install_load_mac_font_funcs(_ctx);
 #endif
     InstallEmbeddedFontLoader();
     fz_register_document_handlers(_ctx);
@@ -4636,11 +4639,15 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
         ok = fz_authenticate_password(ctx, _doc, pwdA.s);
         // according to the spec (1.7 ExtensionLevel 3), the password
         // for crypt revisions 5 and above are in SASLprep normalization
-        // (NormalizeString and the ANSI code page are Win32)
-#if OS_WIN
         if (!ok) {
             // TODO: this is only part of SASLprep
             TempStr normalized = NormalizeString(pwd, 5 /* NormalizationKC */);
+#if !OS_WIN
+            // Linux can't normalize; keep the password for the retry below
+            if (len(normalized) == 0) {
+                normalized = pwd;
+            }
+#endif
             pwdA = normalized;
             if (pwdA) {
                 ok = fz_authenticate_password(ctx, _doc, pwdA.s);
@@ -4648,13 +4655,17 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
         }
         // older Acrobat versions seem to have considered passwords to be in codepage 1252
         // note: such passwords aren't portable when stored as Unicode text
-        if (!ok && GetACP() != 1252) {
+#if OS_WIN
+        bool acpIs1252 = GetACP() == 1252;
+#else
+        bool acpIs1252 = false;
+#endif
+        if (!ok && !acpIs1252) {
             TempStr pwd_ansi = pwdA;
             TempWStr pwdCp1252 = strconv::StrCPToWStrTemp(pwd_ansi, 1252);
             pwdA = ToUtf8Temp(pwdCp1252);
             ok = fz_authenticate_password(ctx, _doc, pwdA.s);
         }
-#endif
         if (ok) {
             str::ReplaceWithCopy(&pdfPassword, pwdA);
         }

@@ -178,11 +178,14 @@ void MacPrefsBeginSession() {
     VecAppend(*gGlobalPrefs->sessionData, gBuildingSession);
 }
 
+// A null state (document still opening) keeps the file's saved state.
 void MacPrefsAppendSession(const char* path, const MacPrefsViewState* state) {
-    if (!gBuildingSession || !path || !state) {
+    if (!gBuildingSession || !path) {
         return;
     }
-    MacPrefsSaveDocument(path, state);
+    if (state) {
+        MacPrefsSaveDocument(path, state);
+    }
     FileState* fileState = FindFileState(Str((char*)path));
     if (!fileState) {
         return;

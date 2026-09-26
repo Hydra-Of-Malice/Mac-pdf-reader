@@ -47,6 +47,7 @@ CGImageRef SumatraCreateImage(MacRenderedPage* page);
 @interface SumatraDocumentView : NSView
 @property(nonatomic, retain) NSArray* pages;  // SumatraPageImage
 @property(nonatomic, copy) NSString* message; // shown when there are no pages
+@property(nonatomic) BOOL busy;               // spinner above the message (document opening)
 @property(nonatomic, assign) id<SumatraDocumentViewOwner> owner;
 - (SumatraPageImage*)pageAtPoint:(NSPoint)point;
 @end

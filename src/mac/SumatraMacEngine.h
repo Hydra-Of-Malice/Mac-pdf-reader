@@ -100,6 +100,7 @@ bool MacHasSelection(void* document);
 int MacSelectionRectCount(void* document, int pageNo);
 bool MacSelectionRect(void* document, int pageNo, int index, double zoom, int rotation, MacDisplayRect* rect);
 char* MacCopySelectionText(void* document);
+int MacCopySelectionRects(void* document, int pageNo, double zoom, int rotation, MacDisplayRect** rectsOut);
 
 bool MacLinkAtPoint(void* document, int pageNo, double x, double y, double zoom, int rotation, MacLink* link);
 void MacFreeLink(MacLink* link);
@@ -159,6 +160,11 @@ using MacFindDoneCallback = void (*)(void* context, void* document, int token, b
 
 void* MacOpenDocumentEx(void* passwordParent, const char* path, MacPageReadyCallback onPageReady, void* callbackContext,
                         MacOpenError* errorOut);
+
+using MacOpenDoneCallback = void (*)(void* context, void* document, MacOpenError error);
+bool MacOpenDocumentAsync(const char* path, MacPasswordCallback askPassword, void* passwordContext,
+                          MacPageReadyCallback onPageReady, void* renderContext, MacOpenDoneCallback onDone,
+                          void* doneContext);
 bool MacIsSupportedPath(const char* path);
 char* MacCopySupportedExtensions();
 char* MacCopySupportedFormats();
@@ -179,3 +185,7 @@ bool MacPagePointFromView(void* document, int pageNo, double x, double y, double
                           double* pageY);
 bool MacViewPointFromPage(void* document, int pageNo, double pageX, double pageY, double zoom, int rotation, double* x,
                           double* y);
+
+using MacTextProgressCallback = void (*)(void* context, void* document, int token, int done, int total);
+int MacPrepareTextStart(void* document, MacTextProgressCallback onProgress, void* context);
+void MacPrepareTextCancel(void* document);
