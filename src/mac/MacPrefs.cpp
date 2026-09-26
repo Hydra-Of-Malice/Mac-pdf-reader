@@ -110,7 +110,32 @@ void MacPrefsInit(const char* settingsPath) {
     gGlobalPrefs = (Settings*)DeserializeStruct(&gSettingsInfo, gPreviousSettings);
 }
 
+// Like the Windows app's FileHistoryPurge(): forget documents beyond the most
+// recent kMaxFileStates, and missing ones without saved state, unless pinned,
+// with a remembered password or with bookmarks.
+static void PurgeFileStates() {
+    constexpr int kMaxFileStates = 1000;
+    if (!gGlobalPrefs || !gGlobalPrefs->fileStates) {
+        return;
+    }
+    Vec<FileState*>& states = *gGlobalPrefs->fileStates;
+    for (int i = len(states) - 1; i >= 0; i--) {
+        FileState* state = states[i];
+        bool favorites = state->favorites && len(*state->favorites) > 0;
+        if (state->isPinned || len(state->decryptionKey) > 0 || favorites) {
+            continue;
+        }
+        bool missing = state->isMissing && state->useDefaultState;
+        if (!missing && i < kMaxFileStates) {
+            continue;
+        }
+        VecRemoveAt(states, i);
+        FreeStruct(&gFileStateInfo, state);
+    }
+}
+
 void MacPrefsShutdown() {
+    PurgeFileStates();
     if (gGlobalPrefs && gSettingsPath) {
         Str serialized = SerializeStruct(&gSettingsInfo, gGlobalPrefs, gPreviousSettings);
         if (dir::CreateForFile(gSettingsPath) && file::WriteFile(gSettingsPath, serialized)) {

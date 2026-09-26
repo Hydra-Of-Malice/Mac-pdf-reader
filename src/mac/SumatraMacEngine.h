@@ -190,3 +190,5 @@ bool MacViewPointFromPage(void* document, int pageNo, double pageX, double pageY
 using MacTextProgressCallback = void (*)(void* context, void* document, int token, int done, int total);
 int MacPrepareTextStart(void* document, MacTextProgressCallback onProgress, void* context);
 void MacPrepareTextCancel(void* document);
+void MacLayOutAllPages(void* document);
+void MacResetTempArena();

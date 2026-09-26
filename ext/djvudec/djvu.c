@@ -5115,7 +5115,9 @@ static int compose_bg_native_build(djvu_doc *doc, djvu_page_int *pg, int cache_l
     if (!pm) return -1;
     bw = djvu_iw44_width(pm);
     bh = djvu_iw44_height(pm);
-    if (bw <= 0 || bh <= 0) {
+    /* compose_background_from_native() only takes the page size reduced 1..15x:
+       check before the render, which a damaged (huge) header makes very slow */
+    if (bw <= 0 || bh <= 0 || djvu_compute_red(pg->info.width, pg->info.height, bw, bh) < 1) {
         djvu_doc_iw44_release(ctx, pm, pm_owned);
         return -1;
     }

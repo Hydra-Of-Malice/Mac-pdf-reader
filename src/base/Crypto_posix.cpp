@@ -4,8 +4,11 @@
 #include "base/Base.h"
 #include "base/Crypto.h"
 
-#if OS_DARWIN
+#if OS_MAC
 #include <CommonCrypto/CommonDigest.h>
+
+// MD5 / SHA-1 are deprecated for security use; callers use them as checksums
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 void CalcMD5Digest(Str data, u8 digest[16]) {
     CC_MD5(data.s, (CC_LONG)data.len, digest);

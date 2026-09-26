@@ -263,6 +263,11 @@ async function runDriver(driver: string, v: Variant, timeoutMs: number): Promise
     .join("\n");
   const san = stderr.split("\n").find((l) => /ERROR: AddressSanitizer|runtime error:|SUMMARY: \w+Sanitizer/.test(l));
   if (timedOut) return { variant: v, kind: "hang", detail: `timeout ${timeoutMs} ms`, stage, ms, log };
+  // the driver's -fuzz watchdog fired: a hang, with the stuck call's stack in the log
+  if (stderr.includes("watchdog: no progress")) {
+    const frame = lines.find((l) => /^\s+#[0-9]+ .* in (?!__sanitizer|OnWatchdog|__restore|killpg|pthread)/.test(l));
+    return { variant: v, kind: "hang", detail: `watchdog | ${frame?.trim() ?? ""}`, stage, ms, log };
+  }
   if (san) {
     // first frame in our code or a library, for grouping
     const frame = stderr.split("\n").find((l) => /^\s+#[0-9]+ .* in (?!__|asan|free|malloc|calloc|realloc)/.test(l));

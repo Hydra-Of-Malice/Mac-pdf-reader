@@ -45,6 +45,7 @@ static const NSUInteger kMaxTabLabelChars = 24;
 static const CGFloat kFindBarHeight = 30;
 static const int kMaxConcurrentOpens = 4;
 static const int kSelectAllSyncPages = 50;
+static const double kMissingFileRecheck = 1.0;
 static const double kLoadingIndicatorDelay = 0.3;
 
 static const CGFloat kSidebarDefaultWidth = 220;
@@ -622,6 +623,32 @@ static void OpenDone(void* context, void* document, MacOpenError error) {
 
 #pragma mark - Launch and shutdown
 
+// Like the Windows message loop: the main thread's temp arena is reset between
+// events, only in the outermost run loop (modal loops run inside calls that may
+// still use temp strings).
+static void ResetTempArenaBetweenEvents(CFRunLoopObserverRef observer, CFRunLoopActivity activity, void* info) {
+    (void)observer;
+    (void)info;
+    static int depth = 0;
+    if (activity == kCFRunLoopEntry) {
+        depth++;
+    } else if (activity == kCFRunLoopExit) {
+        depth--;
+    } else if (activity == kCFRunLoopBeforeWaiting && depth == 1) {
+        MacResetTempArena();
+    }
+}
+
+static void InstallTempArenaReset() {
+    CFOptionFlags activities = kCFRunLoopEntry | kCFRunLoopBeforeWaiting | kCFRunLoopExit;
+    CFRunLoopObserverRef observer =
+        CFRunLoopObserverCreate(kCFAllocatorDefault, activities, true, 0, ResetTempArenaBetweenEvents, nullptr);
+    if (observer) {
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+        CFRelease(observer);
+    }
+}
+
 // -prefs-dir, else a fresh temporary directory for -for-testing, else
 // ~/Library/Application Support/SumatraPDF.
 - (NSString*)chooseSettingsPath {
@@ -679,6 +706,7 @@ static void OpenDone(void* context, void* document, MacOpenError error) {
     [NSWindow setAllowsAutomaticWindowTabbing:NO];
     [self createMainWindow];
     [self installKeyMonitor];
+    InstallTempArenaReset();
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
@@ -1577,7 +1605,11 @@ static void OpenDone(void* context, void* document, MacOpenError error) {
         [self performSelector:@selector(reloadIfChanged:) withObject:path afterDelay:1.0];
         return;
     }
+    // deleted, maybe about to be re-created (e.g. `rm out.pdf; make`): the
+    // watcher is on the old file, so check again
     if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reloadIfChanged:) object:path];
+        [self performSelector:@selector(reloadIfChanged:) withObject:path afterDelay:kMissingFileRecheck];
         return;
     }
     [self reloadTab:tab];
@@ -1782,11 +1814,12 @@ static void OpenDone(void* context, void* document, MacOpenError error) {
         [_documentView setMessage:@"The document could not be laid out."];
         return;
     }
-    // chaptered ebooks can gain pages after opening; the bridge then sends a
-    // page-ready callback, which lays out again
+    // chaptered ebooks renumber their pages while chapters are laid out (the
+    // bridge then sends a page-ready callback): cached page images are stale
     if (layout.pageCount != tab.pageCount) {
         tab.pageCount = layout.pageCount;
-        [_sidebar documentChanged];
+        [_imageCache removeAllObjects];
+        [_sidebar documentPagesChanged];
     }
     NSSize canvas = NSMakeSize(layout.canvasWidth, layout.canvasHeight);
     if (!NSEqualSizes([_documentView frame].size, canvas)) {
@@ -1841,7 +1874,8 @@ static void OpenDone(void* context, void* document, MacOpenError error) {
                     continue;
                 }
                 MacLayoutPage* np = &layout.pages[pageNo - 1];
-                double zoom = np->shown ? np->renderZoom : currentPage->renderZoom;
+                // unshown pages come with the current zoom capped for their size
+                double zoom = np->renderZoom > 0 ? np->renderZoom : currentPage->renderZoom;
                 MacRequestPage(tab.document, pageNo, (float)zoom, tab.rotation, d);
             }
         }
@@ -3369,8 +3403,10 @@ static NSArray* ToolbarAllowedItems() {
 // the document can't be closed or reloaded until it finishes.
 - (NSPrintOperation*)printOperationWithInfo:(NSPrintInfo*)info {
     SumatraTabState* tab = _active;
+    // like the Windows app, print every chapter's final pages
+    MacLayOutAllPages(tab.document);
     SumatraPrintView* view = [[[SumatraPrintView alloc] initWithDocument:tab.document
-                                                               pageCount:tab.pageCount
+                                                               pageCount:MacPageCount(tab.document)
                                                                 rotation:tab.rotation] autorelease];
     [info setTopMargin:kPrintMargin];
     [info setBottomMargin:kPrintMargin];

@@ -88,9 +88,11 @@ from the `.dmg` (or the unpacked `.zip`) to `/Applications`.
 - `test_util` (portable unit tests) runs during every `-mac` and `-mac-core` build.
 - Portable core without a full app build, on macOS or Linux: `bun cmd/build.ts -mac-core [-dbg|-rel] [-asan]
 [-cc gcc|clang|zig]` builds the engines, reader model and `src/mac/*.cpp` plus `test_util`, `test_engines`,
-  `test_mac_engine` and `test_mac_thumbnails` into `out/mac-core-<cfg>-<cc>/` and runs `test_util`.
+  `test_mac_engine` and `test_mac_thumbnails` into `out/mac-core-<cfg>-<cc>/` and runs `test_util` and
+  `test_mac_thumbnails`.
 - Without a Mac: `bun cmd/build.ts -mac-core -cross [-arch arm64|x64|universal]` compiles the same portable sources
-  to macOS objects with zig (the Cocoa `.mm` files are skipped).
+  to macOS objects with zig. Sources that need Apple frameworks are skipped and listed: the Cocoa `.mm` files and
+  the C files that call CoreText / CoreFoundation (see Platform code below).
 - Per-format engine tests through the app's bridge (`src/mac/SumatraMacEngine.h`):
   `bun tests/mac/run-engine-tests.ts --driver out/mac-core-dbg-clang/test_mac_engine [--only <id>] [--json f.json]`
   over `tests/mac/fixtures/manifest.json`. See [formats.md](formats.md).
@@ -110,6 +112,25 @@ from the `.dmg` (or the unpacked `.zip`) to `/Applications`.
 - Remote Mac over ssh: `SUMATRA_MAC_HOST=user@host SUMATRA_MAC_DIR=src/sumatrapdf bun cmd/build.ts -mac-remote
 -branch <pushed-branch> -dbg`.
 - Manual checks before a release: [MANUAL-TEST-CHECKLIST.md](MANUAL-TEST-CHECKLIST.md).
+
+## Platform code
+
+- macOS-only C files, compiled only with Apple's SDK and linked with `-framework CoreText -framework
+CoreFoundation`: `src/mupdf/mupdf_load_system_font_mac.c` (MuPDF's system-font hooks through CoreText, so PDFs
+  with non-embedded fonts use the installed font; the Windows build has `mupdf_load_system_font.c`) and
+  `src/base/StrNormalize_mac.c` (Unicode normalization for `NormalizeString()`, used by the PDF password retry).
+  They don't include `base/Base.h`: Apple headers clash with it.
+- UnRAR: `ext/a-unrar/unrar.cpp` is generated for Windows and includes upstream's Windows-only `isnt.cpp` and
+  `motw.cpp`. The build compiles a copy without those two into `out/.../generated/unrar/unrar_posix.cpp` (see
+  `posixUnrar()` in `cmd/helper/mac-build.ts`); the build fails if the amalgamation changes so they can't be found.
+  UnRAR's license is not GPL-compatible: see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
+- `ext/a-libarchive` and `ext/a-harfbuzz` are generated for Windows too: the build writes a POSIX
+  `config_posix.h` and a few stubs for libarchive, and compiles harfbuzz with `-DHB_NO_VISIBILITY`.
+- Threads started with `StartThread()` get an 8 MB stack (macOS gives secondary threads 512 KB).
+- Large DjVu files are read into memory, not memory-mapped as on Windows (`gMemoryMapLargeFiles` in
+  `src/EngineDjvuDec.cpp`): another process truncating a mapped file would crash the app with SIGBUS.
+- `CalcMD5Digest()` / `CalcSHA1Digest()` / `CalcSHA2Digest()` use CommonCrypto on macOS and built-in code on Linux
+  (`src/base/Crypto_posix.cpp`).
 
 ## CI
 

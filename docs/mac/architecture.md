@@ -54,7 +54,11 @@ headers clash with Sumatra names such as `Size`), so the two sides meet only thr
   was closed meanwhile is closed there. The loader can't be interrupted. Password prompts: the loader calls the
   per-open callback, which runs the app-modal prompt on the main thread with `dispatch_sync`; the main thread never
   waits for a loader, so this can't deadlock. Engines keep asking until the password is right or the prompt is
-  cancelled. Reloading a changed file still opens synchronously (`MacOpenDocumentEx()`).
+  cancelled. The loader also lays out every chapter of an ebook, so page numbers are final when the tab shows.
+  Reloading a changed file still opens synchronously (`MacOpenDocumentEx()`, chapters counted in the background);
+  when the page count changes the app drops its page images and rebuilds outline and thumbnails.
+- The main thread's temp arena is reset between events (a run loop observer, outermost run loop only), like the
+  Windows message loop.
 - Select All on long documents: `MacPrepareTextStart()` extracts every page's text on a worker (the engine's text
   cache is thread-safe), progress arrives on the main queue with a token; `MacCloseDocument()` joins the worker.
 

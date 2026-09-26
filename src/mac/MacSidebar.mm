@@ -152,6 +152,7 @@ static NSImage* ImageFromThumb(MacThumbImage* thumb, NSSize pointSize) {
 - (instancetype)initWithSidebar:(SumatraSidebar*)sidebar;
 - (NSScrollView*)scrollView;
 - (void)showDocument:(void*)document;
+- (void)reloadDocument;
 - (void)forgetDocument:(void*)document;
 - (BOOL)hasItems;
 - (void)syncToPage:(int)pageNo;
@@ -313,6 +314,14 @@ static NSImage* ImageFromThumb(MacThumbImage* thumb, NSSize pointSize) {
     _syncingSelection = NO;
     [oldRoot release];
     [oldFlat release];
+}
+
+// Items cache their page numbers: rebuild after the pages were renumbered.
+- (void)reloadDocument {
+    void* document = _document;
+    [self saveExpansion];
+    _document = nullptr;
+    [self showDocument:document];
 }
 
 - (void)forgetDocument:(void*)document {
@@ -1083,6 +1092,18 @@ static void ThumbReady(void* context, void* document, int pageNo) {
     [self updateVisibility];
     [_outlinePane syncToPage:_currentPage];
     [_thumbPane syncToPage:_currentPage];
+}
+
+// Same document, pages renumbered (chapters laid out): drop the cached
+// thumbnails and outline page numbers.
+- (void)documentPagesChanged {
+    void* document = _document;
+    if (document) {
+        [_thumbPane showDocument:nullptr pageCount:0 rotation:0];
+        [_thumbPane forgetDocument:document];
+        [_outlinePane reloadDocument];
+    }
+    [self documentChanged];
 }
 
 - (void)currentPageChanged:(int)pageNo {

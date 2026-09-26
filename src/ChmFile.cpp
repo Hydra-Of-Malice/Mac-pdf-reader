@@ -4,6 +4,7 @@
 #include "base/Base.h"
 #include <chm.h>
 #include "base/ByteReaderWriter.h"
+#include "base/Dict.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
 #include "base/Zip.h"
@@ -65,8 +66,7 @@ bool ChmFile::HasData(Str fileName) const {
     return ChmResolveObject(this, fileName) != nullptr;
 }
 
-TempStr ChmFile::GetDataTemp(Str fileName) const {
-    chm_entry* e = ChmResolveObject(this, fileName);
+static TempStr ChmEntryDataTemp(chm_ctx* chmCtx, chm_entry* e) {
     if (!e) {
         return {};
     }
@@ -86,6 +86,10 @@ TempStr ChmFile::GetDataTemp(Str fileName) const {
     }
 
     return Str((char*)d, n);
+}
+
+TempStr ChmFile::GetDataTemp(Str fileName) const {
+    return ChmEntryDataTemp(chmCtx, ChmResolveObject(this, fileName));
 }
 
 // Strip a UTF-8 BOM if present; otherwise convert from `codepage` to UTF-8
@@ -820,6 +824,13 @@ ChmFile* ChmFile::CreateFromFile(Str path) {
 
 //--- CHM -> in-memory EPUB, so MuPDF can show it where ChmModel (IE) and EngineChm (GDI+) aren't built
 
+// deeper ToC levels become siblings: MuPDF rejects overly nested NCX files
+constexpr int kMaxNcxDepth = 64;
+// ZipCreator writes no ZIP64
+constexpr int kMaxZipEntries = 65535;
+// where pages declare their encoding
+constexpr int kCharsetScanLen = 1024;
+
 struct ChmTocCollector : EbookTocVisitor {
     StrVec titles;
     StrVec urls;
@@ -832,6 +843,7 @@ struct ChmTocCollector : EbookTocVisitor {
     }
 };
 
+// C0 controls are dropped: a NUL would cut the document short
 static void AppendXmlEscapedChm(str::Builder& out, Str s) {
     for (int i = 0; i < len(s); i++) {
         char c = s.s[i];
@@ -841,10 +853,16 @@ static void AppendXmlEscapedChm(str::Builder& out, Str s) {
             out.Append(StrL("&lt;"));
         } else if (c == '"') {
             out.Append(StrL("&quot;"));
-        } else {
+        } else if ((u8)c >= 0x20 || c == '\t' || c == '\n' || c == '\r') {
             out.AppendChar(c);
         }
     }
+}
+
+// EPUB hrefs are URLs that MuPDF percent-decodes, so a '%' in a file name is encoded
+static void AppendChmHref(str::Builder& out, Str path) {
+    TempStr s = str::ReplaceTemp(path, StrL("%"), StrL("%25"));
+    AppendXmlEscapedChm(out, s);
 }
 
 static bool IsChmHtmlPath(Str path) {
@@ -855,33 +873,57 @@ static Str StripLeadingSlash(Str path) {
     return (len(path) > 0 && path.s[0] == '/') ? Str(path.s + 1, len(path) - 1) : path;
 }
 
-// adds url's page (without #fragment) to pages unless it's there already
-static void AddChmPage(const ChmFile* doc, StrVec& pages, Str url) {
-    if (len(url) == 0 || url::IsAbsolute(url)) {
-        return;
-    }
-    TempStr path = url::GetFullPathTemp(StripLeadingSlash(url));
-    if (len(path) == 0 || pages.FindI(path) != -1 || !doc->HasData(path)) {
-        return;
-    }
-    pages.Append(path);
+// "Sub\Page.htm#top" -> "sub/page.htm": how entries are looked up (like ChmResolveObject)
+static TempStr ChmPathKeyTemp(Str url) {
+    TempStr key = str::DupTemp(url::GetFullPathTemp(StripLeadingSlash(url)));
+    str::TransCharsInPlace(key, StrL("\\"), StrL("/"));
+    str::ToLowerInPlace(key);
+    return key;
 }
 
-// NCX navMap from the CHM ToC; entries without a page link to the next one that has one
-static void AppendChmNavMap(str::Builder& ncx, const ChmTocCollector& toc, Str firstPage) {
-    int n = len(toc.titles);
-    Vec<int> openLevels;
-    for (int i = 0; i < n; i++) {
-        Str href;
-        for (int j = i; j < n && len(href) == 0; j++) {
-            if (len(toc.urls.At(j)) > 0 && !url::IsAbsolute(toc.urls.At(j))) {
-                href = StripLeadingSlash(toc.urls.At(j));
+// entry index by ChmPathKeyTemp(path), built once: resolving each url with
+// ChmFile::HasData() is a linear search, too slow for big CHMs
+struct ChmEntryIndex {
+    dict::MapStrToInt map;
+    const ChmFile* doc = nullptr;
+
+    explicit ChmEntryIndex(const ChmFile* d) : map(d->nEntries * 2 + 16), doc(d) {
+        for (int i = 0; i < d->nEntries; i++) {
+            chm_entry* e = d->entries[i];
+            if (e->is_file && e->is_normal && e->path && e->path[0]) {
+                map.Insert(ChmPathKeyTemp(Str(e->path)), i);
             }
         }
-        if (len(href) == 0) {
-            href = firstPage;
+    }
+
+    // entry index, -1 if there's no such file
+    int Find(Str url) const {
+        if (len(url) == 0 || url::IsAbsolute(url)) {
+            return -1;
         }
-        int level = toc.levels[i];
+        int idx = -1;
+        return map.Get(ChmPathKeyTemp(url), &idx) ? idx : -1;
+    }
+
+    Str Path(int idx) const { return StripLeadingSlash(Str(doc->entries[idx]->path)); }
+};
+
+// NCX navMap from the CHM ToC. An entry without a page links to the next one
+// that has one; hrefs use the entry's own path (the ToC may differ in case or slashes).
+static void AppendChmNavMap(str::Builder& ncx, const ChmTocCollector& toc, const ChmEntryIndex& index, Str firstPage) {
+    int n = len(toc.titles);
+    // for every item: its entry, or the next item's, or -1
+    Vec<int> target;
+    VecResize(target, n);
+    int next = -1;
+    for (int i = n - 1; i >= 0; i--) {
+        int idx = index.Find(toc.urls.At(i));
+        next = idx >= 0 ? idx : next;
+        target[i] = next;
+    }
+    Vec<int> openLevels;
+    for (int i = 0; i < n; i++) {
+        int level = std::min(toc.levels[i], kMaxNcxDepth);
         while (len(openLevels) > 0 && VecLast(openLevels) >= level) {
             ncx.Append(StrL("</navPoint>\n"));
             VecPop(openLevels);
@@ -889,7 +931,12 @@ static void AppendChmNavMap(str::Builder& ncx, const ChmTocCollector& toc, Str f
         ncx.Append(fmt("<navPoint id=\"n%d\" playOrder=\"%d\"><navLabel><text>", i + 1, i + 1));
         AppendXmlEscapedChm(ncx, toc.titles.At(i));
         ncx.Append(StrL("</text></navLabel><content src=\""));
-        AppendXmlEscapedChm(ncx, href);
+        AppendChmHref(ncx, target[i] >= 0 ? index.Path(target[i]) : firstPage);
+        Str url = toc.urls.At(i);
+        int hash = str::IndexOfChar(url, '#');
+        if (hash >= 0 && index.Find(url) == target[i]) {
+            AppendXmlEscapedChm(ncx, Str(url.s + hash, len(url) - hash));
+        }
         ncx.Append(StrL("\"/>\n"));
         VecAppend(openLevels, level);
     }
@@ -899,32 +946,168 @@ static void AppendChmNavMap(str::Builder& ncx, const ChmTocCollector& toc, Str f
     }
 }
 
+// code page for an HTML charset name, 0 if unknown
+static uint ChmCharsetCodepage(Str name) {
+    static const struct {
+        const char* name;
+        uint cp;
+    } kNames[] = {
+        {"utf-8", CP_UTF8},      {"utf8", CP_UTF8},  {"us-ascii", CP_UTF8}, {"ascii", CP_UTF8}, {"iso-8859-1", 1252},
+        {"latin1", 1252},        {"koi8-r", 20866},  {"koi8-u", 21866},     {"shift_jis", 932}, {"shift-jis", 932},
+        {"sjis", 932},           {"x-sjis", 932},    {"windows-31j", 932},  {"euc-jp", 20932},  {"euc-kr", 949},
+        {"ks_c_5601-1987", 949}, {"big5", 950},      {"gb2312", 936},       {"gbk", 936},       {"gb18030", 54936},
+        {"utf-16", 1200},        {"utf-16le", 1200}, {"utf-16be", 1201},    {"tis-620", 874},   {"macintosh", 10000},
+    };
+    for (auto& n : kNames) {
+        if (str::EqI(name, Str((char*)n.name))) {
+            return n.cp;
+        }
+    }
+    // windows-1250 .. windows-1258, cp1251, x-cp1251, iso-8859-2 .. iso-8859-16
+    Str prefixes[] = {StrL("windows-"), StrL("x-cp"), StrL("cp"), StrL("iso-8859-"), StrL("iso8859-")};
+    for (Str prefix : prefixes) {
+        if (!str::StartsWithI(name, prefix) || len(name) == len(prefix)) {
+            continue;
+        }
+        Str num(name.s + len(prefix), len(name) - len(prefix));
+        for (int i = 0; i < len(num); i++) {
+            if (num.s[i] < '0' || num.s[i] > '9') {
+                return 0;
+            }
+        }
+        int v = ParseInt(num);
+        bool iso = prefix.s[0] == 'i';
+        if (iso && v >= 2 && v <= 16) {
+            return 28590 + v;
+        }
+        if (!iso && (v == 874 || (v >= 1250 && v <= 1258))) {
+            return (uint)v;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+// the charset name a page declares (<meta ... charset=X> or <?xml encoding="X"?>) in its first bytes
+static Str ChmDeclaredCharset(Str html) {
+    Str head(html.s, std::min(len(html), kCharsetScanLen));
+    Str attrs[] = {StrL("charset="), StrL("encoding=")};
+    for (Str attr : attrs) {
+        int idx = str::IndexOfI(head, attr);
+        if (idx < 0) {
+            continue;
+        }
+        int start = idx + len(attr);
+        if (start < len(head) && (head.s[start] == '"' || head.s[start] == '\'')) {
+            start++;
+        }
+        int end = start;
+        while (end < len(head) && (isalnum((u8)head.s[end]) || head.s[end] == '-' || head.s[end] == '_')) {
+            end++;
+        }
+        if (end > start) {
+            return Str(head.s + start, end - start);
+        }
+    }
+    return {};
+}
+
+// A page as UTF-8 with its charset declaration saying so: from the charset it
+// declares, else the CHM's code page.
+static TempStr ChmPageToUtf8Temp(Str html, uint chmCodepage) {
+    if (str::StartsWith(html, StrL(kUtf8Bom))) {
+        return Str(html.s + 3, len(html) - 3);
+    }
+    Str declared = ChmDeclaredCharset(html);
+    uint cp = len(declared) > 0 ? ChmCharsetCodepage(declared) : 0;
+    if (cp == 0) {
+        cp = chmCodepage;
+    }
+    if (cp == CP_UTF8) {
+        return html;
+    }
+    TempStr utf8 = strconv::ToMultiByteTemp(html, cp, CP_UTF8);
+    if (len(utf8) == 0) {
+        return html;
+    }
+    Str decl = ChmDeclaredCharset(utf8);
+    if (len(decl) == 0) {
+        return utf8;
+    }
+    int at = (int)(decl.s - utf8.s);
+    return str::JoinTemp(Str(utf8.s, at), StrL("utf-8"), Str(decl.s + len(decl), len(utf8) - at - len(decl)));
+}
+
+// href / src values the HTML Help viewer resolves but MuPDF doesn't:
+// "sub\page.htm" -> "sub/page.htm", "ms-its:book.chm::/page.htm" -> "/page.htm"
+static TempStr FixChmLinksTemp(Str html) {
+    str::Builder out;
+    int i = 0;
+    int n = len(html);
+    while (i < n) {
+        Str rest(html.s + i, n - i);
+        int attrLen = str::StartsWithI(rest, StrL("href=")) ? 5 : (str::StartsWithI(rest, StrL("src=")) ? 4 : 0);
+        bool atAttr = attrLen > 0 && i > 0 && str::IsWs(html.s[i - 1]);
+        if (!atAttr || i + attrLen >= n || (html.s[i + attrLen] != '"' && html.s[i + attrLen] != '\'')) {
+            out.AppendChar(html.s[i++]);
+            continue;
+        }
+        char quote = html.s[i + attrLen];
+        int start = i + attrLen + 1;
+        int end = start;
+        while (end < n && html.s[end] != quote && html.s[end] != '>') {
+            end++;
+        }
+        TempStr v = str::DupTemp(Str(html.s + start, end - start));
+        int its = str::IndexOf(v, StrL("::/"));
+        if (its >= 0) {
+            v = Str(v.s + its + 2, len(v) - its - 2);
+        }
+        str::TransCharsInPlace(v, StrL("\\"), StrL("/"));
+        out.Append(Str(html.s + i, start - i));
+        out.Append(v);
+        i = end;
+    }
+    return ToStrTemp(out);
+}
+
 // Pages in reading order: home page, ToC order, then the remaining HTML files
-// (same order as EngineChm). Every other file (images, CSS) is copied as is.
-// Pages without a charset declaration are converted from the CHM's codepage to UTF-8.
+// (same order as EngineChm); every other file (images, CSS) is copied as is.
+// Pages are converted to UTF-8.
 Str ChmToEpubConvert(Str path) {
+    AutoArenaSavepoint tempScope;
     AutoDelete<ChmFile> doc(ChmFile::CreateFromFile(path));
     if (!doc) {
         return {};
     }
-    StrVec pages;
-    TempStr home = ToUtf8Temp(strconv::StrCPToWStrTemp(doc->GetHomePath(), doc->codepage));
-    AddChmPage(doc, pages, home);
+    ChmEntryIndex index(doc);
+    Vec<int> pages;
+    Vec<u8> isPage;
+    VecResize(isPage, doc->nEntries);
+    memset(isPage.els, 0, (size_t)len(isPage));
+    auto addPage = [&](Str url) {
+        int idx = index.Find(url);
+        if (idx >= 0 && !isPage[idx]) {
+            isPage[idx] = 1;
+            VecAppend(pages, idx);
+        }
+    };
+    addPage(ToUtf8Temp(strconv::StrCPToWStrTemp(doc->GetHomePath(), doc->codepage)));
     ChmTocCollector toc;
     doc->ParseToc(&toc);
     for (Str url : toc.urls) {
-        AddChmPage(doc, pages, url);
+        addPage(url);
     }
-    StrVec allPaths;
-    doc->GetAllPaths(&allPaths);
-    for (Str p : allPaths) {
-        if (IsChmHtmlPath(p)) {
-            AddChmPage(doc, pages, p);
+    for (int i = 0; i < doc->nEntries; i++) {
+        chm_entry* e = doc->entries[i];
+        if (e->is_file && e->is_normal && e->path && IsChmHtmlPath(Str(e->path))) {
+            addPage(Str(e->path));
         }
     }
-    if (len(pages) == 0) {
+    if (len(pages) == 0 || len(pages) + 4 > kMaxZipEntries) {
         return {};
     }
+    Str firstPage = index.Path(pages[0]);
 
     str::Builder opf;
     opf.Append(
@@ -938,7 +1121,7 @@ Str ChmToEpubConvert(Str path) {
              "<item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n"));
     for (int i = 0; i < len(pages); i++) {
         opf.Append(fmt("<item id=\"p%d\" href=\"", i));
-        AppendXmlEscapedChm(opf, pages.At(i));
+        AppendChmHref(opf, index.Path(pages[i]));
         opf.Append(StrL("\" media-type=\"application/xhtml+xml\"/>\n"));
     }
     opf.Append(StrL("</manifest>\n<spine toc=\"ncx\">\n"));
@@ -951,7 +1134,7 @@ Str ChmToEpubConvert(Str path) {
     ncx.Append(
         StrL("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
              "<ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" version=\"2005-1\"><head/><navMap>\n"));
-    AppendChmNavMap(ncx, toc, pages.At(0));
+    AppendChmNavMap(ncx, toc, index, firstPage);
     ncx.Append(StrL("</navMap></ncx>\n"));
 
     str::Builder zipData;
@@ -964,20 +1147,34 @@ Str ChmToEpubConvert(Str path) {
                               "</rootfiles></container>\n"));
     ok &= zc.AddFileData(StrL("content.opf"), ToStrTemp(opf));
     ok &= zc.AddFileData(StrL("toc.ncx"), ToStrTemp(ncx));
-    for (Str p : allPaths) {
-        Str name = StripLeadingSlash(p);
-        // skip CHM system files (#SYSTEM, $FIftiMain, ...)
-        if (!ok || len(name) == 0 || name.s[0] == '#' || name.s[0] == '$') {
+    int nFiles = 4;
+
+    // pages first: they must all be there, other files only fit under the zip limit
+    for (int idx : pages) {
+        AutoArenaSavepoint entryScope;
+        TempStr data = ChmEntryDataTemp(doc->chmCtx, doc->entries[idx]);
+        data = len(data) > 0 ? FixChmLinksTemp(ChmPageToUtf8Temp(data, doc->codepage)) : Str{};
+        // an empty or unreadable page is still in the spine
+        ok = ok && zc.AddFileData(index.Path(idx), len(data) > 0 ? data : StrL("<html><body></body></html>"));
+        nFiles++;
+    }
+    for (int i = 0; ok && i < doc->nEntries && nFiles < kMaxZipEntries; i++) {
+        chm_entry* e = doc->entries[i];
+        if (isPage[i] || !e->is_file || !e->is_normal || !e->path || !e->path[0]) {
             continue;
         }
-        TempStr data = doc->GetDataTemp(name);
-        if (IsChmHtmlPath(name)) {
-            Str head = Str(data.s, std::min(len(data), 1024));
-            if (!str::ContainsI(head, StrL("charset="))) {
-                data = SmartToUtf8Temp(data, doc->codepage);
-            }
+        Str name = StripLeadingSlash(Str(e->path));
+        // skip CHM system files (#SYSTEM, $FIftiMain, ...)
+        if (len(name) == 0 || name.s[0] == '#' || name.s[0] == '$') {
+            continue;
+        }
+        AutoArenaSavepoint entryScope;
+        TempStr data = ChmEntryDataTemp(doc->chmCtx, e);
+        if (len(data) == 0) {
+            continue;
         }
         ok = zc.AddFileData(name, data);
+        nFiles++;
     }
     if (!ok || !zc.Finish()) {
         return {};

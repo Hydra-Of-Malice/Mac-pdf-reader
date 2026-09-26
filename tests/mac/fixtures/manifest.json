@@ -151,12 +151,28 @@
       "format": "MOBI",
       "path": "tests/mac/fixtures/huffcdic.mobi",
       "expect": "open",
-      "minPages": 3,
+      "minPages": 4,
       "search": "quoll",
       "searchPage": 1,
       "tocMin": 3,
       "tocFirst": "Chapter One",
-      "links": [{ "kind": "page" }]
+      "links": [{ "kind": "page", "targetPage": 3 }]
+    },
+    {
+      "id": "mobi-drm-message",
+      "format": "MOBI",
+      "path": "tests/mac/fixtures/drm.azw",
+      "expect": "open",
+      "pages": 1,
+      "search": "DRM"
+    },
+    {
+      "id": "mobi-encrypted-message",
+      "format": "MOBI",
+      "path": "tests/mac/fixtures/encrypted.mobi",
+      "expect": "open",
+      "pages": 1,
+      "search": "DRM"
     },
     {
       "id": "azw4-print-replica",
@@ -243,6 +259,42 @@
       "tocMin": 1025,
       "tocFirst": "Part 1",
       "timeoutMs": 300000
+    },
+    {
+      "id": "chm-tricky",
+      "format": "CHM",
+      "path": "tests/mac/fixtures/tricky.chm",
+      "expect": "open",
+      "minPages": 4,
+      "search": "caracal",
+      "searchPage": 1,
+      "tocMin": 104,
+      "tocFirst": "Tricky Home",
+      "links": [{ "kind": "page", "targetPage": 2 }]
+    },
+    {
+      "id": "chm-tricky-windows-1253",
+      "format": "CHM",
+      "path": "tests/mac/fixtures/tricky.chm",
+      "expect": "open",
+      "search": "αλεπού",
+      "searchPage": 2
+    },
+    {
+      "id": "chm-tricky-xml-utf8",
+      "format": "CHM",
+      "path": "tests/mac/fixtures/tricky.chm",
+      "expect": "open",
+      "search": "café",
+      "searchPage": 3
+    },
+    {
+      "id": "chm-tricky-percent-name",
+      "format": "CHM",
+      "path": "tests/mac/fixtures/tricky.chm",
+      "expect": "open",
+      "search": "percentword",
+      "searchPage": 4
     },
     {
       "id": "xps-sample",

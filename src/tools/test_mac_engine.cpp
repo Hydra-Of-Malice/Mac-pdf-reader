@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
@@ -36,6 +37,7 @@ constexpr int kRenderAllMax = 64;
 constexpr int kWaitMs = 30000;
 // -fuzz: damaged docs can leave a page that never arrives from the async renderer
 constexpr int kFuzzWaitMs = 3000;
+constexpr unsigned kFuzzWatchdogSecs = 40;
 constexpr int kSettleMs = 20;
 constexpr float kZoomFitWidth = -2.f;
 constexpr char kMissingWord[] = "xq7zzyNotInAnyFixture";
@@ -567,6 +569,19 @@ static void Stress(void* doc, int nPages, int nRequests) {
     KeyNum("stressRequestMs", NowMs() - start);
 }
 
+// ASan / UBSan runtime, when linked: prints the current thread's stack
+extern "C" void __sanitizer_print_stack_trace() __attribute__((weak));
+
+// -fuzz: a stuck engine call gets its stack printed instead of just a timeout
+static void OnWatchdog(int) {
+    const char msg[] = "watchdog: no progress, stack of the stuck call:\n";
+    write(2, msg, sizeof(msg) - 1);
+    if (__sanitizer_print_stack_trace) {
+        __sanitizer_print_stack_trace();
+    }
+    _exit(3);
+}
+
 static void Usage() {
     fprintf(stderr,
             "usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>] [-render-all] "
@@ -594,6 +609,8 @@ int main(int argc, char** argv) {
             renderAll = true;
             gWaitMs = kFuzzWaitMs;
             gLinkScanMaxCells = kFuzzLinkScanMaxCells;
+            signal(SIGALRM, OnWatchdog);
+            alarm(kFuzzWatchdogSecs);
         } else if (argv[i][0] != '-' && !path) {
             path = argv[i];
         } else {

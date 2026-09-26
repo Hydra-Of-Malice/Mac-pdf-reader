@@ -108,10 +108,6 @@ fz_strncasecmp(const char *a, const char *b, size_t n)
 		int ucs_a, ucs_b, n_a, n_b;
 		n_a = fz_chartorunen(&ucs_a, a, n);
 		n_b = fz_chartorunen(&ucs_b, b, n);
-		/* We believe that for all unicode characters X and Y, s.t.
-		 * fz_tolower(X) == fz_tolower(Y), X and Y must utf8 encode to
-		 * the same number of bytes. */
-		assert(n_a == n_b);
 		assert((size_t)n_a <= n);
 
 		// one or both of the strings are short
@@ -125,6 +121,12 @@ fz_strncasecmp(const char *a, const char *b, size_t n)
 		}
 		if (ucs_a != ucs_b)
 			return ucs_a - ucs_b;
+
+		/* Equal characters: an invalid byte (decoded as U+FFFD) against a
+		 * real U+FFFD, or a pair like U+212A KELVIN SIGN / 'k', can still
+		 * differ in utf8 length; call those different. */
+		if (n_a != n_b)
+			return n_a - n_b;
 
 		a += n_a;
 		b += n_b;

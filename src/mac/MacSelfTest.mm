@@ -633,6 +633,7 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     if (!rendered) {
         return;
     }
+    int pagesAtOpen = [self state].pageCount;
     [self snapshot];
     [self navigation];
     [self viewModes];
@@ -642,6 +643,11 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     [self followLink];
     [self selectAndCopy:StringValue([c objectForKey:@"search"])];
     [self printToPDF];
+
+    // ebooks lay out all chapters while opening: page numbers never shift afterwards
+    int pagesNow = [self state].pageCount;
+    NSString* detail = [NSString stringWithFormat:@"%d pages at open, %d now", pagesAtOpen, pagesNow];
+    [self step:@"page count final" ok:pagesNow == pagesAtOpen since:Now() detail:detail];
     [self persistence:[c objectForKey:@"absPath"]];
 }
 

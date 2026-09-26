@@ -1,0 +1,37 @@
+fitz: fz_strncasecmp compares any mix of 1- and multi-byte characters
+
+fz_strncasecmp asserted that both strings' characters at the same position
+have the same utf8 length before comparing them, so a debug build aborted
+comparing e.g. "a" with "\xc3\xa4", or an invalid byte with U+FFFD. EPUB link and
+outline targets reach it (epub_resolve_link); found by fuzzing damaged
+EPUB / CHM files. Compare first; equal characters of different length are
+unequal.
+---
+diff --git a/source/fitz/string.c b/source/fitz/string.c
+index 0ba71df69..9987801c7 100644
+--- a/source/fitz/string.c
++++ b/source/fitz/string.c
+@@ -108,10 +108,6 @@ fz_strncasecmp(const char *a, const char *b, size_t n)
+ 		int ucs_a, ucs_b, n_a, n_b;
+ 		n_a = fz_chartorunen(&ucs_a, a, n);
+ 		n_b = fz_chartorunen(&ucs_b, b, n);
+-		/* We believe that for all unicode characters X and Y, s.t.
+-		 * fz_tolower(X) == fz_tolower(Y), X and Y must utf8 encode to
+-		 * the same number of bytes. */
+-		assert(n_a == n_b);
+ 		assert((size_t)n_a <= n);
+ 
+ 		// one or both of the strings are short
+@@ -126,6 +122,12 @@ fz_strncasecmp(const char *a, const char *b, size_t n)
+ 		if (ucs_a != ucs_b)
+ 			return ucs_a - ucs_b;
+ 
++		/* Equal characters: an invalid byte (decoded as U+FFFD) against a
++		 * real U+FFFD, or a pair like U+212A KELVIN SIGN / 'k', can still
++		 * differ in utf8 length; call those different. */
++		if (n_a != n_b)
++			return n_a - n_b;
++
+ 		a += n_a;
+ 		b += n_b;
+ 		n -= n_a;

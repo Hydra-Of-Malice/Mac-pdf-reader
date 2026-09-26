@@ -20,6 +20,7 @@ typedef NS_ENUM(NSInteger, SumatraSidebarMode) { SumatraSidebarModeOutline = 0, 
 @property (readonly) NSView* view;
 @property (nonatomic) SumatraSidebarMode mode;
 - (void)documentChanged;             // tab switched / doc opened / closed / reloaded (main thread)
+- (void)documentPagesChanged;         // same document, pages renumbered (ebook chapters laid out)
 - (void)currentPageChanged:(int)pageNo;
 - (void)documentWillClose:(void*)documentHandle; // called BEFORE MacCloseDocument; stop/await in-flight work for it
 - (void)shutdown;                    // stops the thumbnail worker; call before MacShutdown()

@@ -11,7 +11,7 @@
  * are skipped. Output: out/mac-cross-<cfg>-<arch>/.
  */
 
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { type BuildTools, invalidateObjsIfBuildChanged } from "../deps-build-common";
 import {
@@ -141,6 +141,13 @@ function crossTarget(arch: MacArch): PosixTarget {
   return { os: "mac", arch, flags, frameworks: false };
 }
 
+// sources that include Apple framework headers, which zig doesn't have
+function usesAppleFrameworks(src: string): boolean {
+  return /^\s*#\s*(include|import)\s*<(AppKit|Cocoa|CoreFoundation|CoreGraphics|CoreText|Foundation)\//m.test(
+    readFileSync(src, "utf8"),
+  );
+}
+
 async function crossCompileArch(opts: MacCrossOptions, arch: MacArch): Promise<void> {
   const cfg: PosixConfig = { isRelease: opts.isRelease, asan: false };
   const outDir = join("out", `mac-cross-${configDirName(cfg)}-${arch}`);
@@ -155,12 +162,13 @@ async function crossCompileArch(opts: MacCrossOptions, arch: MacArch): Promise<v
   const srcs = new Set<string>();
   for (const list of Object.values(testExeSources())) for (const s of list) srcs.add(s);
   for (const s of guiMacSources()) srcs.add(s);
-  const sorted = [...srcs].sort();
+  const sorted = [...srcs].sort().filter((s) => !usesAppleFrameworks(s));
+  const frameworkSrcs = [...srcs].filter(usesAppleFrameworks);
   const objs = await compileSources(a, "app", sorted);
   const missing = objs.filter((o) => !existsSync(o));
   if (missing.length > 0) throw new Error(`missing objects: ${missing.join(", ")}`);
   console.log(`macOS ${arch}: ${libs.length} libraries, ${sorted.length} app / test sources compiled`);
-  const skipped = [...MAC_FRAMEWORK_SOURCES, ...cocoaSources()].join(" ");
+  const skipped = [...MAC_FRAMEWORK_SOURCES, ...frameworkSrcs, ...cocoaSources()].sort().join(" ");
   console.log(`skipped (need Apple frameworks, not available to zig): ${skipped}`);
 }
 

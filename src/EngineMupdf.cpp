@@ -3850,12 +3850,15 @@ EngineBase* EngineMupdf::Clone() {
     // prefer re-loading from the file: it streams large documents on demand
     // rather than copying them, and is the cheapest path when the file is present.
     EngineMupdf* clone = nullptr;
-    if (len(cloneSourceData) > 0) {
-        clone = (EngineMupdf*)CreateEngineMupdfFromData(cloneSourceData, cloneSourceName, pwdUI);
+    Str pdfData = (pdfdoc && len(cloneSourceName) > 0) ? GetFileData() : Str{};
+    Str srcData = len(pdfData) > 0 ? pdfData : cloneSourceData;
+    if (len(srcData) > 0) {
+        clone = (EngineMupdf*)CreateEngineMupdfFromData(srcData, cloneSourceName, pwdUI);
         if (clone) {
             clone->SetFilePath(FilePath());
         }
     }
+    str::Free(pdfData);
     if (!clone && FilePath()) {
         clone = new EngineMupdf();
         if (!clone->Load(FilePath(), pwdUI)) {
@@ -9093,14 +9096,17 @@ bool IsEngineMupdfSupportedFileType(FileType kind) {
     return false;
 }
 
-// Clone() gets a PDF's bytes from GetFileData(); other docs loaded from memory
-// keep a copy, since re-opening FilePath() would load a different format.
+// Clone() re-creates docs loaded from memory from memory: re-opening FilePath()
+// would load a different format (e.g. the AZW4 a PDF was extracted from). A
+// PDF's bytes come from GetFileData(), other docs keep a copy.
 static void KeepCloneSource(EngineMupdf* e, Str data, Str name) {
-    if (e->pdfdoc || len(data) == 0) {
+    if (len(data) == 0) {
         return;
     }
-    e->cloneSourceData = str::Dup(e->arena, data);
     e->cloneSourceName = str::Dup(e->arena, name);
+    if (!e->pdfdoc) {
+        e->cloneSourceData = str::Dup(e->arena, data);
+    }
 }
 
 EngineBase* CreateEngineMupdfFromFile(Str path, FileType kind, int displayDPI, PasswordUI* pwdUI) {

@@ -26,7 +26,13 @@ Kind kindEngineDjVu = "engineDjVu";
 // network drives are always read into memory: if the connection drops while
 // mapped, touching a page raises EXCEPTION_IN_PAGE_ERROR (a crash) instead
 // of failing with an error code.
+#if OS_WIN
 bool gMemoryMapLargeFiles = true;
+#else
+// POSIX has no mandatory lock on mapped files: another process truncating or
+// rewriting the file raises SIGBUS (a crash), so read it into memory instead
+bool gMemoryMapLargeFiles = false;
+#endif
 
 constexpr i64 kMemoryMapMinFileSize = 128LL * 1024 * 1024;
 

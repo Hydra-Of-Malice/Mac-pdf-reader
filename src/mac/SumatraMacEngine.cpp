@@ -357,11 +357,17 @@ struct MacDialogPasswordUI : DialogPasswordUI {
 
 static MacOpenError ClassifyOpenFailure(Str path, bool prompted);
 
+enum class ChapterLayout {
+    Lazy, // chapters are counted in the background; the page count grows after opening
+    Full, // all chapters now (off the main thread): page numbers are final when the document shows
+};
+
 // Engines keep prompting until the password is right or the prompt is
 // cancelled, so a failure after a prompt means the user gave up.
 static MacDocument* OpenDocumentImpl(void* passwordParent, const char* path, MacPageReadyCallback onPageReady,
                                      void* callbackContext, MacOpenError* errorOut,
-                                     MacPasswordCallback askPassword = nullptr, void* passwordContext = nullptr) {
+                                     MacPasswordCallback askPassword = nullptr, void* passwordContext = nullptr,
+                                     ChapterLayout chapters = ChapterLayout::Lazy) {
     *errorOut = MacOpenError::None;
     if (!path || !path[0]) {
         *errorOut = MacOpenError::NotFound;
@@ -379,6 +385,9 @@ static MacDocument* OpenDocumentImpl(void* passwordParent, const char* path, Mac
         bool prompted = dialogUI.prompts > 0 || callbackUI.attempt > 0;
         *errorOut = ClassifyOpenFailure(filePath, prompted);
         return nullptr;
+    }
+    if (chapters == ChapterLayout::Full) {
+        model->GetEngine()->EnsureAllChaptersLaidOut();
     }
     auto* document = new MacDocument();
     document->model = model;
@@ -473,6 +482,15 @@ double MacFileDPI(void* document) {
     return AsDocument(document)->model->FileDPI();
 }
 
+// Pages are rendered whole: at most kMacMaxRenderPixels per page.
+static double CapRenderZoom(double zoom, RectF mediaBox) {
+    double area = (double)mediaBox.dx * (double)mediaBox.dy;
+    if (area > 0 && zoom * zoom * area > kMacMaxRenderPixels) {
+        return sqrt(kMacMaxRenderPixels / area);
+    }
+    return zoom;
+}
+
 bool MacLayoutDocument(void* document, const MacLayoutParams* params, MacDocumentLayout* layout) {
     if (!document || !params || !layout) {
         return false;
@@ -519,16 +537,23 @@ bool MacLayoutDocument(void* document, const MacLayoutParams* params, MacDocumen
         dst->screenHeight = page->pageOnScreen.dy;
         dst->visibleRatio = page->visibleRatio;
         dst->layoutZoom = page->zoomReal;
-        dst->renderZoom = page->zoomReal * params->backingScale;
-        double area = (double)page->mediaBox.dx * (double)page->mediaBox.dy;
-        if (area > 0 && dst->renderZoom * dst->renderZoom * area > kMacMaxRenderPixels) {
-            dst->renderZoom = sqrt(kMacMaxRenderPixels / area);
-        }
+        dst->renderZoom = CapRenderZoom(page->zoomReal * params->backingScale, page->mediaBox);
         dst->shown = page->isShown;
     }
 
+    // pages not laid out (single page mode) get the current page's zoom for
+    // prefetching, capped for their own size
+    int current = docLayout.CurrentPageNo();
+    const DocumentLayoutPage* currentPage = current >= 1 && current <= pageCount ? docLayout.GetPage(current) : nullptr;
+    double prefetchZoom = currentPage ? currentPage->zoomReal * params->backingScale : 0;
+    for (int pageNo = 1; pageNo <= pageCount && prefetchZoom > 0; pageNo++) {
+        if (!pages[pageNo - 1].shown) {
+            pages[pageNo - 1].renderZoom = CapRenderZoom(prefetchZoom, docLayout.GetPage(pageNo)->mediaBox);
+        }
+    }
+
     layout->pageCount = pageCount;
-    layout->currentPage = docLayout.CurrentPageNo();
+    layout->currentPage = current;
     layout->canvasWidth = docLayout.canvasSize.dx;
     layout->canvasHeight = docLayout.canvasSize.dy;
     layout->pages = pages;
@@ -956,7 +981,7 @@ static void FinishOpenJob(MacOpenJob* job) {
 static void* RunOpenJob(void* data) {
     auto* job = (MacOpenJob*)data;
     job->document = OpenDocumentImpl(nullptr, job->path, job->onPageReady, job->renderContext, &job->error,
-                                     job->askPassword, job->passwordContext);
+                                     job->askPassword, job->passwordContext, ChapterLayout::Full);
     PlatformPostTask(MkFunc0(FinishOpenJob, job));
     DestroyTempArena();
     return nullptr;
@@ -1554,7 +1579,12 @@ int MacPrepareTextStart(void* document, MacTextProgressCallback onProgress, void
     w->token = ++gTextToken;
     w->onProgress = onProgress;
     w->context = context;
-    if (pthread_create(&w->thread, nullptr, TextWorkerMain, w) != 0) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, kOpenThreadStackBytes);
+    int err = pthread_create(&w->thread, &attr, TextWorkerMain, w);
+    pthread_attr_destroy(&attr);
+    if (err != 0) {
         delete w;
         return 0;
     }
@@ -1567,4 +1597,18 @@ void MacPrepareTextCancel(void* document) {
     if (doc) {
         StopTextWorker(doc);
     }
+}
+
+// Lays out every chapter of a chaptered ebook (printing needs the final page
+// count); the engine then reports the new count like the background pass.
+void MacLayOutAllPages(void* document) {
+    MacDocument* doc = AsDocument(document);
+    if (doc) {
+        doc->model->GetEngine()->EnsureAllChaptersLaidOut();
+    }
+}
+
+// The main thread's temp arena, reset between events like the Windows message loop.
+void MacResetTempArena() {
+    ResetTempArena();
 }

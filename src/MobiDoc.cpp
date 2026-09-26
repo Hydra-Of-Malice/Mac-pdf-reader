@@ -957,6 +957,9 @@ int KindleEmbedToRecIndex(Str src) {
         } else {
             break;
         }
+        if (n > (INT_MAX - digit) / 32) {
+            return 0;
+        }
         n = (n * 32) + digit;
         any = true;
         p++;
@@ -1542,7 +1545,8 @@ static void AppendXmlEscaped(str::Builder& out, Str s) {
             out.Append(StrL("&lt;"));
         } else if (c == '"') {
             out.Append(StrL("&quot;"));
-        } else {
+        } else if ((u8)c >= 0x20 || c == '\t' || c == '\n' || c == '\r') {
+            // C0 controls are dropped: a NUL would cut the document short
             out.AppendChar(c);
         }
     }
@@ -1552,11 +1556,12 @@ static void AppendXmlEscaped(str::Builder& out, Str s) {
 static Str AttrValueAt(Str s, int* used) {
     int n = len(s);
     if (n > 0 && (s.s[0] == '"' || s.s[0] == '\'')) {
+        // an unterminated quote ends with the tag, not the book
         int end = 1;
-        while (end < n && s.s[end] != s.s[0]) {
+        while (end < n && s.s[end] != s.s[0] && s.s[end] != '>') {
             end++;
         }
-        *used = end < n ? end + 1 : n;
+        *used = (end < n && s.s[end] == s.s[0]) ? end + 1 : end;
         return Str(s.s + 1, end - 1);
     }
     int end = 0;
@@ -1614,7 +1619,8 @@ static void CollectFilepos(Str html, Vec<int>& res) {
     res.len = n;
 }
 
-static const Str kMobiPageBreak = StrL("<div style=\"page-break-before:always\"></div>");
+// page-break-before is ignored by the chaptered EPUB layout, page-break-after works
+static const Str kMobiPageBreak = StrL("<div style=\"page-break-after:always\"></div>");
 
 // <img recindex="00003"> and src="kindle:embed:0003?..." become src="img/3".
 // <a filepos=N> becomes a link to <a id="fpN"> inserted at text offset N (in
@@ -1631,6 +1637,9 @@ static void AppendMobiHtmlForEpub(str::Builder& out, Str html, const Vec<int>& t
     bool hasContent = false;
     bool pendingBreak = false;
     str::Builder held;
+    // due anchors go right before the next text or image: an empty element before
+    // a heading can end up on the previous page
+    str::Builder anchors;
     auto advance = [&](int to) {
         for (; i < to; i++) {
             if (!offsetIsChar || ((u8)html.s[i] & 0xc0) != 0x80) {
@@ -1641,12 +1650,11 @@ static void AppendMobiHtmlForEpub(str::Builder& out, Str html, const Vec<int>& t
     while (i < n) {
         Str rest(html.s + i, n - i);
         char c = html.s[i];
-        str::Builder& dst = pendingBreak ? held : out;
         while (!inTag && nextTarget < len(targets) && targets[nextTarget] <= pos) {
-            dst.Append(fmt("<a id=\"fp%d\"></a>", targets[nextTarget++]));
+            anchors.Append(fmt("<a id=\"fp%d\"></a>", targets[nextTarget++]));
         }
-        if (c == '<' && (str::StartsWithI(rest, StrL("<mbp:pagebreak")) ||
-                         str::StartsWithI(rest, StrL("</mbp:pagebreak")))) {
+        if (c == '<' &&
+            (str::StartsWithI(rest, StrL("<mbp:pagebreak")) || str::StartsWithI(rest, StrL("</mbp:pagebreak")))) {
             pendingBreak |= hasContent && rest.s[1] != '/';
             advance(SkipPastTagEnd(html, i));
             continue;
@@ -1659,6 +1667,8 @@ static void AppendMobiHtmlForEpub(str::Builder& out, Str html, const Vec<int>& t
                 held.Reset();
                 pendingBreak = false;
             }
+            out.Append(ToStr(anchors));
+            anchors.Reset();
             hasContent = true;
         }
         str::Builder& w = pendingBreak ? held : out;
@@ -1702,6 +1712,7 @@ static void AppendMobiHtmlForEpub(str::Builder& out, Str html, const Vec<int>& t
         advance(i + 1);
     }
     out.Append(ToStr(held));
+    out.Append(ToStr(anchors));
     while (nextTarget < len(targets)) {
         out.Append(fmt("<a id=\"fp%d\"></a>", targets[nextTarget++]));
     }
@@ -1749,13 +1760,43 @@ static const char* kMobiEpubContainerXml =
     "<rootfiles><rootfile full-path=\"content.opf\" media-type=\"application/oebps-package+xml\"/></rootfiles>\n"
     "</container>\n";
 
-// Repackages a MOBI / AZW / AZW3 book (text + image records) as an EPUB. Empty on failure.
+static const Str kMobiDrmHtml = StrL(
+    "<html><body><h1>DRM-protected book</h1><p>This book is protected with DRM (digital rights management). "
+    "SumatraPDF can't show its content.</p></body></html>");
+
+// encrypted or with DRM records (MobiDoc shows a blank page or fails to load)
+static bool PdbHasMobiDrm(PdbReader* pdb) {
+    if (!pdb || GetPdbDocType(pdb->GetDbType()) != PdbDocType::Mobipocket) {
+        return false;
+    }
+    Str rec0 = pdb->GetRecord(0);
+    if (len(rec0) < kPalmDocHeaderLen + kMobiHeaderMinLen) {
+        return false;
+    }
+    if (ByteReader(rec0).UInt16BE(12) != kEncryptionNone) {
+        return true;
+    }
+    MobiHeader mobi;
+    DecodeMobiDocHeader((const u8*)rec0.s + kPalmDocHeaderLen, len(rec0) - kPalmDocHeaderLen, &mobi);
+    return str::EqN(StrL("MOBI"), Str(mobi.id, 4), 4) && mobi.drmEntriesCount != (u32)-1;
+}
+
+// Repackages a MOBI / AZW / AZW3 book (text + image records) as an EPUB; a
+// DRM-protected one becomes a page saying so. Empty on failure.
 Str MobiToEpubConvert(Str path) {
+    AutoArenaSavepoint tempScope;
     AutoDelete<MobiDoc> doc(MobiDoc::CreateFromFile(path));
-    if (!doc) {
+    bool drm = false;
+    if (doc) {
+        drm = PdbHasMobiDrm(doc->pdbReader);
+    } else {
+        AutoDelete<PdbReader> pdb(PdbReader::CreateFromFile(path));
+        drm = PdbHasMobiDrm(pdb);
+    }
+    if (!doc && !drm) {
         return {};
     }
-    Str html = doc->GetHtmlData();
+    Str html = drm ? kMobiDrmHtml : doc->GetHtmlData();
     if (len(html) == 0) {
         return {};
     }
@@ -1766,11 +1807,13 @@ Str MobiToEpubConvert(Str path) {
              "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\" unique-identifier=\"id\">\n"
              "<metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:identifier id=\"id\">mobi</dc:identifier>"
              "<dc:title>"));
-    AppendXmlEscaped(opf, doc->GetPropertyTemp(DocProp::Title));
+    AppendXmlEscaped(opf, doc ? doc->GetPropertyTemp(DocProp::Title) : Str{});
     opf.Append(StrL("</dc:title><dc:creator>"));
-    AppendXmlEscaped(opf, doc->GetPropertyTemp(DocProp::Author));
+    AppendXmlEscaped(opf, doc ? doc->GetPropertyTemp(DocProp::Author) : Str{});
     MobiTocCollector toc;
-    doc->ParseToc(&toc);
+    if (!drm) {
+        doc->ParseToc(&toc);
+    }
     bool hasToc = len(toc.titles) > 0;
     opf.Append(
         StrL("</dc:creator></metadata>\n"
@@ -1789,7 +1832,7 @@ Str MobiToEpubConvert(Str path) {
     Vec<int> targets;
     CollectFilepos(html, targets);
     str::Builder text;
-    AppendMobiHtmlForEpub(text, html, targets, doc->textEncoding != CP_UTF8);
+    AppendMobiHtmlForEpub(text, html, targets, !drm && doc->textEncoding != CP_UTF8);
 
     str::Builder zipData;
     ZipCreator zc(zipData);
@@ -1798,7 +1841,7 @@ Str MobiToEpubConvert(Str path) {
     ok &= zc.AddFileData(StrL("content.opf"), ToStrTemp(opf));
     ok &= zc.AddFileData(StrL("toc.ncx"), ToStrTemp(ncx));
     ok &= zc.AddFileData(StrL("index.html"), ToStr(text));
-    for (int i = 1; ok && i <= doc->imagesCount; i++) {
+    for (int i = 1; ok && !drm && i <= doc->imagesCount; i++) {
         Str img = doc->GetImage(i);
         if (len(img) > 0) {
             ok = zc.AddFileData(fmt("img/%d", i), img);

@@ -170,7 +170,7 @@ jobs:
             exit 1
           fi
           # known failures (tracked elsewhere) are reported but don't fail the step
-          python3 - "$out/report.json" "$rc" "cbr-password gif" <<'EOF'
+          python3 - "$out/report.json" "$rc" "cbr-password" <<'EOF'
           import json, sys
           r = json.load(open(sys.argv[1], encoding="utf-8"))
           rc = int(sys.argv[2])

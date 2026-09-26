@@ -23,6 +23,7 @@ import {
   concat,
   makeBmp,
   makePalmDb,
+  palmdocCompress,
   makePdf,
   makePng,
   makeTga,
@@ -342,8 +343,9 @@ const kRecSize = 4096;
 
 interface MobiOpts {
   type: number; // 2 book, 8 Print Replica
-  compression: number; // 1 none, 17480 HUFF/CDIC
-  huff: boolean;
+  compression: number; // 1 none, 2 PalmDOC, 17480 HUFF/CDIC
+  encryption?: number; // PalmDOC header encryption type (2: Mobipocket DRM)
+  drm?: boolean; // DRM records in the MOBI header
 }
 
 // BOOKMOBI with one text stream split into 4096-byte records; images referenced as recindex 1..n
@@ -351,9 +353,11 @@ function makeMobiEx(title: string, text: Uint8Array, images: Uint8Array[], o: Mo
   const recs: Uint8Array[] = [];
   for (let off = 0; off < text.length; off += kRecSize) {
     const chunk = text.subarray(off, Math.min(off + kRecSize, text.length));
-    recs.push(o.huff ? chunk.map((b) => 255 - b) : chunk);
+    if (o.compression === 17480) recs.push(chunk.map((b) => 255 - b));
+    else recs.push(o.compression === 2 ? palmdocCompress(chunk) : chunk);
   }
-  const huffRecs = o.huff ? [huffRecord(), cdicRecord()] : [];
+  const huff = o.compression === 17480;
+  const huffRecs = huff ? [huffRecord(), cdicRecord()] : [];
   const firstHuff = recs.length + 1;
   const firstImage = images.length > 0 ? firstHuff + huffRecs.length : 0xffffffff;
   const rec0 = new Writer();
@@ -362,7 +366,8 @@ function makeMobiEx(title: string, text: Uint8Array, images: Uint8Array[], o: Mo
   rec0.u32be(text.length);
   rec0.u16be(recs.length);
   rec0.u16be(kRecSize);
-  rec0.u32be(0); // no encryption
+  rec0.u16be(o.encryption ?? 0);
+  rec0.u16be(0);
   const mobiStart = rec0.length;
   const titleBytes = bytes(title);
   const mobiHdrLen = 232;
@@ -381,14 +386,14 @@ function makeMobiEx(title: string, text: Uint8Array, images: Uint8Array[], o: Mo
   rec0.u32be(0);
   rec0.u32be(6);
   rec0.u32be(firstImage);
-  rec0.u32be(o.huff ? firstHuff : 0);
+  rec0.u32be(huff ? firstHuff : 0);
   rec0.u32be(huffRecs.length);
   rec0.u32be(0);
   rec0.u32be(0);
   rec0.u32be(0); // no EXTH
   rec0.pad(32, 0xff);
-  rec0.u32be(0xffffffff); // drm offset
-  rec0.u32be(0xffffffff); // drm count
+  rec0.u32be(o.drm ? 0x200 : 0xffffffff); // drm offset
+  rec0.u32be(o.drm ? 1 : 0xffffffff); // drm count
   rec0.u32be(0);
   rec0.u32be(0);
   rec0.pad(62, 0);
@@ -403,16 +408,24 @@ function makeMobiEx(title: string, text: Uint8Array, images: Uint8Array[], o: Mo
 // MOBI links are byte offsets into the text: <a filepos=0000001234>. Placeholders {name} are replaced by the
 // 10-digit offset of the matching [name] marker (the marker itself is removed).
 function resolveFilepos(tmpl: string): string {
+  // placeholders first become 10 characters, the width of the offsets replacing them
+  const names: string[] = [];
+  const kSlot = "#".repeat(10);
+  const fixed = tmpl.replace(/\{([a-z0-9]+)\}/g, (_, name: string) => {
+    names.push(name);
+    return kSlot;
+  });
   const pos = new Map<string, number>();
   let text = "";
-  for (const part of tmpl.split(/(\[[a-z0-9]+\])/)) {
+  for (const part of fixed.split(/(\[[a-z0-9]+\])/)) {
     const m = /^\[([a-z0-9]+)\]$/.exec(part);
     if (m) pos.set(m[1]!, bytes(text).length);
     else text += part;
   }
-  return text.replace(/\{([a-z0-9]+)\}/g, (_, name: string) => {
-    const p = pos.get(name);
-    if (p === undefined) throw new Error(`no marker [${name}]`);
+  let k = 0;
+  return text.replaceAll(kSlot, () => {
+    const p = pos.get(names[k++]!);
+    if (p === undefined) throw new Error(`no marker [${names[k - 1]}]`);
     return String(p).padStart(10, "0");
   });
 }
@@ -439,9 +452,15 @@ function resolveFilepos(tmpl: string): string {
     makeMobiEx("HUFF CDIC fixture", bytes(html), [makePng(48, 64, patternPixels(green))], {
       type: 2,
       compression: 17480,
-      huff: true,
     }),
   );
+}
+
+// DRM: with DRM records, and encrypted; both open to a page that says the book can't be shown
+{
+  const html = bytes(`<html><body><p>Secret text of a protected book.</p></body></html>`);
+  save("drm.azw", makeMobiEx("DRM fixture", html, [], { type: 2, compression: 1, drm: true }));
+  save("encrypted.mobi", makeMobiEx("Encrypted fixture", html, [], { type: 2, compression: 1, encryption: 2, drm: true }));
 }
 
 // ---- AZW4 (Kindle Print Replica): a PDF inside a MOBI wrapper ----
@@ -464,16 +483,18 @@ function resolveFilepos(tmpl: string): string {
   mop.u32be(hdrLen);
   mop.u32be(pdf.length);
   const text = concat([mop.bytes(), pdf]);
-  save("print-replica.azw4", makeMobiEx("Print Replica fixture", text, [], { type: 8, compression: 1, huff: false }));
+  save("print-replica.azw4", makeMobiEx("Print Replica fixture", text, [], { type: 8, compression: 2 }));
 }
 
 // ---- CHM (chmcmd) ----
 
 interface ChmPage {
-  file: string;
+  file: string; // "" for a ToC entry without a page
   title: string;
   body: string;
   level: number; // ToC depth, 0 = top
+  raw?: Uint8Array; // the whole file instead of a page made from body
+  tocLocal?: string; // the ToC's link to the page, if it's not file
 }
 
 function chmProject(name: string, title: string, pages: ChmPage[], extra: { file: string; data: Uint8Array }[]) {
@@ -483,12 +504,10 @@ function chmProject(name: string, title: string, pages: ChmPage[], extra: { file
   };
   return (chmcmd: string, work: string) => {
     for (const p of pages) {
+      if (!p.file) continue;
       const css = "../".repeat(p.file.split("/").length - 1) + "style.css";
-      write(
-        work,
-        p.file,
-        `<html><head><title>${p.title}</title><link rel="stylesheet" href="${css}"></head><body>${p.body}</body></html>\n`,
-      );
+      const html = `<html><head><title>${p.title}</title><link rel="stylesheet" href="${css}"></head><body>${p.body}</body></html>\n`;
+      write(work, p.file, p.raw ?? html);
     }
     write(work, "style.css", "body { font-family: serif; } h1 { color: #336; }\n");
     for (const e of extra) write(work, e.file, e.data);
@@ -504,12 +523,14 @@ function chmProject(name: string, title: string, pages: ChmPage[], extra: { file
         toc += "</UL>\n";
         level--;
       }
-      toc += `<LI><OBJECT type="text/sitemap"><param name="Name" value="${p.title}"><param name="Local" value="${p.file}"></OBJECT>\n`;
+      const local = p.tocLocal ?? p.file;
+      const localParam = local ? `<param name="Local" value="${local}">` : "";
+      toc += `<LI><OBJECT type="text/sitemap"><param name="Name" value="${p.title}">${localParam}</OBJECT>\n`;
     }
     while (level-- > 0) toc += "</UL>\n";
     toc += "</UL>\n</BODY></HTML>\n";
     writeFileSync(join(work, "toc.hhc"), toc);
-    const files = [...pages.map((p) => p.file), "style.css", ...extra.map((e) => e.file)];
+    const files = [...pages.filter((p) => p.file).map((p) => p.file), "style.css", ...extra.map((e) => e.file)];
     const hhp =
       `[OPTIONS]\nCompatibility=1.1 or later\nCompiled file=${name}\nContents file=toc.hhc\n` +
       `Default topic=${pages[0]!.file}\nDisplay compile progress=No\nLanguage=0x409 English (United States)\n` +
@@ -552,6 +573,50 @@ withTool(
     [{ file: "img/pic.png", data: makePng(48, 64, patternPixels(blue)) }],
   ),
 );
+
+// pages that trip naive converters: a windows-1253 page, an <?xml encoding?> page, a '%' in a name, an empty page
+// and an empty stylesheet, ToC links with backslashes / other case, ToC entries without a page, a 100-level ToC
+{
+  const greek = concat([
+    bytes(
+      `<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1253"><title>Greek</title></head><body><h1>Greek page</h1><p>`,
+    ),
+    Uint8Array.from([0xe1, 0xeb, 0xe5, 0xf0, 0xef, 0xfd]), // "αλεπού" (fox) in windows-1253
+    bytes(` means fox.</p></body></html>\n`),
+  ]);
+  const xmlPage =
+    `<?xml version="1.0" encoding="utf-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml"><head><title>XML</title></head>` +
+    `<body><h1>XML page</h1><p>Un café crème, s'il vous plaît.</p></body></html>\n`;
+  const deep: ChmPage[] = Array.from({ length: 100 }, (_, i) => ({
+    file: "",
+    title: `Level ${i + 1}`,
+    body: "",
+    level: i,
+  }));
+  const pages: ChmPage[] = [
+    {
+      file: "index.html",
+      title: "Tricky Home",
+      level: 0,
+      body: `<h1>Tricky CHM</h1><p>The tricky caracal jumps.</p><p><a href="Sub\\Greek.htm">Greek page</a></p>`,
+    },
+    { file: "sub/greek.htm", title: "Greek", level: 0, body: "", raw: greek, tocLocal: "Sub\\Greek.HTM" },
+    { file: "xml.htm", title: "XML page", level: 0, body: "", raw: bytes(xmlPage), tocLocal: "XML.HTM#top" },
+    {
+      file: "100%.htm",
+      title: "Percent page",
+      level: 0,
+      body: `<h1>Percent</h1><p>The percentword is here.</p><link rel="stylesheet" href="empty.css">`,
+    },
+    { file: "empty.htm", title: "Empty page", level: 0, body: "", raw: new Uint8Array(0) },
+    ...deep,
+  ];
+  withTool(
+    "tricky chm",
+    chmTools,
+    chmProject("tricky.chm", "Tricky CHM fixture", pages, [{ file: "empty.css", data: new Uint8Array(0) }]),
+  );
+}
 
 // many pages, for load time and memory: 25 parts x 40 chapters of ~3 KB each
 {

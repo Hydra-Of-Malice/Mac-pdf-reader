@@ -18,7 +18,7 @@ writes `SumatraPDF.app/Contents/Resources/Licenses/`:
 | `SOURCE.txt`            | source offer: repository URL, exact commit, version, whether the tree was dirty |
 | `<component>/<file...>` | license texts of each third-party component linked into the app (table below)   |
 
-The component list is derived from the `.a` libraries on the app's link line (`portableEngineLinkArgs()` in
+The component list is derived from the `.a` libraries on the app's link line (`posixLibs()` in
 `mac-build.ts`). The build fails if a linked library has no entry in `libComponents` in `mac-bundle.ts`, so a new
 dependency cannot ship without its license. The `.tar.gz` / `.zip` / `.dmg` packages also carry `COPYING`,
 `SOURCE.txt` and `README.md` (`src/mac/Resources/package-README.md`) next to the app.
@@ -60,8 +60,8 @@ Versions are from `ext/versions.txt` (or the `version.txt` of the `ext/a-*` amal
 | `libdjvudec.a`       | djvudec                                     | c8bf1b3       | MIT                             | `src/mac/Resources/Licenses/djvudec/LICENSE.md`                |
 | `libmsdes.a`         | D3DES (msdes)                               | 5.09          | public domain                   | `ext/msdes/README.md`                                          |
 
-Libraries `mac-build.ts` compiles but does not link into the app today. `mac-bundle.ts` has entries for them, so
-they are covered if they get linked:
+Also linked into the app (HEIC / AVIF / JPEG XL images, and RAR / CBR archives including password-protected
+ones, as in the Windows build). These need a decision before distributing a build:
 
 | Static library | Component | License                              | License text / concern                                                             |
 | -------------- | --------- | ------------------------------------ | ---------------------------------------------------------------------------------- |
