@@ -83,9 +83,8 @@ void fz_drop_context_windows(fz_context* ctx) {
     delete c;
 }
 
-static Pixmap* PixmapFromFzPixmap(fz_context* ctx, fz_pixmap* pix);
-
-static Pixmap* PixmapFromImageData(fz_context* ctx, const u8* data, size_t n) {
+// decodes with any MuPDF image loader; ImageReader_posix.cpp uses it for PNG, GIF, TIFF, ...
+Pixmap* PixmapFromImageData(fz_context* ctx, const u8* data, size_t n) {
     fz_buffer* buf = nullptr;
     fz_image* img = nullptr;
     fz_pixmap* pix = nullptr;
@@ -187,7 +186,7 @@ bool DecodeJpegToCmyk(Str jpeg, int& w, int& h, int& stride, Vec<u8>& samples) {
     return ok;
 }
 
-static Pixmap* PixmapFromFzPixmap(fz_context* ctx, fz_pixmap* pix) {
+Pixmap* PixmapFromFzPixmap(fz_context* ctx, fz_pixmap* pix) {
     int w = pix->w;
     int h = pix->h;
     Pixmap* px = AllocPixmap(w, h, PixmapFormat::BGRA8);

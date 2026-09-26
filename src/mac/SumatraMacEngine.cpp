@@ -95,7 +95,12 @@ static void LoadProperties(MacDocument* document) {
         return;
     }
     document->propertiesLoaded = true;
-    document->model->GetEngine()->GetProperties(document->properties);
+    // GetProperties() gives temp-arena values: keep owned copies (freed by FreeProps)
+    Props props;
+    document->model->GetEngine()->GetProperties(props);
+    for (const PropValue& p : props) {
+        AddPropOwned(document->properties, p.prop, p.val);
+    }
 }
 
 static PointF ToPagePoint(MacDocument* document, int pageNo, double x, double y, double zoom, int rotation) {

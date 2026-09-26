@@ -9,11 +9,15 @@ constexpr size_t kFzStoreDefault = 256 << 20;
 // pixmap. We keep the encoded bytes and decode at display scale instead.
 constexpr i64 kMaxDecodedPixmapBytes = 512LL * 1024 * 1024;
 struct fz_context;
+struct fz_pixmap;
 fz_context* fz_new_context_windows(size_t maxStore = kFzStoreUnlimited);
 void fz_drop_context_windows(fz_context* ctx);
 
 struct Pixmap;
 struct RenderedBitmap;
+
+Pixmap* PixmapFromFzPixmap(fz_context* ctx, fz_pixmap* pix);
+Pixmap* PixmapFromImageData(fz_context* ctx, const u8* data, size_t n);
 
 bool ImageDecodedPixmapWouldBeHuge(Str);
 

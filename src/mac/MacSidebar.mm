@@ -73,7 +73,7 @@ static NSImage* ImageFromThumb(MacThumbImage* thumb, NSSize pointSize) {
         return nil;
     }
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-    CGBitmapInfo bitmapInfo = kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst;
+    CGBitmapInfo bitmapInfo = (CGBitmapInfo)kCGBitmapByteOrder32Little | (CGBitmapInfo)kCGImageAlphaPremultipliedFirst;
     CGImageRef cgImage = CGImageCreate((size_t)thumb->width, (size_t)thumb->height, 8, 32, (size_t)thumb->stride,
                                        colorSpace, bitmapInfo, provider, nullptr, false, kCGRenderingIntentDefault);
     CGColorSpaceRelease(colorSpace);
@@ -546,6 +546,7 @@ static NSImage* ImageFromThumb(MacThumbImage* thumb, NSSize pointSize) {
 - (void)layoutChanged;
 - (void)thumbnailReady:(void*)document page:(int)pageNo;
 - (void)shutdown;
+- (int)visibleImageCount;
 @end
 
 // Worker thread. The block retains relay; the pane clears relay.pane before it
@@ -918,6 +919,21 @@ static void ThumbReady(void* context, void* document, int pageNo) {
     }
 }
 
+- (int)visibleImageCount {
+    if (!_active || !_document) {
+        return 0;
+    }
+    NSRange rows = [_table rowsInRect:[_table visibleRect]];
+    int count = 0;
+    for (NSUInteger row = rows.location; row < rows.location + rows.length; row++) {
+        SumatraThumbCellView* cell = [_table viewAtColumn:0 row:(NSInteger)row makeIfNecessary:NO];
+        if ([cell thumbImage]) {
+            count++;
+        }
+    }
+    return count;
+}
+
 @end
 
 #pragma mark - SumatraSidebar
@@ -1095,6 +1111,10 @@ static void ThumbReady(void* context, void* document, int pageNo) {
 
 - (void)shutdown {
     [_thumbPane shutdown];
+}
+
+- (int)visibleThumbnailCount {
+    return _mode == SumatraSidebarModeThumbnails ? [_thumbPane visibleImageCount] : 0;
 }
 
 @end

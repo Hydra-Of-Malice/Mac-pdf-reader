@@ -23,4 +23,5 @@ typedef NS_ENUM(NSInteger, SumatraSidebarMode) { SumatraSidebarModeOutline = 0, 
 - (void)currentPageChanged:(int)pageNo;
 - (void)documentWillClose:(void*)documentHandle; // called BEFORE MacCloseDocument; stop/await in-flight work for it
 - (void)shutdown;                    // stops the thumbnail worker; call before MacShutdown()
+- (int)visibleThumbnailCount;        // thumbnails on screen that show an image (self-test)
 @end

@@ -74,21 +74,11 @@ jobs:
       - name: Toolchain
         run: sw_vers && uname -m && xcrun --show-sdk-version && clang --version && bun --version
 
-      - name: Portable core check
-        run: |
-          if bun cmd/build.ts -help 2>&1 | grep -q -- "-mac-core"; then
-            bun cmd/build.ts -mac-core
-          else
-            echo "-mac-core mode not available yet; skipping"
-          fi
+      - name: Portable core check (engines + unit tests)
+        run: bun cmd/build.ts -mac-core
 
       - name: Debug build
-        run: |
-          if bun cmd/build.ts -help 2>&1 | grep -q -- "-mac"; then
-            bun cmd/build.ts -mac -dbg
-          else
-            bun -e 'import { buildMac } from "./cmd/helper/mac-build.ts"; await buildMac({ outDir: "out/mac-dbg64" });'
-          fi
+        run: bun cmd/build.ts -mac -dbg
 
       # Launch the debug app with a PDF; it must still be running after 15s.
       - name: Launch smoke test
@@ -123,12 +113,7 @@ jobs:
           retention-days: 14
 
       - name: Release build
-        run: |
-          if bun cmd/build.ts -help 2>&1 | grep -q -- "-mac"; then
-            bun cmd/build.ts -mac -rel
-          else
-            bun -e 'import { buildMac } from "./cmd/helper/mac-build.ts"; await buildMac({ outDir: "out/mac-rel64", isRelease: true });'
-          fi
+        run: bun cmd/build.ts -mac -rel
 
       - name: List outputs
         if: always()

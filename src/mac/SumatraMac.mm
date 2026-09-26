@@ -16,6 +16,7 @@
 #include "mac/MacPrefs.h"
 #import "mac/MacDocumentView.h"
 #import "mac/MacPanels.h"
+#import "mac/MacSelfTest.h"
 #import "mac/MacSidebar.h"
 
 static NSString* const kWebsiteURL = @"https://www.sumatrapdfreader.org";
@@ -48,6 +49,20 @@ static const CGFloat kDocumentMinWidth = 240;
 static NSString* const kDefSidebarVisible = @"SidebarVisible";
 static NSString* const kDefSidebarWidth = @"SidebarWidth";
 static NSString* const kDefSidebarMode = @"SidebarMode";
+
+static NSString* const kSettingsFileName = @"SumatraPDF-settings.txt";
+static NSString* const kSelfTestPasteboard = @"org.sumatrapdfreader.self-test";
+static const double kSelfTestTimeout = 1500.0;
+static const double kSelfTestStartDelay = 0.5;
+
+// command-line flags; see ParseCommandLine()
+static NSString* const kArgForTesting = @"-for-testing";
+static NSString* const kArgPrefsDir = @"-prefs-dir";
+static NSString* const kArgSelfTest = @"-self-test";
+static NSString* const kArgSelfTestManifest = @"-self-test-manifest";
+static NSString* const kArgSelfTestFind = @"-self-test-find";
+static NSString* const kArgSelfTestTimeout = @"-self-test-timeout";
+static NSString* const kArgPaths = @"paths";
 
 static NSString* const kToolbarIdentifier = @"sumatra.toolbar.v2";
 static NSString* const kToolbarSidebar = @"sumatra.toolbar.sidebar";
@@ -144,10 +159,13 @@ static NSString* ResolveDocumentPath(NSString* path) {
     return ExistingPath(candidates);
 }
 
-// Document paths from argv. Launch Services may add -psn_*; AppKit treats
-// -NS*/-Apple* as user-default overrides that take a value.
-static NSArray* CommandLinePaths() {
+// argv: flags (kArg*; some take the next argument as value) and document paths
+// (under kArgPaths). Launch Services may add -psn_*; AppKit treats -NS*/-Apple*
+// as user-default overrides that take a value.
+static NSDictionary* ParseCommandLine() {
     NSArray* args = [[NSProcessInfo processInfo] arguments];
+    NSArray* valueFlags = @[ kArgPrefsDir, kArgSelfTest, kArgSelfTestManifest, kArgSelfTestFind, kArgSelfTestTimeout ];
+    NSMutableDictionary* opts = [NSMutableDictionary dictionary];
     NSMutableArray* paths = [NSMutableArray array];
     for (NSUInteger i = 1; i < [args count]; i++) {
         NSString* arg = [args objectAtIndex:i];
@@ -158,12 +176,31 @@ static NSArray* CommandLinePaths() {
             i++;
             continue;
         }
-        if ([arg length] == 0 || [arg hasPrefix:@"-"]) {
+        if ([valueFlags containsObject:arg]) {
+            if (i + 1 < [args count]) {
+                [opts setObject:[args objectAtIndex:++i] forKey:arg];
+            }
+            continue;
+        }
+        if ([arg length] == 0) {
+            continue;
+        }
+        if ([arg hasPrefix:@"-"]) {
+            [opts setObject:[NSNumber numberWithBool:YES] forKey:arg];
             continue;
         }
         [paths addObject:arg];
     }
-    return paths;
+    [opts setObject:paths forKey:kArgPaths];
+    return opts;
+}
+
+static NSString* AbsolutePath(NSString* path) {
+    path = [path stringByExpandingTildeInPath];
+    if (![path isAbsolutePath]) {
+        path = [[[NSFileManager defaultManager] currentDirectoryPath] stringByAppendingPathComponent:path];
+    }
+    return [path stringByStandardizingPath];
 }
 
 static NSDate* ModificationDate(NSString* path) {
@@ -393,7 +430,8 @@ static BOOL IsRiskyLinkTarget(NSString* path) {
                                           NSSplitViewDelegate,
                                           NSMenuDelegate,
                                           SumatraDocumentViewOwner,
-                                          SumatraSidebarHost>
+                                          SumatraSidebarHost,
+                                          SumatraSelfTestHost>
 - (void)installMainMenu;
 - (void)openPaths:(NSArray*)paths;
 - (void)pageRenderReady;
@@ -467,17 +505,52 @@ static void FindDone(void* context, void* document, int token, bool found) {
     int _lastNotifiedPage;
     int _openDepth;
     void* _printingDocument;
+
+    NSDictionary* _commandLine;
+    NSString* _settingsPath;
+    NSString* _tempPrefsDir; // -for-testing without -prefs-dir; removed on quit
+    BOOL _testing;           // -for-testing / -self-test: no session, no user defaults
+    SumatraSelfTest* _selfTest;
+    BOOL _selfTestDone;
+    int _selfTestExitCode;
+    BOOL _visibleRendered;
+    int _lastOpenError;
 }
 
 #pragma mark - Launch and shutdown
 
-- (void)applicationWillFinishLaunching:(NSNotification*)notification {
-    (void)notification;
+// -prefs-dir, else a fresh temporary directory for -for-testing, else
+// ~/Library/Application Support/SumatraPDF.
+- (NSString*)chooseSettingsPath {
+    NSString* dir = [_commandLine objectForKey:kArgPrefsDir];
+    if ([dir length] > 0) {
+        return [AbsolutePath(dir) stringByAppendingPathComponent:kSettingsFileName];
+    }
+    if (_testing) {
+        NSString* name = [NSString stringWithFormat:@"SumatraPDF-testing-%d", (int)getpid()];
+        dir = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
+        [_tempPrefsDir release];
+        _tempPrefsDir = [dir copy];
+        return [dir stringByAppendingPathComponent:kSettingsFileName];
+    }
     NSArray* supportDirs = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
     NSString* supportDir = [supportDirs count] ? [supportDirs objectAtIndex:0] : NSTemporaryDirectory();
-    NSString* settingsPath = [[supportDir stringByAppendingPathComponent:@"SumatraPDF"]
-        stringByAppendingPathComponent:@"SumatraPDF-settings.txt"];
-    MacPrefsInit([settingsPath fileSystemRepresentation]);
+    return [[supportDir stringByAppendingPathComponent:@"SumatraPDF"] stringByAppendingPathComponent:kSettingsFileName];
+}
+
+// User defaults hold UI state (sidebar); test runs neither read nor write them.
+- (void)saveDefault:(id)value forKey:(NSString*)key {
+    if (!_testing) {
+        [[NSUserDefaults standardUserDefaults] setObject:value forKey:key];
+    }
+}
+
+- (void)applicationWillFinishLaunching:(NSNotification*)notification {
+    (void)notification;
+    _commandLine = [ParseCommandLine() retain];
+    _testing = [_commandLine objectForKey:kArgForTesting] || [_commandLine objectForKey:kArgSelfTest];
+    _settingsPath = [[self chooseSettingsPath] copy];
+    MacPrefsInit([_settingsPath fileSystemRepresentation]);
 
     _tabs = [[NSMutableArray alloc] init];
     _closedPaths = [[NSMutableArray alloc] init];
@@ -491,8 +564,12 @@ static void FindDone(void* context, void* document, int token, bool found) {
         kDefSidebarWidth : [NSNumber numberWithDouble:kSidebarDefaultWidth],
         kDefSidebarMode : [NSNumber numberWithInteger:SumatraSidebarModeOutline],
     }];
-    _sidebarVisible = [defaults boolForKey:kDefSidebarVisible];
-    _sidebarWidth = MAX(kSidebarMinWidth, MIN(kSidebarMaxWidth, (CGFloat)[defaults doubleForKey:kDefSidebarWidth]));
+    _sidebarVisible = NO;
+    _sidebarWidth = kSidebarDefaultWidth;
+    if (!_testing) {
+        _sidebarVisible = [defaults boolForKey:kDefSidebarVisible];
+        _sidebarWidth = MAX(kSidebarMinWidth, MIN(kSidebarMaxWidth, (CGFloat)[defaults doubleForKey:kDefSidebarWidth]));
+    }
 
     // tabs are our own (toolbar selector + Window menu), not NSWindow tabbing
     [NSWindow setAllowsAutomaticWindowTabbing:NO];
@@ -506,13 +583,42 @@ static void FindDone(void* context, void* document, int token, bool found) {
     [_window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
-    NSMutableArray* paths = [NSMutableArray arrayWithArray:CommandLinePaths()];
+    NSArray* argPaths = [_commandLine objectForKey:kArgPaths];
+    NSString* report = [_commandLine objectForKey:kArgSelfTest];
+    if (report) {
+        double timeout = [[_commandLine objectForKey:kArgSelfTestTimeout] doubleValue];
+        _selfTest = [[SumatraSelfTest alloc] initWithHost:self
+                                               reportPath:AbsolutePath(report)
+                                             manifestPath:[_commandLine objectForKey:kArgSelfTestManifest]
+                                                    paths:argPaths
+                                                 findWord:[_commandLine objectForKey:kArgSelfTestFind]
+                                                  timeout:timeout > 0 ? timeout : kSelfTestTimeout];
+        [self openExternalPaths:_pendingOpen];
+        [_pendingOpen removeAllObjects];
+        // from a timer: the self-test pumps the run loop, which can't drain
+        // the main queue from inside a main-queue block
+        [_selfTest performSelector:@selector(start) withObject:nil afterDelay:kSelfTestStartDelay];
+        return;
+    }
+
+    NSMutableArray* paths = [NSMutableArray arrayWithArray:argPaths];
     [paths addObjectsFromArray:_pendingOpen];
     [_pendingOpen removeAllObjects];
     if ([paths count] > 0) {
         [self openPaths:paths];
-    } else {
+    } else if (!_testing) {
         [self restoreSession];
+    }
+}
+
+// Finder / `open` requests. The self-test opens its documents itself.
+- (void)openExternalPaths:(NSArray*)paths {
+    if (!_selfTest) {
+        [self openPaths:paths];
+        return;
+    }
+    for (NSString* path in paths) {
+        [_selfTest recordIgnored:path];
     }
 }
 
@@ -524,17 +630,17 @@ static void FindDone(void* context, void* document, int token, bool found) {
             [paths addObject:[url path]];
         }
     }
-    [self openPaths:paths];
+    [self openExternalPaths:paths];
 }
 
 - (void)application:(NSApplication*)sender openFiles:(NSArray*)filenames {
-    [self openPaths:filenames];
+    [self openExternalPaths:filenames];
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 
 - (BOOL)application:(NSApplication*)sender openFile:(NSString*)filename {
     (void)sender;
-    [self openPaths:@[ filename ]];
+    [self openExternalPaths:@[ filename ]];
     return YES;
 }
 
@@ -588,6 +694,14 @@ static void FindDone(void* context, void* document, int token, bool found) {
     [_sidebar shutdown];
     MacPrefsShutdown();
     MacShutdown();
+    if (_tempPrefsDir) {
+        [[NSFileManager defaultManager] removeItemAtPath:_tempPrefsDir error:nil];
+    }
+    if (_selfTestDone) {
+        fflush(stdout);
+        fflush(stderr);
+        exit(_selfTestExitCode);
+    }
 }
 
 - (void)restoreSession {
@@ -642,7 +756,8 @@ static void FindDone(void* context, void* document, int token, bool found) {
     _sidebar = [[SumatraSidebar alloc] initWithHost:self];
     NSView* sidebarView = [_sidebar view];
     [sidebarView setFrame:NSMakeRect(0, 0, _sidebarWidth, bounds.size.height)];
-    NSInteger mode = [[NSUserDefaults standardUserDefaults] integerForKey:kDefSidebarMode];
+    NSInteger mode = _testing ? SumatraSidebarModeOutline
+                              : [[NSUserDefaults standardUserDefaults] integerForKey:kDefSidebarMode];
     [_sidebar setMode:mode == SumatraSidebarModeThumbnails ? SumatraSidebarModeThumbnails : SumatraSidebarModeOutline];
 
     NSRect scrollFrame =
@@ -674,7 +789,11 @@ static void FindDone(void* context, void* document, int token, bool found) {
 
     [self installToolbar];
     [_window center];
-    [_window setFrameAutosaveName:@"SumatraPDFMainWindow"];
+    if (_testing) {
+        [_window setRestorable:NO];
+    } else {
+        [_window setFrameAutosaveName:@"SumatraPDFMainWindow"];
+    }
     [self showEmptyState];
     [_window makeFirstResponder:_documentView];
 }
@@ -733,6 +852,10 @@ static void FindDone(void* context, void* document, int token, bool found) {
     [_alertQueue release];
     [_imageCache release];
     [_findText release];
+    [_commandLine release];
+    [_settingsPath release];
+    [_tempPrefsDir release];
+    [_selfTest release];
     [super dealloc];
 }
 
@@ -740,6 +863,14 @@ static void FindDone(void* context, void* document, int token, bool found) {
 
 // Sheets on the main window, one at a time; alerts arriving meanwhile queue up.
 - (void)presentAlert:(NSAlert*)alert completion:(SumatraAlertDone)done {
+    // the self-test can't click: record the text and answer Cancel (or OK)
+    if (_selfTest) {
+        [_selfTest recordAlert:[alert messageText] info:[alert informativeText]];
+        if (done) {
+            done([[alert buttons] count] > 1 ? NSAlertSecondButtonReturn : NSAlertFirstButtonReturn);
+        }
+        return;
+    }
     SumatraAlertDone copied = nil;
     if (done) {
         copied = [[done copy] autorelease];
@@ -793,6 +924,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
 }
 
 - (void)reportOpenError:(MacOpenError)err path:(NSString*)path {
+    _lastOpenError = (int)err;
     NSString* name = [[NSFileManager defaultManager] displayNameAtPath:path];
     if ([name length] == 0) {
         name = [path lastPathComponent];
@@ -1819,6 +1951,10 @@ static void FindDone(void* context, void* document, int token, bool found) {
         NSBeep();
         return;
     }
+    if (_selfTest) {
+        [_selfTest recordIgnored:value];
+        return;
+    }
     [[NSWorkspace sharedWorkspace] openURL:url];
 }
 
@@ -1890,7 +2026,7 @@ static NSArray* ToolbarAllowedItems() {
     [toolbar setDelegate:self];
     [toolbar setDisplayMode:NSToolbarDisplayModeIconOnly];
     [toolbar setAllowsUserCustomization:YES];
-    [toolbar setAutosavesConfiguration:YES];
+    [toolbar setAutosavesConfiguration:!_testing];
     [_toolbar release];
     _toolbar = [toolbar retain];
     [_window setToolbar:toolbar];
@@ -2501,12 +2637,12 @@ static NSArray* ToolbarAllowedItems() {
         [_splitView setPosition:_sidebarWidth ofDividerAtIndex:0];
     }
     _adjustingSidebar = NO;
-    [[NSUserDefaults standardUserDefaults] setBool:visible forKey:kDefSidebarVisible];
+    [self saveDefault:[NSNumber numberWithBool:visible] forKey:kDefSidebarVisible];
 }
 
 - (void)showSidebarMode:(SumatraSidebarMode)mode {
     [_sidebar setMode:mode];
-    [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:kDefSidebarMode];
+    [self saveDefault:[NSNumber numberWithInteger:mode] forKey:kDefSidebarMode];
     if (!_sidebarVisible) {
         [self setSidebarVisible:YES];
     }
@@ -2564,7 +2700,7 @@ static NSArray* ToolbarAllowedItems() {
     BOOL collapsed = [view isHidden] || [_splitView isSubviewCollapsed:view];
     if (collapsed != !_sidebarVisible) {
         _sidebarVisible = !collapsed;
-        [[NSUserDefaults standardUserDefaults] setBool:_sidebarVisible forKey:kDefSidebarVisible];
+        [self saveDefault:[NSNumber numberWithBool:_sidebarVisible] forKey:kDefSidebarVisible];
     }
     if (collapsed) {
         return;
@@ -2572,7 +2708,7 @@ static NSArray* ToolbarAllowedItems() {
     CGFloat width = NSWidth([view frame]);
     if (width >= kSidebarMinWidth && fabs(width - _sidebarWidth) >= 1.0) {
         _sidebarWidth = width;
-        [[NSUserDefaults standardUserDefaults] setDouble:width forKey:kDefSidebarWidth];
+        [self saveDefault:[NSNumber numberWithDouble:width] forKey:kDefSidebarWidth];
     }
 }
 
@@ -2732,9 +2868,17 @@ static NSArray* ToolbarAllowedItems() {
     if ([text length] == 0) {
         return;
     }
-    NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
+    NSPasteboard* pasteboard = [self pasteboard];
     [pasteboard clearContents];
     [pasteboard setString:text forType:NSPasteboardTypeString];
+}
+
+// The self-test copies to a private pasteboard, not the user's clipboard.
+- (NSPasteboard*)pasteboard {
+    if (_selfTest) {
+        return [NSPasteboard pasteboardWithName:kSelfTestPasteboard];
+    }
+    return [NSPasteboard generalPasteboard];
 }
 
 - (IBAction)selectAll:(id)sender {

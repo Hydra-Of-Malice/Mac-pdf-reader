@@ -3,7 +3,7 @@
  * except its Cocoa (.mm) layer, from the source lists in mac-build.ts.
  *
  * Native (default): third-party libraries, src/base, the engines, the reader model and src/mac/*.cpp; links and
- * runs test_util and test_mac_thumbnails, links test_engines and test_mac_engine, compiles src/gui/mac/*.cpp.
+ * runs test_util, links test_engines, test_mac_engine and test_mac_thumbnails, compiles src/gui/mac/*.cpp.
  * Output: out/mac-core-<cfg>-<cc>/ (cfg: dbg / rel / asan / rel_asan; cc: gcc / clang / zig).
  *
  * -cross: compiles the same sources to macOS objects with zig (`zig c++ -target aarch64-macos` / x86_64-macos) to
@@ -96,14 +96,6 @@ function nativeTarget(): PosixTarget {
   throw new Error(`-mac-core runs on Linux or macOS (this is ${process.platform}); from Windows use WSL`);
 }
 
-async function runExe(exe: string, args: string[]): Promise<void> {
-  console.log(`> ${exe} ${args.join(" ")}`);
-  const env = { ...process.env, ASAN_OPTIONS: "abort_on_error=1:halt_on_error=1:detect_leaks=0" };
-  const proc = Bun.spawn([exe, ...args], { env, stdout: "inherit", stderr: "inherit" });
-  const code = await proc.exited;
-  if (code !== 0) throw new Error(`${exe} failed with exit code ${code}`);
-}
-
 export async function buildMacCore(opts: MacCoreOptions): Promise<void> {
   const t = nativeTarget();
   const cc: CoreCompiler = opts.cc ?? (t.os === "mac" ? "clang" : "gcc");
@@ -125,7 +117,6 @@ export async function buildMacCore(opts: MacCoreOptions): Promise<void> {
   stageMupdfFonts(outDir);
 
   await runTestUtil(exes.test_util);
-  await runExe(exes.test_mac_thumbnails, []);
 
   const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
   console.log(`\n=== mac core check done in ${elapsed}s ===`);
