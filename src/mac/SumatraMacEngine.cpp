@@ -582,6 +582,8 @@ bool MacRenderPage(void* document, int pageNo, float zoom, int rotation, MacRend
     if (zoom <= 0) {
         zoom = 1.0f;
     }
+    // like the app's layout: a damaged file can claim e.g. 56142 x 36429 px pages
+    zoom = (float)CapRenderZoom(zoom, model->PageMediabox(pageNo));
 
     Pixmap* pixmap = model->RenderPage(pageNo, zoom, rotation);
     bool ok = CopyPixmap(pixmap, page);

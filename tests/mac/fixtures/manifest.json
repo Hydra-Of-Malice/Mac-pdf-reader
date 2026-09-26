@@ -437,6 +437,24 @@
       "expect": "any"
     },
     {
+      "id": "regress-chm-lzx-bad-code-lengths",
+      "format": "CHM",
+      "path": "tests/mac/fixtures/regress/chm-lzx-bad-code-lengths.chm",
+      "expect": "any"
+    },
+    {
+      "id": "regress-djvu-huge-page",
+      "format": "DjVu",
+      "path": "tests/mac/fixtures/regress/djvu-huge-page.djvu",
+      "expect": "any"
+    },
+    {
+      "id": "regress-md-invalid-utf8-macos-crash",
+      "format": "Markdown",
+      "path": "tests/mac/fixtures/regress/md-invalid-utf8-macos-crash.md",
+      "expect": "any"
+    },
+    {
       "id": "regress-epub-link-invalid-utf8",
       "format": "EPUB",
       "path": "tests/mac/fixtures/regress/epub-link-invalid-utf8.epub",

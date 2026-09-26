@@ -48,6 +48,9 @@ macOS MOBI, CHM and LIT are converted to an in-memory EPUB that MuPDF lays out.
   large.chm (1025 topics): opens in 180 ms, peak RSS 145 MB (Linux debug).
 - Images: JPEG XR and ICO have no decoder outside Windows (WIC) and aren't offered. Animated GIF: one page per frame,
   composited with the frames' disposal modes.
+- Upstream candidate (not changed; shared with Windows): EngineMupdf's chaptered EPUB layout ignores
+  `page-break-before:always`. An EPUB chapter `<p>A</p><p style="page-break-before:always">B</p>` lays out as one
+  page; `page-break-after:always` on an element works (the MOBI converter uses that).
 
 ## Robustness (fuzzing)
 

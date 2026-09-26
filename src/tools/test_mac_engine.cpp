@@ -10,10 +10,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
 #include <signal.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <execinfo.h>
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #endif
@@ -39,6 +41,11 @@ constexpr int kWaitMs = 30000;
 // -fuzz: damaged docs can leave a page that never arrives from the async renderer
 constexpr int kFuzzWaitMs = 3000;
 constexpr unsigned kFuzzWatchdogSecs = 40;
+// -fuzz: damaged headers can claim huge pages (e.g. 50952 x 2400 px), and whole-document
+// selection of a big book takes long under ASan; neither is a hang
+constexpr double kFuzzMaxRenderPx = 2048;
+constexpr double kMaxRenderPixels = 32.0 * 1024 * 1024;
+constexpr int kFuzzMaxSelectAllPages = 100;
 constexpr int kSettleMs = 20;
 constexpr float kZoomFitWidth = -2.f;
 constexpr char kMissingWord[] = "xq7zzyNotInAnyFixture";
@@ -53,6 +60,7 @@ static int gPagesReady = 0;
 static int gFindCallbacks = 0;
 static bool gFirstField = true;
 static int gWaitMs = kWaitMs;
+static bool gFuzz = false;
 static double gLinkScanMaxCells = kLinkScanMaxCells;
 
 static double NowMs() {
@@ -188,7 +196,27 @@ static void KeyRender(const char* name, const RenderStats& st) {
            st.inkRatio);
 }
 
+// in -fuzz mode, zoom limited so the page is at most kFuzzMaxRenderPx on a side
+static float RenderZoom(void* doc, int pageNo, float zoom) {
+    double w = 0;
+    double h = 0;
+    if (!MacPageSize(doc, pageNo, &w, &h)) {
+        return zoom;
+    }
+    double side = w > h ? w : h;
+    if (gFuzz && side * zoom > kFuzzMaxRenderPx) {
+        zoom = (float)(kFuzzMaxRenderPx / side);
+    }
+    // the app's layout never asks for more (kMacMaxRenderPixels in the bridge)
+    double area = w * h;
+    if (area > 0 && (double)zoom * zoom * area > kMaxRenderPixels) {
+        zoom = (float)sqrt(kMaxRenderPixels / area);
+    }
+    return zoom;
+}
+
 static RenderStats RenderSync(void* doc, int pageNo, float zoom, int rotation) {
+    zoom = RenderZoom(doc, pageNo, zoom);
     MacRenderedPage page{};
     bool ok = MacRenderPage(doc, pageNo, zoom, rotation, &page);
     RenderStats st = Stats(ok, page);
@@ -278,15 +306,16 @@ static bool CheckRender(void* doc, int nPages) {
 static void CheckAsyncRender(void* doc, int nPages, bool page1Renders) {
     Stage("render-async");
     int n = nPages < kAsyncPages ? nPages : kAsyncPages;
-    const float zoom = 0.75f;
+    float zooms[kAsyncPages + 1] = {};
     bool expected[kAsyncPages + 1] = {};
     int nExpected = 0;
     for (int pageNo = 1; pageNo <= n; pageNo++) {
-        expected[pageNo] = RenderSync(doc, pageNo, zoom, 0).ok;
+        zooms[pageNo] = RenderZoom(doc, pageNo, 0.75f);
+        expected[pageNo] = RenderSync(doc, pageNo, zooms[pageNo], 0).ok;
         nExpected += expected[pageNo] ? 1 : 0;
     }
     for (int pageNo = 1; pageNo <= n; pageNo++) {
-        MacRequestPage(doc, pageNo, zoom, 0, pageNo == 1 ? 0 : (pageNo < 4 ? 1 : 2));
+        MacRequestPage(doc, pageNo, zooms[pageNo], 0, pageNo == 1 ? 0 : (pageNo < 4 ? 1 : 2));
     }
     bool got[kAsyncPages + 1] = {};
     int nGot = 0;
@@ -298,7 +327,7 @@ static void CheckAsyncRender(void* doc, int nPages, bool page1Renders) {
                 continue;
             }
             MacRenderedPage page{};
-            if (MacCopyRenderedPage(doc, pageNo, zoom, 0, &page)) {
+            if (MacCopyRenderedPage(doc, pageNo, zooms[pageNo], 0, &page)) {
                 got[pageNo] = true;
                 nGot++;
                 if (pageNo == 1) {
@@ -319,11 +348,12 @@ static void CheckAsyncRender(void* doc, int nPages, bool page1Renders) {
     MacResetRenderer(doc);
     bool again = false;
     if (page1Renders) {
-        MacRequestPage(doc, 1, 0.5f, 0, 0);
+        float zoom = RenderZoom(doc, 1, 0.5f);
+        MacRequestPage(doc, 1, zoom, 0, 0);
         start = NowMs();
         while (!again && NowMs() - start < gWaitMs) {
             MacRenderedPage page{};
-            again = MacCopyRenderedPage(doc, 1, 0.5f, 0, &page);
+            again = MacCopyRenderedPage(doc, 1, zoom, 0, &page);
             MacFreeRenderedPage(&page);
             if (!again) {
                 SleepMs(5);
@@ -406,6 +436,10 @@ static void CheckSearch(void* doc, int nPages, const char* word) {
 
 static void CheckSelectAll(void* doc, const char* word) {
     Stage("select-all");
+    if (gFuzz && MacPageCount(doc) > kFuzzMaxSelectAllPages) {
+        KeyBool("selectAllSkipped", true);
+        return;
+    }
     MacSelectAll(doc);
     bool has = MacHasSelection(doc);
     char* text = has ? MacCopySelectionText(doc) : nullptr;
@@ -594,6 +628,18 @@ static void OnWatchdog(int) {
     _exit(3);
 }
 
+// Without a sanitizer (e.g. the macOS CI debug build) print a raw stack on a crash, so
+// test logs and fuzz reproducer notes say where it happened. With ASan, its report wins.
+static void OnCrash(int sig) {
+    const char msg[] = "crash: fatal signal, stack:\n";
+    write(2, msg, sizeof(msg) - 1);
+    void* frames[64];
+    int n = backtrace(frames, 64);
+    backtrace_symbols_fd(frames, n, 2);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 static void Usage() {
     fprintf(stderr,
             "usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>] [-render-all] "
@@ -620,8 +666,8 @@ int main(int argc, char** argv) {
             // damaged input: render every page, short waits, coarse link scan
             renderAll = true;
             gWaitMs = kFuzzWaitMs;
+            gFuzz = true;
             gLinkScanMaxCells = kFuzzLinkScanMaxCells;
-            gPrintStack = (PrintStackFn)dlsym(RTLD_DEFAULT, "__sanitizer_print_stack_trace");
             signal(SIGALRM, OnWatchdog);
             alarm(kFuzzWatchdogSecs);
         } else if (argv[i][0] != '-' && !path) {
@@ -643,6 +689,14 @@ int main(int argc, char** argv) {
     }
     MacSetPasswordCallback(OnPassword, &pwd);
     uitask::Initialize();
+    gPrintStack = (PrintStackFn)dlsym(RTLD_DEFAULT, "__sanitizer_print_stack_trace");
+    if (!gPrintStack) {
+        signal(SIGSEGV, OnCrash);
+        signal(SIGBUS, OnCrash);
+        signal(SIGILL, OnCrash);
+        signal(SIGFPE, OnCrash);
+        signal(SIGABRT, OnCrash);
+    }
 
     putchar('{');
     KeyStr("file", path);

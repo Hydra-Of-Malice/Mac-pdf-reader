@@ -50,6 +50,12 @@ interface RunResult {
   ms: number;
   report?: any;
   stage?: string;
+  stderrTail?: string;
+}
+
+function indentLines(s: string): string {
+  const lines = s.split("\n").filter((l) => l.trim() && !l.startsWith("stage: "));
+  return lines.map((l) => `    ${l}`).join("\n");
 }
 
 const repoRoot = join(import.meta.dir, "..", "..");
@@ -235,6 +241,7 @@ async function runFixture(driver: string, f: Fixture, defTimeout: number): Promi
   const out = await runDriver(driver, driverArgs(f, absPath), f.timeoutMs ?? defTimeout);
   res.ms = out.ms;
   res.stage = lastStage(out.stderr);
+  res.stderrTail = out.stderr.split("\n").slice(-60).join("\n");
   if (/AddressSanitizer|runtime error:|LeakSanitizer/.test(out.stderr)) {
     const line = out.stderr.split("\n").find((l) => /AddressSanitizer|runtime error:/.test(l)) ?? "";
     fail(`sanitizer: ${line.trim()}`);
@@ -322,6 +329,8 @@ async function main() {
     console.log(
       `${r.ok ? "PASS" : "FAIL"} ${f.id} (${Math.round(r.ms)} ms)${r.ok ? "" : ": " + r.failures.join("; ")}`,
     );
+    // a crash / hang: the driver's stack dump (or sanitizer report) is the useful part
+    if (r.outcome === "crash" || r.outcome === "timeout") console.log(indentLines(r.stderrTail ?? ""));
     results.push(r);
   }
   printTables(results);

@@ -590,6 +590,8 @@ static int make_decode_table(uint32_t nsyms, uint32_t nbits, uint8_t* length, ui
                         table[(next_symbol << 1) + 1] = 0;
                         table[leaf] = LZX_HUFF_NODE | next_symbol++;
                     }
+                    /* a shorter code ends here already: invalid lengths (the entry is no node index) */
+                    if (!(table[leaf] & LZX_HUFF_NODE)) return 1;
 
                     leaf = (table[leaf] & LZX_HUFF_NODE_MASK) << 1;
                     if ((pos >> (15 - fill)) & 1) leaf++;
