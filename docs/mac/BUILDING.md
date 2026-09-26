@@ -2,54 +2,41 @@
 
 ## Requirements
 
-- A Mac with macOS 11 or later (Apple silicon or Intel). `cmd/helper/mac-build.ts` exits on other systems.
+- macOS 11 or later (Apple silicon or Intel) to build and run the app.
 - Xcode, or just the Command Line Tools: `xcode-select --install`. The build uses `clang`, `clang++`, `ar`, `ld`,
-  `dsymutil`, `lipo`; packaging uses `tar`, `ditto` and `hdiutil`, which ship with macOS.
+  `dsymutil`, `lipo`, `codesign`; packaging uses `tar`, `ditto` and `hdiutil`, which ship with macOS.
 - [bun](https://bun.sh): `curl -fsSL https://bun.sh/install | bash` or `brew install oven-sh/bun/bun`.
 
 ## Build
 
 ```sh
-bun cmd/build.ts -mac -dbg     # debug
-bun cmd/build.ts -mac -rel     # release
-bun cmd/build.ts -mac -asan    # AddressSanitizer
+bun cmd/build.ts -mac -dbg                    # debug, host architecture
+bun cmd/build.ts -mac -rel                    # release (+ .dmg)
+bun cmd/build.ts -mac -rel -arch universal    # arm64 + x86_64 in one binary (lipo)
+bun cmd/build.ts -mac -asan                   # AddressSanitizer
 ```
 
-Add `-clean` to delete the output directory first. The build targets the architecture bun runs as (`process.arch`:
-`arm64` or `x64`). If `bun cmd/build.ts -help` does not list `-mac` yet, call the helper directly, as CI does:
+Options: `-arch arm64|x64|universal` (default: the architecture bun runs as), `-dmg` (force a `.dmg` for non-release
+builds), `-clean` (delete the output directory first). Every compile and link line gets
+`-mmacosx-version-min=11.0`, matching `LSMinimumSystemVersion` in the bundle.
 
-```sh
-bun -e 'import { buildMac } from "./cmd/helper/mac-build.ts"; await buildMac({ outDir: "out/mac-rel64", isRelease: true });'
-```
-
-`buildMac()` in `cmd/helper/mac-build.ts` runs these steps:
-
-1. compiles the `ext/` dependencies and `src/base` into static libraries in `<out>/lib/`
-2. builds `test_util` and runs it with `-for-ai` (portable unit tests); a failure stops the build
-3. compile-checks the portable sources in `PORTABLE_COMPILE_SOURCES`
-4. builds `test_engines`
-5. compiles and links `SumatraPDF.app` (`MAC_APP_SOURCES`), writes its `.dSYM`, and adds the bundle resources
-6. creates the distribution packages
+The build compiles the `ext/` dependencies and `src/base` into static libraries, builds and runs `test_util`
+(portable unit tests; a failure stops the build), builds `test_engines`, compiles and links `SumatraPDF.app`, writes
+its `.dSYM`, adds the bundle resources and fonts, ad-hoc signs the bundle, and creates the packages.
 
 ## Output
 
-| Config         | Directory             | Package name                               |
-| -------------- | --------------------- | ------------------------------------------ |
-| debug          | `out/mac-dbg64/`      | `SumatraPDF-<ver>-mac-<arch>-debug`        |
-| release        | `out/mac-rel64/`      | `SumatraPDF-<ver>-mac-<arch>`              |
-| asan           | `out/mac-asan64/`     | `SumatraPDF-<ver>-mac-<arch>-asan`         |
-| release + asan | `out/mac-rel64_asan/` | `SumatraPDF-<ver>-mac-<arch>-release-asan` |
+| Build        | Directory              | Package name                       |
+| ------------ | ---------------------- | ---------------------------------- |
+| `-mac -dbg`  | `out/mac-dbg-<arch>/`  | `SumatraPDF-<ver>-mac-<arch>-dbg`  |
+| `-mac -rel`  | `out/mac-rel-<arch>/`  | `SumatraPDF-<ver>-mac-<arch>`      |
+| `-mac -asan` | `out/mac-asan-<arch>/` | `SumatraPDF-<ver>-mac-<arch>-asan` |
 
-`<ver>` is `CURR_VERSION` from `src/Version.h`; `<arch>` is `arm64` or `x64`. Each directory contains:
-
-- `SumatraPDF.app` and `SumatraPDF.app.dSYM`
-- `test_util`, `test_engines` (with `.dSYM`), `lib/*.a`, `obj/`
-- `<package>.tar.gz`; on macOS also `<package>.zip` (`ditto -c -k --keepParent`); for release builds also
-  `<package>.dmg` (`hdiutil create -volname SumatraPDF -srcfolder <staging> -ov -format UDZO`, with an
-  `Applications` link for drag-and-drop install). `MacBuildOptions.dmg` in `mac-build.ts` overrides the default.
-
-Each package holds `<package>/SumatraPDF.app`, `README.md` (from `src/mac/Resources/package-README.md`), `COPYING` and
-`SOURCE.txt`.
+`<ver>` is `CURR_VERSION` from `src/Version.h`; `<arch>` is `arm64`, `x64` or `universal`. Each directory contains
+`SumatraPDF.app`, `SumatraPDF.app.dSYM`, `test_util`, `test_engines`, `lib/*.a`, `obj/`, and the packages:
+`<package>.tar.gz`, `<package>.zip` (`ditto -c -k --keepParent`) and, for release or `-dmg`, `<package>.dmg`
+(`hdiutil create -format UDZO`, with an `Applications` link for drag-and-drop install). Each package holds
+`SumatraPDF.app`, `README.md` (from `src/mac/Resources/package-README.md`), `COPYING` and `SOURCE.txt`.
 
 ## Bundle contents
 
@@ -59,77 +46,82 @@ SumatraPDF.app/Contents/
   PkgInfo
   MacOS/SumatraPDF
   Resources/SumatraPDF.icns  src/mac/Resources/SumatraPDF.icns
+  Resources/fonts/           MuPDF's base fonts (POSIX builds have no embedded font archive)
   Resources/Licenses/        license texts and SOURCE.txt, see THIRD-PARTY-LICENSES.md
+  _CodeSignature/            ad-hoc signature (or Developer ID, see below)
 ```
 
 `cmd/helper/mac-bundle.ts` assembles this right after linking:
 
 - `CFBundleShortVersionString` is `CURR_VERSION`; `CFBundleVersion` is `CURR_VERSION.<build>`, where `<build>` is
-  `git rev-list --count HEAD` + 1000 (the numbering of `bun cmd/build.ts -build-no`). Shallow clones give a small
-  number; without git it is `CURR_VERSION`.
-- `NSHumanReadableCopyright` is `kCopyrightStr` from `src/Version.h`.
+  `git rev-list --count HEAD` + 1000. Shallow clones give a small number; without git it is `CURR_VERSION`.
 - Document types (`CFBundleDocumentTypes`, `UTImportedTypeDeclarations`) are in the template. Keep them in sync with
-  [formats.md](formats.md) and the Open panel's file types in `src/mac/SumatraMac.mm`.
-- The icon is generated from `src/gfx/SumatraPDF-smaller.ico` by `bun cmd/gen-mac-icon.ts` (no macOS tools needed);
-  rerun it when the artwork changes and commit the `.icns`.
+  [formats.md](formats.md) and `MacCopySupportedExtensions()` in `src/mac/SumatraMacEngine.cpp`.
+- The icon is generated from `src/gfx/SumatraPDF-smaller.ico` by `bun cmd/gen-mac-icon.ts` (no macOS tools needed).
 
 Check the result:
 
 ```sh
-plutil -lint out/mac-rel64/SumatraPDF.app/Contents/Info.plist
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f out/mac-rel64/SumatraPDF.app
+plutil -lint out/mac-rel-arm64/SumatraPDF.app/Contents/Info.plist
+codesign --verify --strict --verbose=2 out/mac-rel-arm64/SumatraPDF.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f out/mac-rel-arm64/SumatraPDF.app
 ```
 
 `lsregister -f` makes Finder pick up changed document types without moving the app.
 
-`LSMinimumSystemVersion` is 11.0. The compiler targets the SDK's macOS version unless told otherwise, so build with
-`MACOSX_DEPLOYMENT_TARGET=11.0` (clang and ld read it) for a binary that runs on older macOS versions.
-
 ## Run
 
 ```sh
-open out/mac-dbg64/SumatraPDF.app --args "$PWD/ext/a-zlib/zlib.3.pdf"
-open -a "$PWD/out/mac-dbg64/SumatraPDF.app" /path/to/file.epub     # also opens in an already running instance
-out/mac-dbg64/SumatraPDF.app/Contents/MacOS/SumatraPDF /path/to/file.pdf   # logs to the terminal
-lldb -- out/mac-dbg64/SumatraPDF.app/Contents/MacOS/SumatraPDF /path/to/file.pdf
+open out/mac-dbg-arm64/SumatraPDF.app --args "$PWD/tests/mac/fixtures/text.pdf"
+open -a "$PWD/out/mac-dbg-arm64/SumatraPDF.app" /path/to/file.epub       # also opens in a running instance
+out/mac-dbg-arm64/SumatraPDF.app/Contents/MacOS/SumatraPDF /path/to/file.pdf   # logs to the terminal
+out/mac-dbg-arm64/SumatraPDF.app/Contents/MacOS/SumatraPDF -for-testing /path/to/file.pdf  # no session, temp settings
+lldb -- out/mac-dbg-arm64/SumatraPDF.app/Contents/MacOS/SumatraPDF /path/to/file.pdf
 ```
 
 Pass absolute paths: apps started by `open` run with `/` as the working directory. `--args` only reaches a newly
-launched instance. Settings are in `~/Library/Application Support/SumatraPDF/SumatraPDF-settings.txt`.
+launched instance. Settings are in `~/Library/Application Support/SumatraPDF/`. To install, drag `SumatraPDF.app`
+from the `.dmg` (or the unpacked `.zip`) to `/Applications`.
 
 ## Tests
 
-- `test_util` runs during every build.
-- `out/mac-dbg64/test_engines <file>` opens a document with the portable engines and prints what it finds; it also
-  takes `-find-text <text>`, `-list-toc`, `-list-properties`.
-- Per-format engine tests and fixtures: [formats.md](formats.md).
+- `test_util` (portable unit tests) runs during every `-mac` and `-mac-core` build.
+- Portable core without a full app build, on macOS or Linux: `bun cmd/build.ts -mac-core [-dbg|-rel] [-asan]
+[-cc gcc|clang|zig]` builds the engines, reader model and `src/mac/*.cpp` plus `test_util`, `test_engines`,
+  `test_mac_engine` and `test_mac_thumbnails` into `out/mac-core-<cfg>-<cc>/` and runs `test_util`.
+- Without a Mac: `bun cmd/build.ts -mac-core -cross [-arch arm64|x64|universal]` compiles the same portable sources
+  to macOS objects with zig (the Cocoa `.mm` files are skipped).
+- Per-format engine tests through the app's bridge (`src/mac/SumatraMacEngine.h`):
+  `bun tests/mac/run-engine-tests.ts --driver out/mac-core-dbg-clang/test_mac_engine [--only <id>] [--json f.json]`
+  over `tests/mac/fixtures/manifest.json`. See [formats.md](formats.md).
+- In-app self-test (drives the real Cocoa app through every manifest fixture: open, render, navigation, zoom,
+  rotation, sidebar, find, links, copy, reopen):
+  `out/mac-dbg-arm64/SumatraPDF.app/Contents/MacOS/SumatraPDF -for-testing -prefs-dir /tmp/sp -self-test
+/tmp/sp/report.json -self-test-manifest tests/mac/fixtures/manifest.json` (exit code 0 = pass; PNG snapshots next
+  to the report).
+- Remote Mac over ssh: `SUMATRA_MAC_HOST=user@host SUMATRA_MAC_DIR=src/sumatrapdf bun cmd/build.ts -mac-remote
+-branch <pushed-branch> -dbg`.
 - Manual checks before a release: [MANUAL-TEST-CHECKLIST.md](MANUAL-TEST-CHECKLIST.md).
-- Without a Mac: `bun cmd/build.ts -mac-remote -branch <temporary-branch> -dbg` builds a pushed branch on the remote
-  Mac configured in `cmd/helper/mac-remote-build.ts`, and `bun cmd/build.ts -mac-core` (when `-help` lists it)
-  compile-checks the portable core.
 
 ## CI
 
 `.github/workflows/mac.yml` runs on every push:
 
-- `cocoa-syntax` (macos-15): `clang++ -fsyntax-only -mmacosx-version-min=11.0` over `src/mac/*.mm`, `src/mac/*.cpp`
-  and `src/gui/mac/*` against the real macOS SDK.
-- `build` (arm64 on macos-15, x64 on macos-15-intel): `-mac-core` if available, then debug and release builds. The
-  `.tar.gz`, `.zip` and `.dmg` packages are uploaded as artifacts `SumatraPDF-mac-arm64` / `SumatraPDF-mac-x64`
-  (kept 14 days). They are not Developer ID signed; see Gatekeeper below.
+- `cocoa-syntax` (macos-15): `clang++ -fsyntax-only -mmacosx-version-min=11.0` over `src/mac/*` and
+  `src/gui/mac/*` against the real macOS SDK.
+- `windows`: `bun cmd/run-unit-tests.ts -dbg` (the port touches shared code).
+- `build` (arm64 on macos-15, x64 on macos-15-intel): `-mac-core`, the format test matrix (reported), `-mac -dbg`, a
+  launch smoke test (the app must still run 15 s after opening a PDF; screenshot uploaded), `-mac -rel`, and the
+  in-app self-test (reported). Artifacts: `SumatraPDF-mac-<arch>` (`.tar.gz`, `.zip`, `.dmg`), `smoke-<arch>`,
+  `selftest-<arch>`, kept 14 days. They are ad-hoc signed only; see Gatekeeper below.
 
 `.github/workflows/mac-daily.yml` runs `bun cmd/build.ts -mac -asan` daily.
 
 ## Signing and Gatekeeper
 
-Local builds are not quarantined and run as built. On Apple silicon every executable must carry at least an ad-hoc
-signature; the linker ad-hoc signs `Contents/MacOS/SumatraPDF`. To seal the whole bundle (Info.plist and
-resources), sign it after the bundle resources are written and before packaging:
-
-```sh
-codesign --force --sign - out/mac-rel64/SumatraPDF.app
-codesign --verify --strict --verbose=2 out/mac-rel64/SumatraPDF.app
-```
+The build ad-hoc signs the finished bundle (`codesign --force --deep -s -`) after the resources are written and
+before packaging; Apple silicon requires at least an ad-hoc signature. Set `SUMATRA_MAC_SIGN_IDENTITY` to sign with a
+real identity instead. Local builds are not quarantined and run as built.
 
 A downloaded, unsigned or ad-hoc signed app is quarantined and blocked on first launch. Either remove the quarantine
 attribute (`xattr -dr com.apple.quarantine SumatraPDF.app`), or Control-click it and choose **Open** (macOS 14 and
@@ -142,7 +134,7 @@ a "Developer ID Application" certificate in the keychain. The app is not sandbox
 is an interpreter, not a JIT).
 
 ```sh
-APP=out/mac-rel64/SumatraPDF.app
+APP=out/mac-rel-arm64/SumatraPDF.app
 ID="Developer ID Application: <Name> (<TEAMID>)"
 
 codesign --force --options runtime --timestamp --sign "$ID" "$APP"
@@ -155,7 +147,8 @@ xcrun stapler staple "$APP"
 spctl --assess --type execute --verbose "$APP"
 ```
 
-The packages the build made contain the app as it was before signing: recreate them from the stapled app, e.g.
+Or build with `SUMATRA_MAC_SIGN_IDENTITY="$ID"` so the build signs before packaging, then notarize. The packages the
+build made contain the app as it was before stapling: recreate them from the stapled app, e.g.
 `ditto -c -k --keepParent "$APP" SumatraPDF.zip`. For a `.dmg`, create it from the stapled app, then sign, notarize
 and staple the `.dmg` itself (`codesign --timestamp --sign "$ID" X.dmg`, `notarytool submit X.dmg --wait`,
 `stapler staple X.dmg`).

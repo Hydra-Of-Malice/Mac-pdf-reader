@@ -46,9 +46,9 @@ When committing work done with AI assistance, append the user prompt(s) that pro
 
 Code: `src/mac/` (Cocoa app `SumatraMac.mm`, plain-C bridge `SumatraMacEngine.*`, settings `MacPrefs.*`), `src/gui/mac/` (Cocoa implementations of portable GUI interfaces), `*_posix.cpp` (POSIX implementations, e.g. `src/base/File_posix.cpp`), bundle resources in `src/mac/Resources/`. Docs: `docs/mac/README.md`.
 
-- Build on a Mac: `bun cmd/build.ts -mac -dbg` (or `-rel` / `-asan`). It builds the deps, runs `test_util -for-ai`, builds `test_engines` and `out/mac-dbg64/SumatraPDF.app`, and packages it; see `docs/mac/BUILDING.md`. From Windows, `bun cmd/build.ts -mac-remote -branch <branch> -dbg` builds a pushed branch on the remote Mac (pushing needs the user's permission).
+- Build on a Mac: `bun cmd/build.ts -mac -dbg` (or `-rel` / `-asan`, `-arch arm64|x64|universal`). It builds the deps, runs `test_util -for-ai`, builds `test_engines` and `out/mac-<cfg>-<arch>/SumatraPDF.app`, and packages it; see `docs/mac/BUILDING.md`. Without a Mac: `bun cmd/build.ts -mac-core` builds and tests the portable core on Linux/WSL, `-mac-core -cross` compiles it for macOS with zig. Test the app with `-for-testing` (no session, temporary settings).
 - Cocoa / Objective-C code goes in `.mm` files, which must **not** include `base/Base.h` or other Sumatra headers (Apple headers clash, e.g. `Size`). They reach C++ only through plain-C bridge headers such as `src/mac/SumatraMacEngine.h`.
-- Platform suffixes: `_posix` for code shared by Unix-like targets, `_mac` for macOS-only; keep portable code in unsuffixed files. Add new mac sources to `MAC_APP_SOURCES` in `cmd/helper/mac-build.ts`.
+- Platform suffixes: `_posix` for code shared by Unix-like targets, `_mac` for macOS-only; keep portable code in unsuffixed files. `src/mac/*.mm` and `src/mac/*.cpp` are picked up automatically; `src/mac/*.cpp` must stay free of Cocoa (they are also built by `-mac-core`).
 - Keep the Windows build working: don't let `premake5.files.lua` pick up `*_posix.cpp`, `*_mac.cpp` or `src/mac/`, and check `bun cmd/build.ts -dbg` after touching shared code.
 - Document types and bundle metadata: `src/mac/Resources/Info.plist`; icon: `bun cmd/gen-mac-icon.ts`. A new library linked into the app needs a license entry in `cmd/helper/mac-bundle.ts` (the build fails without one).
 
