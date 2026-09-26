@@ -1,0 +1,100 @@
+name: mac
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mac-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  # Fast feedback: compile-check the Cocoa sources against the real macOS SDK.
+  cocoa-syntax:
+    name: Cocoa syntax (macOS SDK)
+    runs-on: macos-15
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: sw_vers && xcrun --show-sdk-version && clang --version
+
+      - name: Syntax-check Cocoa sources
+        run: |
+          flags=(-std=c++23 -fno-rtti -fno-exceptions -fsyntax-only -mmacosx-version-min=11.0 -DDEBUG
+                 -D__GXX_TYPEINFO_EQUALITY_INLINE=1 -Isrc -Iext/djvudec -Iext/msdes -Iext/mupdf/include
+                 -Iext/mupdf/generated -Wall -Wno-unused-function -Wno-unused-variable)
+          status=0
+          for f in $(ls src/mac/*.mm src/gui/mac/*.mm src/gui/mac/*.cpp src/mac/*.cpp 2>/dev/null | sort); do
+            echo "::group::$f"
+            lang=objective-c++
+            case "$f" in *.cpp) lang=c++ ;; esac
+            if ! clang++ -x "$lang" "${flags[@]}" "$f"; then
+              echo "::error file=$f::syntax check failed"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+
+  build:
+    name: Build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@v4
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Toolchain
+        run: sw_vers && uname -m && xcrun --show-sdk-version && clang --version && bun --version
+
+      - name: Portable core check
+        run: |
+          if bun cmd/build.ts -help 2>&1 | grep -q -- "-mac-core"; then
+            bun cmd/build.ts -mac-core
+          else
+            echo "-mac-core mode not available yet; skipping"
+          fi
+
+      - name: Debug build
+        run: |
+          if bun cmd/build.ts -help 2>&1 | grep -q -- "-mac"; then
+            bun cmd/build.ts -mac -dbg
+          else
+            bun -e 'import { buildMac } from "./cmd/helper/mac-build.ts"; await buildMac({ outDir: "out/mac-dbg64" });'
+          fi
+
+      - name: Release build
+        run: |
+          if bun cmd/build.ts -help 2>&1 | grep -q -- "-mac"; then
+            bun cmd/build.ts -mac -rel
+          else
+            bun -e 'import { buildMac } from "./cmd/helper/mac-build.ts"; await buildMac({ outDir: "out/mac-rel64", isRelease: true });'
+          fi
+
+      - name: List outputs
+        if: always()
+        run: find out -maxdepth 2 \( -name "*.app" -o -name "*.tar.gz" -o -name "*.dmg" -o -name "*.zip" -o -name "test_*" \) -print 2>/dev/null || true
+
+      - name: Upload app
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SumatraPDF-mac-${{ matrix.arch }}
+          path: |
+            out/**/*.tar.gz
+            out/**/*.dmg
+            out/**/*.zip
+          if-no-files-found: warn
+          retention-days: 14
