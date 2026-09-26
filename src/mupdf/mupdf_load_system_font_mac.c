@@ -146,9 +146,20 @@ static CTFontRef find_ct_font(const char* name, CTFontSymbolicTraits traits) {
     return styled;
 }
 
-static int ps_name_is(FT_Face face, const char* psName) {
-    const char* name = face ? FT_Get_Postscript_Name(face) : NULL;
-    return name && strcmp(name, psName) == 0;
+// FT_Get_Postscript_Name() can allocate, and mupdf's FreeType allocator takes
+// its fz_context from the FreeType lock: calling it unlocked crashed (fz_lock on
+// a NULL context) the first time a .ttc was searched, e.g. Helvetica.ttc as the
+// fallback for U+FFFD. Never called with the lock held: fz_new_font_from_buffer()
+// in load_ct_font() takes it too.
+static int ps_name_is(fz_context* ctx, FT_Face face, const char* psName) {
+    if (!face) {
+        return 0;
+    }
+    fz_ft_lock(ctx);
+    const char* name = FT_Get_Postscript_Name(face);
+    int ok = name && strcmp(name, psName) == 0;
+    fz_ft_unlock(ctx);
+    return ok;
 }
 
 // Loads the file behind ct as an fz_font; a collection (.ttc) is searched for
@@ -180,7 +191,7 @@ static fz_font* load_ct_font(fz_context* ctx, CTFontRef ct, const char* requeste
         font = fz_new_font_from_buffer(ctx, requested, buf, 0, 1);
         FT_Face face = (FT_Face)fz_font_ft_face(ctx, font);
         int nFaces = face ? (int)face->num_faces : 1;
-        for (int i = 1; i < nFaces && psName[0] && !ps_name_is(face, psName); i++) {
+        for (int i = 1; i < nFaces && psName[0] && !ps_name_is(ctx, face, psName); i++) {
             fz_drop_font(ctx, font);
             font = NULL;
             font = fz_new_font_from_buffer(ctx, requested, buf, i, 1);

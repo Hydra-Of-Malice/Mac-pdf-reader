@@ -60,15 +60,24 @@ signatures, PDF numbers) and runs the driver with `-fuzz` (every page rendered, 
 prints the stuck call's stack). Crashes, sanitizer reports and hangs are saved with a note under
 `tests/tmp/mac-fuzz/repro/`.
 
-- 2026-09-27, Linux ASan: 12,400 variants (seed 11) found 3 problems, all fixed and kept as `regress/` fixtures:
-  a debug-build abort in MuPDF's `fz_strncasecmp` for any 1-byte vs multi-byte character (EPUB / CHM link targets;
-  `ext/patches/0044`), and a damaged DjVu IW44 header making one page render take a minute (`ext/djvudec`, noted in
-  `ext/versions.txt`).
+- 2026-09-27, Linux ASan, 12,400 + 20,400 variants (seeds 11, 23), all fixed and kept as `regress/` fixtures:
+  - MuPDF `fz_strncasecmp` asserted (debug builds abort) on any 1-byte vs multi-byte character at the same position,
+    reached from EPUB / CHM link targets: `ext/patches/0044`.
+  - `ext/chmdec` LZX: a long Huffman code passing through a shorter code's entry used the entry as a node index and
+    read far out of bounds (damaged LZX-compressed CHM / LIT): local change noted in `ext/versions.txt`.
+  - `ext/djvudec`: a damaged IW44 header made one page render take a minute before its size was rejected: local
+    change noted in `ext/versions.txt`.
+- macOS CI (seed 1, non-gating step): a markdown file with invalid UTF-8 in bold text crashes on macOS only (not on
+  Linux); kept as `regress/md-invalid-utf8-macos-crash.md` while it's investigated. A DjVu variant claiming a
+  56142 × 36429 px page made the driver render 2 Gpx: `MacRenderPage()` now caps renders at 32 Mpx like the app's
+  layout.
 - Also hardened: `DocumentLayout` caps page pixel sizes and positions (a CBZ of pages claiming 2130706432 px
   overflowed the canvas), `ReaderModel` caps absurd mediaboxes, the bridge renders on the engine itself when it
   can't be copied (password-protected CBZ).
 - CI (non-gating): `bun tests/mac/fuzz-engine.ts --driver out/mac-core-dbg-clang/test_mac_engine --ci` (fixed seed,
-  3 variants of every fixture up to 40 KB). Longer runs: `--count 300 --seed <n> --jobs 24`.
+  3 variants of every fixture up to 40 KB). Longer runs: `--count 300 --seed <n> --jobs 12` (more jobs can exhaust
+  memory under ASan). Without a sanitizer the driver prints a stack on a crash (`backtrace()`), and with `-fuzz` a
+  40 s watchdog prints the stuck call's stack.
 
 ## Fixtures and tests
 

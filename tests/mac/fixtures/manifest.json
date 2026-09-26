@@ -69,6 +69,14 @@
     { "id": "pdf-empty", "format": "PDF", "path": "tests/mac/fixtures/empty.pdf", "expect": "fail" },
     { "id": "pdf-garbage", "format": "PDF", "path": "tests/mac/fixtures/garbage.pdf", "expect": "fail" },
     {
+      "id": "pdf-system-fonts",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/system-fonts.pdf",
+      "expect": "open",
+      "pages": 1,
+      "search": "okapi"
+    },
+    {
       "id": "pdf-large-2000",
       "format": "PDF",
       "path": "tests/tmp/mac-fixtures/large-2000.pdf",
@@ -406,6 +414,14 @@
       "minPages": 1,
       "search": "dugong",
       "links": [{ "kind": "url", "value": "https://www.sumatrapdfreader.org/" }]
+    },
+    {
+      "id": "html-scripts",
+      "format": "HTML",
+      "path": "tests/mac/fixtures/scripts.html",
+      "expect": "open",
+      "minPages": 1,
+      "search": "okapi"
     },
     {
       "id": "svg",

@@ -37,6 +37,8 @@ import {
   makeTiff,
   makeZip,
   patternPixels,
+  PdfWriter,
+  pdfStr,
   prng,
   type LitNode,
   type Rgb,
@@ -106,6 +108,48 @@ save("empty.pdf", new Uint8Array(0));
   const g = new Uint8Array(4096);
   for (let i = 0; i < g.length; i++) g[i] = Math.floor(rnd() * 256);
   save("garbage.pdf", g);
+}
+
+// Fonts named but not embedded. On macOS they're looked up through CoreText
+// (src/mupdf/mupdf_load_system_font_mac.c), most of these as a face inside a .ttc collection; elsewhere mupdf
+// substitutes its built-in fonts. Every other font has a /FontDescriptor: mupdf takes a different path for each.
+{
+  const w = new PdfWriter();
+  const catalog = w.alloc();
+  const pages = w.alloc();
+  const page = w.alloc();
+  const names = [
+    "HelveticaNeue",
+    "AvenirNext-Bold",
+    "Menlo-Regular",
+    "Futura-Medium",
+    "Arial,BoldItalic",
+    "GillSans-Italic",
+    "Optima-Regular",
+    "Palatino-Roman",
+    "NoSuchFont-Bold",
+  ];
+  const fonts = names.map((name, i) => {
+    const desc =
+      i % 2 === 0
+        ? ""
+        : ` /FontDescriptor ${w.add(
+            `<< /Type /FontDescriptor /FontName /${name} /Flags 32 /FontBBox [0 -200 1000 900] /ItalicAngle 0 ` +
+              `/Ascent 900 /Descent -200 /CapHeight 700 /StemV 80 >>`,
+          )} 0 R`;
+    return w.add(`<< /Type /Font /Subtype /TrueType /BaseFont /${name} /Encoding /WinAnsiEncoding${desc} >>`);
+  });
+  const text = names.map((name, i) => `BT /F${i} 16 Tf 72 ${720 - i * 30} Td ${pdfStr(`The okapi in ${name}`)} Tj ET`);
+  const content = w.add(w.stream("", text.join("\n")));
+  const fontRes = fonts.map((f, i) => `/F${i} ${f} 0 R`).join(" ");
+  w.set(
+    page,
+    `<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 612 792] /Resources << /Font << ${fontRes} >> >> ` +
+      `/Contents ${content} 0 R >>`,
+  );
+  w.set(pages, `<< /Type /Pages /Kids [${page} 0 R] /Count 1 >>`);
+  w.set(catalog, `<< /Type /Catalog /Pages ${pages} 0 R >>`);
+  save("system-fonts.pdf", w.build(catalog));
 }
 
 // ---- EPUB ----
@@ -475,6 +519,28 @@ save(
   "sample.html",
   `<!DOCTYPE html><html><head><title>HTML fixture</title></head><body><h1>HTML fixture</h1><p>The dugong grazes.</p><p><a href="https://www.sumatrapdfreader.org/">Visit</a></p></body></html>\n`,
 );
+// Characters the default fonts lack, in every style: each needs a fallback font per script, which on macOS comes
+// from CoreText (src/mupdf/mupdf_load_system_font_mac.c; most of them are faces inside a .ttc), plus families
+// named by the stylesheet
+{
+  const mixed = "Ελληνικά Русский עברית العربية हिन्दी ไทย 中文 日本語 ひらがな 한국어 ✓ → ☃ � \u{1F600}";
+  const styles = ["", "font-family: sans-serif", "font-family: serif", "font-family: monospace"];
+  const families = ["Helvetica Neue", "Menlo", "Avenir Next", "Optima", "No Such Font"];
+  const paras = [
+    ...styles.flatMap((s) =>
+      ["", "b", "i"].map((tag) => {
+        const t = tag ? `<${tag}>${mixed}</${tag}>` : mixed;
+        return `<p style="${s}">${t}</p>`;
+      }),
+    ),
+    ...families.map((f) => `<p style="font-family: '${f}'"><b>${f}</b>: the okapi ${mixed}</p>`),
+  ];
+  save(
+    "scripts.html",
+    `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Scripts fixture</title></head><body>` +
+      `<h1>Scripts fixture</h1><p>The okapi hides.</p>${paras.join("")}</body></html>\n`,
+  );
+}
 save(
   "sample.svg",
   `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300"><rect width="400" height="300" fill="#fff"/><circle cx="200" cy="150" r="100" fill="#c33"/><text x="40" y="40" font-size="24">koala</text></svg>\n`,

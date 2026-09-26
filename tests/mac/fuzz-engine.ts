@@ -3,8 +3,9 @@
 // errors and hangs. Reproducers are saved under tests/tmp/mac-fuzz/repro/. Builds nothing itself.
 //
 // usage: bun tests/mac/fuzz-engine.ts --driver <test_mac_engine> [--count <variants per fixture>] [--seed <n>]
-//          [--jobs <n>] [--timeout-ms <n>] [--budget-s <n>] [--only <id-substring>] [--ci]
-// --ci: the small, fixed, fast subset CI runs (seed 1, 3 variants of each small fixture).
+//          [--jobs <n>] [--timeout-ms <n>] [--budget-s <n>] [--only <id-substring>] [--max-size <bytes>] [--ci]
+// --ci: the small, fixed, fast subset CI runs (seed 1, 3 variants of each fixture up to 40 KB).
+// --max-size: skip bigger fixtures (under ASan each job on a big book can take gigabytes).
 // A given --seed / --count always produces the same variants. Exit code 1 if anything crashed or hung.
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -35,6 +36,7 @@ interface Outcome {
   ms: number;
   log?: string;
   opened?: boolean;
+  repro?: string;
 }
 
 const repoRoot = join(import.meta.dir, "..", "..");
@@ -55,6 +57,7 @@ function parseArgs() {
     budgetS: 0,
     only: "",
     ci: false,
+    maxSize: 0,
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -67,12 +70,14 @@ function parseArgs() {
     else if (a === "--budget-s") o.budgetS = Number(next());
     else if (a === "--only") o.only = next();
     else if (a === "--ci") o.ci = true;
+    else if (a === "--max-size") o.maxSize = Number(next());
     else {
       console.error(`unknown argument: ${a}`);
       process.exit(2);
     }
   }
   if (o.ci) {
+    o.maxSize = kCiMaxFixtureSize;
     o.count = 3;
     o.seed = 1;
     o.jobs = Math.min(o.jobs, 4);
@@ -233,6 +238,19 @@ function mutate(data: Uint8Array, rnd: () => number): [Uint8Array, string[]] {
 
 //--- running
 
+// The crashing function from the backtrace the driver prints on a fatal signal (non-sanitizer builds), for
+// grouping: macOS "3   test_mac_engine   0x0000000105 fz_lock + 27", glibc "./test_mac_engine(fz_lock+0x1b) [0x...]"
+function crashFrame(lines: string[]): string {
+  for (const l of lines) {
+    const m = /^\s*\d+\s+(\S+)\s+0x[0-9a-f]+\s+(\S+)/.exec(l) ?? /^(\S+)\((\w+)\+0x[0-9a-f]+\)\s*\[/.exec(l);
+    if (!m) continue;
+    const [, module, fn] = m;
+    if (/OnCrash|_sigtramp|__restore_rt/.test(fn!) || /libsystem_|libc\.so|libpthread/.test(module!)) continue;
+    return fn!;
+  }
+  return "";
+}
+
 async function runDriver(driver: string, v: Variant, timeoutMs: number): Promise<Outcome> {
   const start = performance.now();
   const args = [v.file, "-fuzz"];
@@ -274,10 +292,11 @@ async function runDriver(driver: string, v: Variant, timeoutMs: number): Promise
     return { variant: v, kind: "sanitizer", detail: `${san.trim()} | ${frame?.trim() ?? ""}`, stage, ms, log };
   }
   if (code !== 0) {
+    const frame = crashFrame(lines);
     return {
       variant: v,
       kind: "crash",
-      detail: `exit ${code}${proc.signalCode ? ` (${proc.signalCode})` : ""}`,
+      detail: `exit ${code}${proc.signalCode ? ` (${proc.signalCode})` : ""}${frame ? ` | ${frame}` : ""}`,
       stage,
       ms,
       log,
@@ -319,7 +338,7 @@ async function main() {
     // image folders etc.: only single files are mutated
     if (!existsSync(abs) || !statSync(abs).isFile()) continue;
     const data = new Uint8Array(readFileSync(abs));
-    if (data.length === 0 || (o.ci && data.length > kCiMaxFixtureSize)) continue;
+    if (data.length === 0 || (o.maxSize > 0 && data.length > o.maxSize)) continue;
     seen.add(f.path);
     for (let i = 0; i < o.count; i++) {
       const rnd = prng((o.seed * 1000003) ^ hashStr(f.path) ^ Math.imul(i + 1, 2654435761));
@@ -347,6 +366,7 @@ async function main() {
       outcomes.push(res);
       if (res.kind !== "ok") {
         const dst = saveRepro(res, res.log ?? "");
+        res.repro = dst;
         console.log(
           `${res.kind.toUpperCase()} ${v.fixture.id}#${v.index} [${v.mutations.join(", ")}] stage '${res.stage}': ${res.detail}\n  -> ${dst}`,
         );
@@ -364,18 +384,19 @@ async function main() {
     if (r.kind !== "ok") s.bad++;
     byFormat.set(r.variant.fixture.format, s);
   }
-  console.log("\nformat      runs  crashes+hangs");
+  console.log("\nformat      runs  opened  crashes+hangs");
   for (const [fmt, s] of byFormat) {
     console.log(`${fmt.padEnd(11)} ${String(s.runs).padEnd(5)} ${String(s.opened).padEnd(7)} ${s.bad}`);
   }
   const bad = outcomes.filter((r) => r.kind !== "ok");
   const groups = new Map<string, Outcome[]>();
   for (const r of bad) {
-    const key = `${r.kind} | ${r.stage} | ${r.detail.replace(/0x[0-9a-f]+/g, "")}`;
+    const key = `${r.kind} | ${r.stage} | ${r.detail.replace(/0x[0-9a-f]+| \+ \d+/g, "")}`;
     groups.set(key, [...(groups.get(key) ?? []), r]);
   }
   if (groups.size > 0) console.log("\nunique problems:");
-  for (const [key, rs] of groups) console.log(`  ${rs.length}x ${key}\n     e.g. ${rs[0]!.variant.file}`);
+  for (const [key, rs] of groups)
+    console.log(`  ${rs.length}x ${key}\n     e.g. ${rs[0]!.repro ?? rs[0]!.variant.file}`);
   const secs = ((performance.now() - startAll) / 1000).toFixed(0);
   const budgetNote = stoppedByBudget ? ` (stopped by the ${o.budgetS} s budget)` : "";
   console.log(`\n${outcomes.length} runs in ${secs} s${budgetNote}: ${bad.length} crashes / hangs`);
