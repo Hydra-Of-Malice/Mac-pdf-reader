@@ -26,6 +26,7 @@ struct SumatraTestState {
     bool findPending;
     int findPage; // page of the current find hit, 0 if none
     bool hasSelection;
+    bool findBarVisible;
     bool sidebarVisible;
     int thumbnails; // sidebar thumbnails on screen with an image
     int lastOpenError; // MacOpenError of the last failed open

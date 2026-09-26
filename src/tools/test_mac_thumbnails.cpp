@@ -216,8 +216,43 @@ static void WaitIdle(void* thumbs) {
     }
 }
 
-// Opaque, within the box and touching it on one side, and not a single color.
-static bool CheckImage(const MacThumbImage& img, int dx, int dy) {
+// MacThumbnails.cpp renders at most this zoom (kMaxThumbZoom), so tiny pages
+// (e.g. the 1x1 px images of tests/issue-1201.cbz) get a thumbnail smaller than
+// the requested box
+constexpr float kMaxThumbZoom = 64.0f;
+
+struct ThumbBox {
+    int dx = 0;
+    int dy = 0;
+    bool clamped = false; // the page is tiny: the thumbnail may be a single color
+};
+
+// The box a thumbnail of pageNo, requested at dx * dy, fits into and touches.
+static ThumbBox ExpectedBox(EngineBase* engine, int pageNo, int rotation, int dx, int dy) {
+    ThumbBox box{dx, dy, false};
+    RectF mb = engine->PageMediabox(pageNo);
+    float pageDx = mb.dx;
+    float pageDy = mb.dy;
+    if (rotation == 90 || rotation == 270) {
+        std::swap(pageDx, pageDy);
+    }
+    if (pageDx <= 0 || pageDy <= 0) {
+        return box;
+    }
+    float zoom = std::min((float)dx / pageDx, (float)dy / pageDy);
+    if (zoom > kMaxThumbZoom) {
+        box.dx = (int)(pageDx * kMaxThumbZoom + 0.5f);
+        box.dy = (int)(pageDy * kMaxThumbZoom + 0.5f);
+        box.clamped = true;
+    }
+    return box;
+}
+
+// Opaque, within the box and touching it on one side, and (unless the page is
+// tiny) not a single color.
+static bool CheckImage(const MacThumbImage& img, ThumbBox box) {
+    int dx = box.dx;
+    int dy = box.dy;
     if (!img.data || img.width <= 0 || img.height <= 0 || img.stride < img.width * 4) {
         return false;
     }
@@ -239,7 +274,7 @@ static bool CheckImage(const MacThumbImage& img, int dx, int dy) {
             }
         }
     }
-    return varied;
+    return varied || box.clamped;
 }
 
 //--- tests for any engine
@@ -267,7 +302,7 @@ static void TestBasic(OpenFn open, Str path) {
         MacThumbImage img = {};
         CHECK(MacThumbsGet(thumbs, &doc, p, 0, kThumbDx, kThumbDy, &img));
         CHECK(img.exact);
-        CHECK(CheckImage(img, kThumbDx, kThumbDy));
+        CHECK(CheckImage(img, ExpectedBox(doc.engine, p, 0, kThumbDx, kThumbDy)));
         MacThumbsReleaseImage(img.ref);
     }
     CHECK(MacThumbsCacheBytes(thumbs) > 0);
@@ -334,10 +369,11 @@ static void TestCacheBound(OpenFn open, Str path) {
         WaitIdle(thumbs);
         CHECK(MacThumbsCacheBytes(thumbs) <= budget);
     }
-    CHECK(held.data && CheckImage(held, kThumbDx, kThumbDy));
+    ThumbBox heldBox = ExpectedBox(doc.engine, 1, 0, kThumbDx, kThumbDy);
+    CHECK(held.data && CheckImage(held, heldBox));
     MacThumbsDestroy(thumbs);
     // still readable after eviction and after the service is gone
-    CHECK(held.data && CheckImage(held, kThumbDx, kThumbDy));
+    CHECK(held.data && CheckImage(held, heldBox));
     MacThumbsReleaseImage(held.ref);
     doc.engine->Release();
 }

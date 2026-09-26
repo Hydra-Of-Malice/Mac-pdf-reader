@@ -48,6 +48,61 @@ FileEBookUI* GetFileEBookUI(Str) {
     return nullptr;
 }
 
+//--- threads get enough stack (Base_posix.cpp StartThread)
+
+constexpr size_t kMinThreadStack = 4 * 1024 * 1024;
+constexpr int kRecursionDepth = 2048; // * ~1 KB frame = 2 MB, over macOS's 512 KB default
+
+struct StackCheck {
+    AtomicInt done = 0;
+    size_t stackSize = 0;
+    int recursionSum = 0;
+};
+
+static size_t CurrentThreadStackSize() {
+#if OS_MAC
+    return pthread_get_stacksize_np(pthread_self());
+#else
+    pthread_attr_t attr;
+    size_t size = 0;
+    if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+        pthread_attr_getstacksize(&attr, &size);
+        pthread_attr_destroy(&attr);
+    }
+    return size;
+#endif
+}
+
+// uses ~1 KB of stack per level; volatile so the frames aren't optimized away
+static int Recurse(int depth) {
+    volatile char frame[1000];
+    frame[0] = (char)depth;
+    frame[sizeof(frame) - 1] = 1;
+    if (depth == 0) {
+        return frame[sizeof(frame) - 1];
+    }
+    return frame[sizeof(frame) - 1] + Recurse(depth - 1);
+}
+
+static void StackCheckThread(StackCheck* check) {
+    check->stackSize = CurrentThreadStackSize();
+    check->recursionSum = Recurse(kRecursionDepth);
+    AtomicIntSet(&check->done, 1);
+}
+
+static void ThreadStackTest() {
+    StackCheck check;
+    ThreadHandle h = StartThread(MkFunc0(StackCheckThread, &check), StrL("stack-check"));
+    utassert(h != nullptr);
+    for (int waited = 0; waited < 10000 && !AtomicIntGet(&check.done); waited++) {
+        SleepInMs(1);
+    }
+    SafeCloseThreadHandle(&h);
+    utassert(AtomicIntGet(&check.done) == 1);
+    utassert(check.stackSize >= kMinThreadStack);
+    utassert(check.recursionSum == kRecursionDepth + 1);
+}
+
 int main(int argc, char** argv) {
     bool forAi = false;
     for (int i = 1; i < argc; i++) {
@@ -85,6 +140,7 @@ int main(int argc, char** argv) {
     PdfDarkModeOklab_UnitTests();
     SimpleLogTest();
     TextSelection_UnitTests();
+    ThreadStackTest();
 
     int res = utassert_print_results();
     DestroyTempArena();

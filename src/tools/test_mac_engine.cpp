@@ -5,7 +5,7 @@
 // exactly like SumatraMac.mm (plain C API, no base/Base.h) and prints one JSON object per run.
 // Driven by tests/mac/run-engine-tests.ts; runs on macOS and on Linux (-mac-core builds).
 //
-// usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>]
+// usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>] [-render-all]
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +20,7 @@ constexpr int kAsyncPages = 8;
 constexpr int kLinkScanPages = 3;
 constexpr int kLinkScanStep = 4;
 constexpr int kMaxLinks = 16;
+constexpr int kRenderAllMax = 64;
 constexpr int kWaitMs = 30000;
 constexpr float kZoomFitWidth = -2.f;
 constexpr char kMissingWord[] = "xq7zzyNotInAnyFixture";
@@ -234,13 +235,19 @@ static bool CheckRender(void* doc, int nPages) {
     return first.ok;
 }
 
-// request pages through the async PageRenderService and wait for them like the app does;
-// a page that failed to render synchronously won't show up, so don't wait long for it
+// Request pages through the async PageRenderService and wait for them like the app does.
+// Only pages that render synchronously are waited for: a page the engine can't render
+// never shows up, and waiting for it would look like a hang.
 static void CheckAsyncRender(void* doc, int nPages, bool page1Renders) {
     Stage("render-async");
-    const double waitMs = page1Renders ? kWaitMs : kWaitMs / 10;
     int n = nPages < kAsyncPages ? nPages : kAsyncPages;
     const float zoom = 0.75f;
+    bool expected[kAsyncPages + 1] = {};
+    int nExpected = 0;
+    for (int pageNo = 1; pageNo <= n; pageNo++) {
+        expected[pageNo] = RenderSync(doc, pageNo, zoom, 0).ok;
+        nExpected += expected[pageNo] ? 1 : 0;
+    }
     for (int pageNo = 1; pageNo <= n; pageNo++) {
         MacRequestPage(doc, pageNo, zoom, 0, pageNo == 1 ? 0 : (pageNo < 4 ? 1 : 2));
     }
@@ -248,9 +255,9 @@ static void CheckAsyncRender(void* doc, int nPages, bool page1Renders) {
     int nGot = 0;
     RenderStats first;
     double start = NowMs();
-    while (nGot < n && NowMs() - start < waitMs) {
+    while (nGot < nExpected && NowMs() - start < kWaitMs) {
         for (int pageNo = 1; pageNo <= n; pageNo++) {
-            if (got[pageNo]) {
+            if (got[pageNo] || !expected[pageNo]) {
                 continue;
             }
             MacRenderedPage page{};
@@ -263,25 +270,27 @@ static void CheckAsyncRender(void* doc, int nPages, bool page1Renders) {
             }
             MacFreeRenderedPage(&page);
         }
-        if (nGot < n) {
+        if (nGot < nExpected) {
             SleepMs(5);
         }
     }
     Key("async");
-    printf("{\"requested\":%d,\"copied\":%d,\"callbacks\":%d,\"ms\":%.1f,\"page1Ink\":%.4f}", n, nGot,
-           __atomic_load_n(&gPagesReady, __ATOMIC_SEQ_CST), NowMs() - start, first.inkRatio);
+    printf("{\"requested\":%d,\"expected\":%d,\"copied\":%d,\"callbacks\":%d,\"ms\":%.1f,\"page1Ink\":%.4f}", n,
+           nExpected, nGot, __atomic_load_n(&gPagesReady, __ATOMIC_SEQ_CST), NowMs() - start, first.inkRatio);
 
     // a new generation drops queued requests; requesting again must still work
     MacResetRenderer(doc);
-    MacRequestPage(doc, 1, 0.5f, 0, 0);
     bool again = false;
-    start = NowMs();
-    while (!again && NowMs() - start < waitMs) {
-        MacRenderedPage page{};
-        again = MacCopyRenderedPage(doc, 1, 0.5f, 0, &page);
-        MacFreeRenderedPage(&page);
-        if (!again) {
-            SleepMs(5);
+    if (page1Renders) {
+        MacRequestPage(doc, 1, 0.5f, 0, 0);
+        start = NowMs();
+        while (!again && NowMs() - start < kWaitMs) {
+            MacRenderedPage page{};
+            again = MacCopyRenderedPage(doc, 1, 0.5f, 0, &page);
+            MacFreeRenderedPage(&page);
+            if (!again) {
+                SleepMs(5);
+            }
         }
     }
     KeyBool("asyncAfterReset", again);
@@ -475,6 +484,21 @@ static void CheckProperties(void* doc) {
     putchar('}');
 }
 
+// every page once (up to kRenderAllMax), for fuzzing: damage often only shows on later pages
+static void RenderAll(void* doc) {
+    Stage("render-all");
+    int n = MacPageCount(doc);
+    int nOk = 0;
+    int nInk = 0;
+    for (int pageNo = 1; pageNo <= n && pageNo <= kRenderAllMax; pageNo++) {
+        RenderStats st = RenderSync(doc, pageNo, 0.4f, (pageNo % 4) * 90);
+        nOk += st.ok ? 1 : 0;
+        nInk += st.inkRatio > 0 ? 1 : 0;
+    }
+    Key("renderAll");
+    printf("{\"pages\":%d,\"ok\":%d,\"withInk\":%d}", n, nOk, nInk);
+}
+
 // many pending renders, a generation reset, a cancel, then close while the
 // renderer is still busy
 static void Stress(void* doc, int nPages, int nRequests) {
@@ -498,7 +522,7 @@ static void Stress(void* doc, int nPages, int nRequests) {
 }
 
 static void Usage() {
-    fprintf(stderr, "usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>]\n");
+    fprintf(stderr, "usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>] [-render-all]\n");
 }
 
 int main(int argc, char** argv) {
@@ -506,6 +530,7 @@ int main(int argc, char** argv) {
     const char* search = nullptr;
     char* passwordList = nullptr;
     int stress = 0;
+    bool renderAll = false;
     for (int i = 1; i < argc; i++) {
         bool hasArg = i + 1 < argc;
         if (!strcmp(argv[i], "-password") && hasArg) {
@@ -514,6 +539,8 @@ int main(int argc, char** argv) {
             search = argv[++i];
         } else if (!strcmp(argv[i], "-stress") && hasArg) {
             stress = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "-render-all")) {
+            renderAll = true;
         } else if (argv[i][0] != '-' && !path) {
             path = argv[i];
         } else {
@@ -559,6 +586,9 @@ int main(int argc, char** argv) {
         CheckToc(doc);
         CheckLinks(doc, nPages);
         CheckProperties(doc);
+        if (renderAll) {
+            RenderAll(doc);
+        }
         if (stress > 0) {
             Stress(doc, nPages, stress);
         }

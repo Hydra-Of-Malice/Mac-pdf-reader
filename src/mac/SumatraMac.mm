@@ -40,6 +40,7 @@ static const NSUInteger kMaxClosedTabs = 10;
 static const NSUInteger kMaxHistory = 50;
 static const NSInteger kTabMenuSeparatorTag = 7001;
 static const NSUInteger kMaxTabLabelChars = 24;
+static const CGFloat kFindBarHeight = 30;
 
 static const CGFloat kSidebarDefaultWidth = 220;
 static const CGFloat kSidebarMinWidth = 140;
@@ -477,6 +478,11 @@ static void FindDone(void* context, void* document, int token, bool found) {
     NSSearchField* _searchField;
     NSProgressIndicator* _findSpinner;
     NSTextField* _findStatus;
+    NSView* _documentPane; // find bar + scroll view
+    NSView* _findBar;      // used when the toolbar's search field isn't on screen
+    NSSearchField* _findBarField;
+    NSProgressIndicator* _findBarSpinner;
+    NSTextField* _findBarStatus;
     NSMenu* _recentMenu;
     NSMenu* _bookmarksMenu;
     NSMenu* _windowMenu;
@@ -787,8 +793,14 @@ static void FindDone(void* context, void* document, int token, bool found) {
     [center addObserver:self selector:@selector(clipBoundsChanged:) name:NSViewBoundsDidChangeNotification object:clip];
     [center addObserver:self selector:@selector(clipFrameChanged:) name:NSViewFrameDidChangeNotification object:clip];
 
+    // document pane: the find bar (hidden) above the scroll view
+    _documentPane = [[NSView alloc] initWithFrame:scrollFrame];
+    [_documentPane setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [_documentPane addSubview:_scrollView];
+    [self createFindBar];
+
     [_splitView addSubview:sidebarView];
-    [_splitView addSubview:_scrollView];
+    [_splitView addSubview:_documentPane];
     [content addSubview:_splitView];
     [self setSidebarVisible:_sidebarVisible];
 
@@ -851,6 +863,11 @@ static void FindDone(void* context, void* document, int token, bool found) {
     [_searchField release];
     [_findSpinner release];
     [_findStatus release];
+    [_documentPane release];
+    [_findBar release];
+    [_findBarField release];
+    [_findBarSpinner release];
+    [_findBarStatus release];
     [_tabs release];
     [_closedPaths release];
     [_pendingOpen release];
@@ -1265,6 +1282,7 @@ static void FindDone(void* context, void* document, int token, bool found) {
     [_pageField setEnabled:has];
     [_pageCountLabel setStringValue:has ? [NSString stringWithFormat:@"of %d", tab.pageCount] : @""];
     [_searchField setEnabled:has];
+    [_findBarField setEnabled:has];
     NSString* subtitle = has ? [NSString stringWithFormat:@"Page %d of %d", tab.currentPage, tab.pageCount] : @"";
     if ([_window respondsToSelector:@selector(setSubtitle:)]) {
         [_window performSelector:@selector(setSubtitle:) withObject:subtitle];
@@ -1734,6 +1752,25 @@ static BOOL SwapsAxes(int rotation) {
         return;
     }
     NSRect visible = [[_scrollView contentView] bounds];
+
+    // the current page shown the way -showPage: shows it (after go to page, or
+    // with all pages in view): that page is what the user is on
+    int current = tab.currentPage;
+    if (current >= 1 && current <= layout.pageCount && layout.pages[current - 1].shown) {
+        MacLayoutPage* cp = &layout.pages[current - 1];
+        NSRect f = NSMakeRect(cp->x, cp->y, cp->width, cp->height);
+        CGFloat maxY = MAX(0.0, layout.canvasHeight - visible.size.height);
+        CGFloat topY = floor(MAX(0.0, MIN(maxY, f.origin.y - kPageTopGap)));
+        if (NSIntersectsRect(f, visible) && fabs(visible.origin.y - topY) < 1.0 && f.origin.x >= visible.origin.x) {
+            tab.scrollPage = current;
+            tab.scrollX = -1;
+            tab.scrollY = -1;
+            tab.hasScrollState = YES;
+            MacFreeDocumentLayout(&layout);
+            return;
+        }
+    }
+
     for (int i = 0; i < layout.pageCount; i++) {
         MacLayoutPage* lp = &layout.pages[i];
         NSRect f = NSMakeRect(lp->x, lp->y, lp->width, lp->height);
@@ -2064,6 +2101,7 @@ static BOOL SwapsAxes(int rotation) {
     s.hasTab = tab != nil;
     s.loading = tab && !tab.document;
     s.lastOpenError = _lastOpenError;
+    s.findBarVisible = ![_findBar isHidden];
     s.sidebarVisible = _sidebarVisible;
     s.thumbnails = _sidebarVisible ? [_sidebar visibleThumbnailCount] : 0;
     if (!tab.document) {
@@ -2256,6 +2294,7 @@ static NSArray* ToolbarAllowedItems() {
     [item setView:container];
     [item setMinSize:NSMakeSize(118, 24)];
     [item setMaxSize:NSMakeSize(118, 24)];
+    [item setVisibilityPriority:NSToolbarItemVisibilityPriorityHigh];
     if (inserted) {
         [_pageField release];
         _pageField = [field retain];
@@ -2314,6 +2353,8 @@ static NSArray* ToolbarAllowedItems() {
     [item setView:container];
     [item setMinSize:NSMakeSize(300, 24)];
     [item setMaxSize:NSMakeSize(300, 24)];
+    // narrow windows move other items into the overflow menu first
+    [item setVisibilityPriority:NSToolbarItemVisibilityPriorityHigh];
     if (inserted) {
         [_searchField release];
         _searchField = [field retain];
@@ -2450,8 +2491,9 @@ static NSArray* ToolbarAllowedItems() {
     if (command != @selector(cancelOperation:)) {
         return NO;
     }
-    if (control == _searchField) {
+    if (control == _searchField || control == _findBarField) {
         [self documentCancel];
+        [self hideFindBar:nil];
         [_window makeFirstResponder:_documentView];
         return YES;
     }
@@ -2468,36 +2510,105 @@ static NSArray* ToolbarAllowedItems() {
 - (void)setFindBusy:(BOOL)busy {
     if (busy) {
         [_findSpinner startAnimation:nil];
+        [_findBarSpinner startAnimation:nil];
     } else {
         [_findSpinner stopAnimation:nil];
+        [_findBarSpinner stopAnimation:nil];
     }
 }
 
 - (void)showFindStatus:(NSString*)status {
+    NSColor* color = status ? [NSColor systemRedColor] : [NSColor secondaryLabelColor];
     [_findStatus setStringValue:status ?: @""];
-    [_findStatus setTextColor:status ? [NSColor systemRedColor] : [NSColor secondaryLabelColor]];
+    [_findStatus setTextColor:color];
+    [_findBarStatus setStringValue:status ?: @""];
+    [_findBarStatus setTextColor:color];
     if ([status length] > 0) {
-        NSAccessibilityPostNotificationWithUserInfo(_findStatus ?: (id)_window,
-                                                    NSAccessibilityAnnouncementRequestedNotification,
+        id element = [_findBar isHidden] ? (_findStatus ?: (id)_window) : (id)_findBarStatus;
+        NSAccessibilityPostNotificationWithUserInfo(element, NSAccessibilityAnnouncementRequestedNotification,
                                                     @{NSAccessibilityAnnouncementKey : status});
     }
 }
 
-// Makes sure the toolbar shows the search field (the user may have removed it).
-- (BOOL)revealSearchField {
-    if (![_toolbar isVisible]) {
-        [_toolbar setVisible:YES];
+// The toolbar's search field is on screen (not hidden, removed or in the overflow menu).
+- (BOOL)toolbarSearchFieldVisible {
+    return [_toolbar isVisible] && _searchField && [_searchField window] == _window &&
+           ![_searchField isHiddenOrHasHiddenAncestor];
+}
+
+// Find bar above the document: ⌘F uses it when the toolbar can't show its search field.
+- (void)createFindBar {
+    NSRect bounds = [_documentPane bounds];
+    _findBar = [[NSView alloc] initWithFrame:NSMakeRect(0, bounds.size.height - kFindBarHeight, bounds.size.width,
+                                                        kFindBarHeight)];
+    [_findBar setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+    [_findBar setHidden:YES];
+
+    _findBarField = [[NSSearchField alloc] initWithFrame:NSMakeRect(8, 4, 220, 22)];
+    [_findBarField setPlaceholderString:@"Find in document"];
+    [[_findBarField cell] setSendsWholeSearchString:YES];
+    [_findBarField setTarget:self];
+    [_findBarField setAction:@selector(searchFieldAction:)];
+    [_findBarField setDelegate:(id)self];
+    [_findBarField setAccessibilityLabel:@"Search in document"];
+
+    NSButton* prev = [NSButton buttonWithImage:ToolbarImage(@"chevron.up", @"Previous match", @"▲")
+                                        target:self
+                                        action:@selector(findPrevious:)];
+    [prev setFrame:NSMakeRect(234, 3, 30, 24)];
+    [prev setToolTip:@"Previous match (⇧⌘G)"];
+    NSButton* next = [NSButton buttonWithImage:ToolbarImage(@"chevron.down", @"Next match", @"▼")
+                                        target:self
+                                        action:@selector(findNext:)];
+    [next setFrame:NSMakeRect(266, 3, 30, 24)];
+    [next setToolTip:@"Next match (⌘G)"];
+
+    _findBarSpinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(302, 7, 16, 16)];
+    [_findBarSpinner setStyle:NSProgressIndicatorStyleSpinning];
+    [_findBarSpinner setControlSize:NSControlSizeSmall];
+    [_findBarSpinner setDisplayedWhenStopped:NO];
+    [_findBarSpinner setAccessibilityLabel:@"Searching"];
+    _findBarStatus = [[self makeLabel:NSMakeRect(322, 7, 90, 16)] retain];
+    [_findBarStatus setAccessibilityLabel:@"Search status"];
+
+    NSButton* done = [NSButton buttonWithTitle:@"Done" target:self action:@selector(hideFindBar:)];
+    [done setFrame:NSMakeRect(bounds.size.width - 76, 3, 68, 24)];
+    [done setAutoresizingMask:NSViewMinXMargin];
+
+    for (NSView* view in @[ _findBarField, prev, next, _findBarSpinner, _findBarStatus, done ]) {
+        [_findBar addSubview:view];
     }
-    BOOL present = NO;
-    for (NSToolbarItem* item in [_toolbar items]) {
-        if ([[item itemIdentifier] isEqualToString:kToolbarSearch]) {
-            present = YES;
-        }
+    [_documentPane addSubview:_findBar];
+}
+
+- (void)layoutDocumentPane {
+    NSRect bounds = [_documentPane bounds];
+    CGFloat barHeight = [_findBar isHidden] ? 0 : kFindBarHeight;
+    [_findBar setFrame:NSMakeRect(0, bounds.size.height - kFindBarHeight, bounds.size.width, kFindBarHeight)];
+    [_scrollView setFrame:NSMakeRect(0, 0, bounds.size.width, MAX(0.0, bounds.size.height - barHeight))];
+}
+
+- (void)showFindBar {
+    if ([_findBar isHidden]) {
+        [_findBar setHidden:NO];
+        [self layoutDocumentPane];
     }
-    if (!present) {
-        [_toolbar insertItemWithItemIdentifier:kToolbarSearch atIndex:(NSInteger)[[_toolbar items] count]];
+    [_findBarField setStringValue:_findText ?: @""];
+    [_window makeFirstResponder:_findBarField];
+    [_findBarField selectText:nil];
+}
+
+- (IBAction)hideFindBar:(id)sender {
+    (void)sender;
+    if ([_findBar isHidden]) {
+        return;
     }
-    return _searchField && [_searchField window] == _window;
+    BOOL hadFocus = [[_findBarField currentEditor] isEqual:[_window firstResponder]];
+    [_findBar setHidden:YES];
+    [self layoutDocumentPane];
+    if (hadFocus || sender) {
+        [_window makeFirstResponder:_documentView];
+    }
 }
 
 - (void)startFind:(NSString*)text direction:(MacFindDirection)direction {
@@ -2578,8 +2689,8 @@ static NSArray* ToolbarAllowedItems() {
 }
 
 - (IBAction)searchFieldAction:(id)sender {
-    (void)sender;
-    NSString* text = [_searchField stringValue];
+    NSSearchField* field = sender == _findBarField ? _findBarField : _searchField;
+    NSString* text = [field stringValue];
     if ([text length] == 0) {
         [self documentCancel];
         [_findText release];
@@ -2590,33 +2701,17 @@ static NSArray* ToolbarAllowedItems() {
     [self startFind:text direction:backward ? MacFindDirection::Backward : MacFindDirection::Forward];
 }
 
-- (void)runFindDialog {
-    NSAlert* alert = [[[NSAlert alloc] init] autorelease];
-    [alert setMessageText:@"Find in document"];
-    [alert addButtonWithTitle:@"Find"];
-    [alert addButtonWithTitle:@"Cancel"];
-    NSTextField* input = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)] autorelease];
-    [input setStringValue:_findText ?: @""];
-    [input setAccessibilityLabel:@"Search text"];
-    [alert setAccessoryView:input];
-    [[alert window] setInitialFirstResponder:input];
-    [self presentAlert:alert
-            completion:^(NSModalResponse response) {
-              if (response == NSAlertFirstButtonReturn && [[input stringValue] length] > 0) {
-                  [self startFind:[input stringValue] direction:MacFindDirection::Forward];
-              }
-            }];
-}
-
+// ⌘F: the toolbar's search field when it's on screen, else the find bar.
 - (IBAction)findDocument:(id)sender {
     (void)sender;
     if (!_active) {
         return;
     }
-    if (![self revealSearchField]) {
-        [self runFindDialog];
+    if (![self toolbarSearchFieldVisible]) {
+        [self showFindBar];
         return;
     }
+    [self hideFindBar:nil];
     [_window makeFirstResponder:_searchField];
     [_searchField selectText:nil];
 }
@@ -2659,6 +2754,7 @@ static NSArray* ToolbarAllowedItems() {
     [_findText release];
     _findText = [text copy];
     [_searchField setStringValue:text];
+    [_findBarField setStringValue:text];
 }
 
 #pragma mark - Zoom, rotation, view mode

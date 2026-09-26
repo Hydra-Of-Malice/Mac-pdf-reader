@@ -554,6 +554,40 @@ static inline int ClampInt(int v, int minVal, int maxVal) {
     return std::min(std::max(v, minVal), maxVal);
 }
 
+#if !OS_WIN
+// The srcRc part of src scaled to dx * dy with mupdf's filtered scaler (the
+// Windows build uses GDI+ bicubic). Borrows src's pixels; nullptr on failure.
+static Pixmap* ScalePixmapFz(fz_context* ctx, const Pixmap* src, Rect srcRc, int dx, int dy) {
+    int bpp = PixmapBytesPerPixel(src->format);
+    srcRc = srcRc.Intersect(Rect(0, 0, src->width, src->height));
+    if (bpp == 0 || srcRc.IsEmpty() || dx <= 0 || dy <= 0) {
+        return nullptr;
+    }
+    bool isRgb = src->format == PixmapFormat::RGBA8;
+    int alpha = bpp == 4 ? 1 : 0;
+    u8* samples = src->data + ((size_t)srcRc.y * src->stride) + ((size_t)srcRc.x * bpp);
+    fz_pixmap* view = nullptr;
+    fz_pixmap* scaled = nullptr;
+    Pixmap* res = nullptr;
+    fz_var(view);
+    fz_var(scaled);
+    fz_try(ctx) {
+        fz_colorspace* cs = isRgb ? fz_device_rgb(ctx) : fz_device_bgr(ctx);
+        view = fz_new_pixmap_with_data(ctx, cs, srcRc.dx, srcRc.dy, nullptr, alpha, src->stride, samples);
+        scaled = fz_scale_pixmap(ctx, view, 0, 0, (float)dx, (float)dy, nullptr);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+    }
+    if (scaled && scaled->w == dx && scaled->h == dy) {
+        res = FzPixmapToPixmap(ctx, scaled);
+    }
+    fz_drop_pixmap(ctx, scaled);
+    fz_drop_pixmap(ctx, view);
+    return res;
+}
+#endif
+
 static void GetPixmapPixelBgra(const Pixmap* pixmap, int x, int y, u8* bgra) {
     int bpp = PixmapBytesPerPixel(pixmap->format);
     const u8* src = pixmap->data + ((size_t)y * pixmap->stride) + ((size_t)x * bpp);
@@ -888,6 +922,18 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
                 delete dstBmp;
                 delete srcBmp;
             }
+        }
+    }
+#else
+    if (NormalizeRotation(rotation) == 0 && screen.dx > 0 && screen.dy > 0) {
+        Rect srcRc = ToRect(pageRc);
+        Pixmap* result = ScalePixmapFz(Ctx(), src, srcRc, screen.dx, screen.dy);
+        if (result) {
+            bool premultiplied = src->premultiplied;
+            DropPage(page, false);
+            result->premultiplied = premultiplied;
+            result->hasAlpha = srcHasAlpha;
+            return FinishRenderedPage(result, args.keepAlpha);
         }
     }
 #endif
@@ -1964,9 +2010,13 @@ EngineBase* EngineImage::CreateFromData(Str data) {
 static FileType imageEngineTypes[] = {
     FileType::Png,  FileType::Jpeg, FileType::Gif,
     FileType::Tiff, FileType::Bmp,  FileType::Tga,
+#if OS_WIN
+    // decoded by WIC; the POSIX builds have no JPEG XR / ICO decoder
     FileType::Jxr,  FileType::Hdp,  FileType::Wdp,
+    FileType::Ico,
+#endif
     FileType::Webp, FileType::Jp2,  FileType::Heic,
-    FileType::Avif, FileType::Jxl,  FileType::Ico
+    FileType::Avif, FileType::Jxl
 };
 // clang-format on
 

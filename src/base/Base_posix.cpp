@@ -113,10 +113,19 @@ static void* ThreadFunc0(void* data) {
     return nullptr;
 }
 
+// Secondary threads get 512 KB on macOS by default, too little for mupdf on
+// deeply nested documents; this matches the main thread's 8 MB. Only touched
+// pages are committed.
+constexpr size_t kThreadStackSize = 8 * 1024 * 1024;
+
 ThreadHandle StartThread(const Func0& fn, Str threadName) {
     auto* threadData = new ThreadFuncData(fn, threadName);
     auto* hThread = new ThreadHandlePosix();
-    int err = pthread_create(&hThread->thread, nullptr, ThreadFunc0, threadData);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, kThreadStackSize);
+    int err = pthread_create(&hThread->thread, &attr, ThreadFunc0, threadData);
+    pthread_attr_destroy(&attr);
     if (err != 0) {
         delete hThread;
         delete threadData;

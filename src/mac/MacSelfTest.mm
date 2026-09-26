@@ -854,16 +854,42 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
                  seconds:_waitSeconds];
 }
 
+// The text field being edited: the window's first responder is its field editor.
+- (NSTextField*)focusedField {
+    NSResponder* responder = [[_host selfTestWindow] firstResponder];
+    if (![responder isKindOfClass:[NSTextView class]] || ![(NSTextView*)responder isFieldEditor]) {
+        return nil;
+    }
+    id delegate = [(NSTextView*)responder delegate];
+    return [delegate isKindOfClass:[NSTextField class]] ? (NSTextField*)delegate : nil;
+}
+
+// Types into the focused field (replacing its text), then a key command such as
+// insertNewline: (Return) or cancelOperation: (Esc).
+- (void)type:(NSString*)text key:(SEL)command {
+    NSTextView* editor = (NSTextView*)[[_host selfTestWindow] firstResponder];
+    if (![self focusedField]) {
+        return;
+    }
+    if (text) {
+        [editor setString:text];
+        [editor didChangeText];
+    }
+    [editor doCommandBySelector:command];
+}
+
 - (void)findStep:(NSString*)name action:(SEL)action text:(NSString*)text expectPage:(int)expectPage {
     [self beginStep:name];
     double t0 = Now();
     NSString* err = [self invoke:action];
+    NSString* where = nil;
     if (!err && text) {
-        NSSearchField* field = [_host selfTestSearchField];
+        NSTextField* field = [self focusedField];
         if (!field) {
-            err = @"no search field in the toolbar";
+            err = @"⌘F didn't focus a search field";
         } else {
-            [self enterText:text inField:field];
+            where = field == [_host selfTestSearchField] ? @"toolbar" : @"find bar";
+            [self type:text key:@selector(insertNewline:)];
         }
     }
     if (err) {
@@ -880,11 +906,46 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     } else if (expectPage > 0 && s.findPage != expectPage) {
         problem = [NSString stringWithFormat:@"found on page %d, expected %d", s.findPage, expectPage];
     }
-    NSString* detail = [NSString stringWithFormat:@"hit on page %d", s.findPage];
+    NSString* detail = [NSString stringWithFormat:@"hit on page %d%@", s.findPage,
+                                                  where ? [NSString stringWithFormat:@", typed in the %@", where] : @""];
     if (problem) {
         detail = [NSString stringWithFormat:@"%@; %@", problem, detail];
     }
     [self step:name ok:problem == nil since:t0 detail:detail];
+}
+
+// With the toolbar hidden ⌘F opens the find bar; Return searches, Esc closes it.
+- (void)findBar:(NSString*)word {
+    [self beginStep:@"find bar"];
+    double t0 = Now();
+    NSString* err = [self invoke:@selector(toggleToolbarShown:)];
+    if (!err) {
+        err = [self invoke:@selector(findDocument:)];
+    }
+    NSTextField* field = err ? nil : [self focusedField];
+    if (!err && (!field || ![self state].findBarVisible)) {
+        err = @"⌘F with the toolbar hidden didn't focus the find bar";
+    }
+    if (!err) {
+        [self type:word key:@selector(insertNewline:)];
+        if (![self waitFind] || [self state].findPage <= 0) {
+            err = @"find bar search found nothing";
+        }
+    }
+    int page = [self state].findPage;
+    if (field) {
+        // a user presses Esc in the field; focus it again if the search moved focus
+        if ([self focusedField] != field) {
+            [[_host selfTestWindow] makeFirstResponder:field];
+        }
+        [self type:nil key:@selector(cancelOperation:)];
+        if (!err && [self state].findBarVisible) {
+            err = @"Esc didn't close the find bar";
+        }
+    }
+    NSString* restore = [self invoke:@selector(toggleToolbarShown:)];
+    err = err ?: restore;
+    [self step:@"find bar" ok:err == nil since:t0 detail:err ?: [NSString stringWithFormat:@"hit on page %d", page]];
 }
 
 - (void)find:(NSString*)word page:(int)searchPage {
@@ -895,6 +956,7 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     [self findStep:@"find" action:@selector(findDocument:) text:word expectPage:searchPage];
     [self findStep:@"find next" action:@selector(findNext:) text:nil expectPage:0];
     [self findStep:@"find previous" action:@selector(findPrevious:) text:nil expectPage:0];
+    [self findBar:word];
 }
 
 // First link to a page on the first pages, in page units at zoom 1, rotation 0.

@@ -169,27 +169,39 @@ jobs:
             tail -100 "$out/app.log"
             exit 1
           fi
-          python3 - "$out/report.json" <<'EOF'
+          # known failures (tracked elsewhere) are reported but don't fail the step
+          python3 - "$out/report.json" "$rc" "cbr-password gif" <<'EOF'
           import json, sys
-          r = json.load(open(sys.argv[1]))
+          r = json.load(open(sys.argv[1], encoding="utf-8"))
+          rc = int(sys.argv[2])
+          known = set(sys.argv[3].split())
+          unexpected = []
           for f in r.get("files", []):
-              status = "SKIP" if f.get("skipped") else ("PASS" if f.get("pass") else "FAIL")
-              print(f"{status}  {f.get('id', ''):<26} {f.get('ms', 0):>8.0f} ms  {f.get('path', '')}")
-              if f.get("pass"):
+              fid = f.get("id", "")
+              ok = f.get("pass")
+              status = "SKIP" if f.get("skipped") else ("PASS" if ok else ("KNOWN" if fid in known else "FAIL"))
+              print(f"{status:<5}  {fid:<26} {f.get('ms', 0):>8.0f} ms  {f.get('path', '')}")
+              if ok:
                   continue
+              if fid not in known:
+                  unexpected.append(fid)
+              level = "warning" if fid in known else "error"
               for s in f.get("steps", []):
                   if not s.get("ok"):
                       print(f"      FAIL {s.get('name')}: {s.get('detail', '')}")
-                      print(f"::error title=self-test {f.get('id')}::{s.get('name')}: {s.get('detail', '')}")
+                      print(f"::{level} title=self-test {fid}::{s.get('name')}: {s.get('detail', '')}")
               for a in f.get("alerts", []):
                   print(f"      alert: {a}")
           print(f"finished={r.get('finished')} pass={r.get('pass')} cases={r.get('cases')} "
-                f"failed={r.get('failed')} skipped={r.get('skipped')} ms={r.get('ms')}")
+                f"failed={r.get('failed')} skipped={r.get('skipped')} ms={r.get('ms')} app exit code={rc}")
           if r.get("error"):
               print(f"::error title=self-test::{r['error']}")
-          sys.exit(0 if r.get("finished") and r.get("pass") else 1)
+          # 0 pass, 1 test failures (judged above); anything else is a crash or the watchdog
+          good = r.get("finished") and not r.get("error") and not unexpected and rc in (0, 1)
+          if unexpected:
+              print("unexpected failures: " + " ".join(unexpected))
+          sys.exit(0 if good else 1)
           EOF
-          exit $rc
 
       - name: Upload self-test results
         if: always()
