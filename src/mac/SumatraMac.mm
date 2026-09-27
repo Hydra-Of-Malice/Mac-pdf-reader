@@ -56,6 +56,17 @@ static const CGFloat kDocumentMinWidth = 240;
 static NSString* const kDefSidebarVisible = @"SidebarVisible";
 static NSString* const kDefSidebarWidth = @"SidebarWidth";
 static NSString* const kDefSidebarMode = @"SidebarMode";
+// appearance and document colors are Mac-only UI state: the settings file always has the
+// Windows defaults for Theme and DocumentColorsFollowTheme, which can't say "follow macOS"
+static NSString* const kDefAppearance = @"Appearance";                       // system, light, dark
+static NSString* const kDefDocColors = @"DocumentColors";                    // normal, smart, invert
+static NSString* const kDefDocColorsMatch = @"DocumentColorsMatchAppearance"; // bool
+static NSString* const kDefPreserveImages = @"PreserveImageColors";          // bool
+
+// Smart Dark pages use macOS's dark window colors
+static const unsigned int kDarkPageRgb = 0x1E1E1E;
+static const unsigned int kDarkTextRgb = 0xE6E6E6;
+static void* kAppearanceContext = &kAppearanceContext;
 
 static NSString* const kSettingsFileName = @"SumatraPDF-settings.txt";
 static NSString* const kSelfTestPasteboard = @"org.sumatrapdfreader.self-test";
@@ -69,6 +80,8 @@ static NSString* const kArgSelfTest = @"-self-test";
 static NSString* const kArgSelfTestManifest = @"-self-test-manifest";
 static NSString* const kArgSelfTestFind = @"-self-test-find";
 static NSString* const kArgSelfTestTimeout = @"-self-test-timeout";
+static NSString* const kArgAppearance = @"-appearance";
+static NSString* const kArgDocColors = @"-doc-colors";
 static NSString* const kArgPaths = @"paths";
 
 static NSString* const kToolbarIdentifier = @"sumatra.toolbar.v2";
@@ -85,6 +98,7 @@ static NSString* const kToolbarFitPage = @"sumatra.toolbar.fit-page";
 static NSString* const kToolbarFitWidth = @"sumatra.toolbar.fit-width";
 static NSString* const kToolbarRotateLeft = @"sumatra.toolbar.rotate-left";
 static NSString* const kToolbarRotateRight = @"sumatra.toolbar.rotate-right";
+static NSString* const kToolbarAppearance = @"sumatra.toolbar.appearance";
 static NSString* const kToolbarSearch = @"sumatra.toolbar.search";
 
 enum class PagePosition {
@@ -96,6 +110,47 @@ enum class Highlight {
     Find,
     Selection,
 };
+
+enum class AppAppearance {
+    System,
+    Light,
+    Dark,
+};
+
+enum class DocColors {
+    Normal,
+    SmartDark,
+    Inverted,
+};
+
+// names in user defaults and on the command line (-appearance, -doc-colors)
+static NSString* const kAppearanceNames[] = {@"system", @"light", @"dark"};
+static NSString* const kDocColorsNames[] = {@"normal", @"smart", @"invert"};
+
+static AppAppearance AppearanceFromName(NSString* name, AppAppearance fallback) {
+    for (int i = 0; i < 3; i++) {
+        if (name && [name caseInsensitiveCompare:kAppearanceNames[i]] == NSOrderedSame) {
+            return (AppAppearance)i;
+        }
+    }
+    return fallback;
+}
+
+static DocColors DocColorsFromName(NSString* name, DocColors fallback) {
+    for (int i = 0; i < 3; i++) {
+        if (name && [name caseInsensitiveCompare:kDocColorsNames[i]] == NSOrderedSame) {
+            return (DocColors)i;
+        }
+    }
+    return fallback;
+}
+
+static NSColor* ColorFromRgb(unsigned int rgb) {
+    return [NSColor colorWithSRGBRed:((rgb >> 16) & 0xFF) / 255.0
+                               green:((rgb >> 8) & 0xFF) / 255.0
+                                blue:(rgb & 0xFF) / 255.0
+                               alpha:1.0];
+}
 
 // A point of the view expressed relative to a page, so it can be kept in
 // place across zoom, rotation and resize relayouts.
@@ -171,7 +226,10 @@ static NSString* ResolveDocumentPath(NSString* path) {
 // as user-default overrides that take a value.
 static NSDictionary* ParseCommandLine() {
     NSArray* args = [[NSProcessInfo processInfo] arguments];
-    NSArray* valueFlags = @[ kArgPrefsDir, kArgSelfTest, kArgSelfTestManifest, kArgSelfTestFind, kArgSelfTestTimeout ];
+    NSArray* valueFlags = @[
+        kArgPrefsDir, kArgSelfTest, kArgSelfTestManifest, kArgSelfTestFind, kArgSelfTestTimeout, kArgAppearance,
+        kArgDocColors
+    ];
     NSMutableDictionary* opts = [NSMutableDictionary dictionary];
     NSMutableArray* paths = [NSMutableArray array];
     for (NSUInteger i = 1; i < [args count]; i++) {
@@ -615,6 +673,17 @@ static void OpenDone(void* context, void* document, MacOpenError error) {
     BOOL _selfTestDone;
     int _selfTestExitCode;
     BOOL _visibleRendered;
+
+    AppAppearance _appearance;
+    DocColors _docColors; // the explicit choice, used when not matching the appearance
+    BOOL _docColorsMatch;
+    BOOL _preserveImages;
+    BOOL _invertColors; // this session only, like the Windows app's Shift+I
+    BOOL _docColorsApplied;
+    DocColors _appliedDocColors;
+    BOOL _appliedPreserve;
+    BOOL _observingAppearance;
+    BOOL _docColorsUpdateScheduled;
     int _lastOpenError;
 
     NSMutableArray* _openQueue; // SumatraOpenRequest not started yet
@@ -694,12 +763,33 @@ static void InstallTempArenaReset() {
         kDefSidebarVisible : [NSNumber numberWithBool:NO],
         kDefSidebarWidth : [NSNumber numberWithDouble:kSidebarDefaultWidth],
         kDefSidebarMode : [NSNumber numberWithInteger:SumatraSidebarModeOutline],
+        kDefAppearance : kAppearanceNames[(int)AppAppearance::System],
+        kDefDocColors : kDocColorsNames[(int)DocColors::Normal],
+        kDefDocColorsMatch : [NSNumber numberWithBool:YES],
+        kDefPreserveImages : [NSNumber numberWithBool:YES],
     }];
     _sidebarVisible = NO;
     _sidebarWidth = kSidebarDefaultWidth;
+    _appearance = AppAppearance::System;
+    _docColors = DocColors::Normal;
+    _docColorsMatch = YES;
+    _preserveImages = YES;
     if (!_testing) {
         _sidebarVisible = [defaults boolForKey:kDefSidebarVisible];
         _sidebarWidth = MAX(kSidebarMinWidth, MIN(kSidebarMaxWidth, (CGFloat)[defaults doubleForKey:kDefSidebarWidth]));
+        _appearance = AppearanceFromName([defaults stringForKey:kDefAppearance], _appearance);
+        _docColors = DocColorsFromName([defaults stringForKey:kDefDocColors], _docColors);
+        _docColorsMatch = [defaults boolForKey:kDefDocColorsMatch];
+        _preserveImages = [defaults boolForKey:kDefPreserveImages];
+    }
+    NSString* appearanceArg = [_commandLine objectForKey:kArgAppearance];
+    if (appearanceArg) {
+        _appearance = AppearanceFromName(appearanceArg, _appearance);
+    }
+    NSString* colorsArg = [_commandLine objectForKey:kArgDocColors];
+    if (colorsArg) {
+        _docColors = DocColorsFromName(colorsArg, _docColors);
+        _docColorsMatch = NO;
     }
 
     // tabs are our own (toolbar selector + Window menu), not NSWindow tabbing
@@ -707,6 +797,10 @@ static void InstallTempArenaReset() {
     [self createMainWindow];
     [self installKeyMonitor];
     InstallTempArenaReset();
+    [self applyAppearance];
+    // macOS switching light / dark (or the app's own choice) re-colors the documents
+    [NSApp addObserver:self forKeyPath:@"effectiveAppearance" options:0 context:kAppearanceContext];
+    _observingAppearance = YES;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
@@ -796,6 +890,7 @@ static void InstallTempArenaReset() {
 
 - (void)applicationWillTerminate:(NSNotification*)notification {
     (void)notification;
+    [self stopObservingAppearance];
     [self stopWatching];
     if (_keyMonitor) {
         [NSEvent removeMonitor:_keyMonitor];
@@ -910,7 +1005,7 @@ static void InstallTempArenaReset() {
     [_scrollView setBorderType:NSNoBorder];
     [_scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
     [_scrollView setDrawsBackground:YES];
-    [_scrollView setBackgroundColor:[NSColor colorWithCalibratedWhite:0.18 alpha:1.0]];
+    [_scrollView setBackgroundColor:SumatraCanvasColor()];
 
     _documentView = [[SumatraDocumentView alloc] initWithFrame:[[_scrollView contentView] bounds]];
     [_documentView setOwner:self];
@@ -974,6 +1069,7 @@ static void InstallTempArenaReset() {
 }
 
 - (void)dealloc {
+    [self stopObservingAppearance];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [NSObject cancelPreviousPerformRequestsWithTarget:self];
     [self stopWatching];
@@ -2386,6 +2482,9 @@ static BOOL SwapsAxes(int rotation) {
     s.loading = tab && !tab.document;
     s.lastOpenError = _lastOpenError;
     s.findBarVisible = ![_findBar isHidden];
+    s.darkAppearance = [self isDarkAppearance];
+    s.docColors = (int)[self effectiveDocColors];
+    s.docColorsMatch = _docColorsMatch;
     s.sidebarVisible = _sidebarVisible;
     s.thumbnails = _sidebarVisible ? [_sidebar visibleThumbnailCount] : 0;
     if (!tab.document) {
@@ -2427,6 +2526,10 @@ static BOOL SwapsAxes(int rotation) {
     [operation setShowsPrintPanel:NO];
     [operation setShowsProgressPanel:NO];
     return [self runPrintOperation:operation];
+}
+
+- (double)selfTestThumbnailLuminance {
+    return _sidebarVisible ? [_sidebar visibleThumbnailLuminance] : -1;
 }
 
 // What quitting and launching again does to the settings file.
@@ -2522,6 +2625,7 @@ static NSArray* ToolbarAllowedItems() {
         kToolbarOpen,
         kToolbarZoomActual,
         kToolbarFitPage,
+        kToolbarAppearance,
         NSToolbarSpaceItemIdentifier,
     ]];
     return items;
@@ -2760,6 +2864,13 @@ static NSArray* ToolbarAllowedItems() {
                         tooltip:@"Rotate right (⌘R)"
                           image:ToolbarImage(@"rotate.right", @"Rotate right", @"⟳")
                          action:@selector(rotateRight:)];
+    }
+    if ([identifier isEqualToString:kToolbarAppearance]) {
+        return [self buttonItem:identifier
+                          label:@"Dark Mode"
+                        tooltip:@"Switch between light and dark appearance (⇧⌘D)"
+                          image:ToolbarImage(@"circle.lefthalf.filled", @"Dark mode", @"◐")
+                         action:@selector(toggleLightDark:)];
     }
     return nil;
 }
@@ -3187,6 +3298,172 @@ static NSArray* ToolbarAllowedItems() {
     if ([notification object] == _window) {
         [NSApp performSelector:@selector(terminate:) withObject:nil afterDelay:0];
     }
+}
+
+#pragma mark - Appearance and document colors
+
+- (void)applyAppearance {
+    NSAppearance* appearance = nil;
+    if (_appearance == AppAppearance::Light) {
+        appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    } else if (_appearance == AppAppearance::Dark) {
+        appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    }
+    [NSApp setAppearance:appearance];
+    [self updateDocColors];
+}
+
+- (void)stopObservingAppearance {
+    if (_observingAppearance) {
+        [NSApp removeObserver:self forKeyPath:@"effectiveAppearance"];
+        _observingAppearance = NO;
+    }
+}
+
+- (void)observeValueForKeyPath:(NSString*)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary*)change
+                       context:(void*)context {
+    if (context != kAppearanceContext) {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+        return;
+    }
+    // after AppKit has finished switching; one update for a burst of changes
+    if (_docColorsUpdateScheduled) {
+        return;
+    }
+    _docColorsUpdateScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      _docColorsUpdateScheduled = NO;
+      [self updateDocColors];
+    });
+}
+
+- (BOOL)isDarkAppearance {
+    return SumatraIsDarkAppearance([NSApp effectiveAppearance]);
+}
+
+- (DocColors)effectiveDocColors {
+    if (_invertColors) {
+        return DocColors::Inverted;
+    }
+    if (_docColorsMatch) {
+        return [self isDarkAppearance] ? DocColors::SmartDark : DocColors::Normal;
+    }
+    return _docColors;
+}
+
+// Sends the document colors to the bridge (which re-renders every open
+// document) when they changed; the canvas follows the appearance on its own.
+- (void)updateDocColors {
+    [_documentView setNeedsDisplay:YES];
+    DocColors mode = [self effectiveDocColors];
+    if (_docColorsApplied && mode == _appliedDocColors && _preserveImages == _appliedPreserve) {
+        return;
+    }
+    _docColorsApplied = YES;
+    _appliedDocColors = mode;
+    _appliedPreserve = _preserveImages;
+
+    MacDocColorScheme scheme = {};
+    scheme.mode = MacDocColors::Normal;
+    if (mode == DocColors::SmartDark) {
+        scheme.mode = MacDocColors::SmartDark;
+    } else if (mode == DocColors::Inverted) {
+        scheme.mode = MacDocColors::Inverted;
+    }
+    scheme.backgroundRgb = kDarkPageRgb;
+    scheme.textRgb = kDarkTextRgb;
+    scheme.preserveImages = _preserveImages;
+    MacSetDocColors(&scheme);
+
+    // shown under the page until its new render arrives
+    NSColor* pageColor = nil;
+    if (mode == DocColors::SmartDark) {
+        pageColor = ColorFromRgb(kDarkPageRgb);
+    } else if (mode == DocColors::Inverted) {
+        pageColor = [NSColor blackColor];
+    }
+    [_documentView setPageColor:pageColor];
+    [_documentView setDarkPages:mode != DocColors::Normal];
+    [_sidebar setPageColor:pageColor];
+    [_sidebar documentColorsChanged];
+    [_imageCache removeAllObjects];
+    if (_active.document) {
+        [self updateLayout];
+    }
+}
+
+- (void)chooseAppearance:(AppAppearance)appearance {
+    _appearance = appearance;
+    [self saveDefault:kAppearanceNames[(int)appearance] forKey:kDefAppearance];
+    [self applyAppearance];
+}
+
+- (IBAction)useSystemAppearance:(id)sender {
+    (void)sender;
+    [self chooseAppearance:AppAppearance::System];
+}
+
+- (IBAction)useLightAppearance:(id)sender {
+    (void)sender;
+    [self chooseAppearance:AppAppearance::Light];
+}
+
+- (IBAction)useDarkAppearance:(id)sender {
+    (void)sender;
+    [self chooseAppearance:AppAppearance::Dark];
+}
+
+- (IBAction)toggleLightDark:(id)sender {
+    (void)sender;
+    [self chooseAppearance:[self isDarkAppearance] ? AppAppearance::Light : AppAppearance::Dark];
+}
+
+- (void)chooseDocColors:(DocColors)colors {
+    _docColors = colors;
+    _docColorsMatch = NO;
+    _invertColors = NO;
+    [self saveDefault:kDocColorsNames[(int)colors] forKey:kDefDocColors];
+    [self saveDefault:[NSNumber numberWithBool:NO] forKey:kDefDocColorsMatch];
+    [self updateDocColors];
+}
+
+- (IBAction)useNormalDocColors:(id)sender {
+    (void)sender;
+    [self chooseDocColors:DocColors::Normal];
+}
+
+- (IBAction)useSmartDarkDocColors:(id)sender {
+    (void)sender;
+    [self chooseDocColors:DocColors::SmartDark];
+}
+
+- (IBAction)useInvertedDocColors:(id)sender {
+    (void)sender;
+    [self chooseDocColors:DocColors::Inverted];
+}
+
+// Smart Dark while the appearance is dark, the document's own colors while it's light.
+- (IBAction)toggleMatchAppearance:(id)sender {
+    (void)sender;
+    _docColorsMatch = !_docColorsMatch;
+    _invertColors = NO;
+    [self saveDefault:[NSNumber numberWithBool:_docColorsMatch] forKey:kDefDocColorsMatch];
+    [self updateDocColors];
+}
+
+- (IBAction)togglePreserveImageColors:(id)sender {
+    (void)sender;
+    _preserveImages = !_preserveImages;
+    [self saveDefault:[NSNumber numberWithBool:_preserveImages] forKey:kDefPreserveImages];
+    [self updateDocColors];
+}
+
+- (IBAction)toggleInvertColors:(id)sender {
+    (void)sender;
+    _invertColors = !_invertColors;
+    [self updateDocColors];
 }
 
 #pragma mark - Sidebar
@@ -3711,6 +3988,24 @@ static NSArray* ToolbarAllowedItems() {
         return YES;
     } else if (action == @selector(openRecentItem:) || action == @selector(openFavorite:)) {
         return YES;
+    } else if (action == @selector(useSystemAppearance:)) {
+        [item setState:_appearance == AppAppearance::System ? on : off];
+    } else if (action == @selector(useLightAppearance:)) {
+        [item setState:_appearance == AppAppearance::Light ? on : off];
+    } else if (action == @selector(useDarkAppearance:)) {
+        [item setState:_appearance == AppAppearance::Dark ? on : off];
+    } else if (action == @selector(toggleMatchAppearance:)) {
+        [item setState:_docColorsMatch ? on : off];
+    } else if (action == @selector(useNormalDocColors:)) {
+        [item setState:!_docColorsMatch && _docColors == DocColors::Normal ? on : off];
+    } else if (action == @selector(useSmartDarkDocColors:)) {
+        [item setState:!_docColorsMatch && _docColors == DocColors::SmartDark ? on : off];
+    } else if (action == @selector(useInvertedDocColors:)) {
+        [item setState:!_docColorsMatch && _docColors == DocColors::Inverted ? on : off];
+    } else if (action == @selector(togglePreserveImageColors:)) {
+        [item setState:_preserveImages ? on : off];
+    } else if (action == @selector(toggleInvertColors:)) {
+        [item setState:_invertColors ? on : off];
     }
     return [self canPerformAction:action];
 }
@@ -3863,6 +4158,22 @@ static NSArray* ToolbarAllowedItems() {
     [viewMenu addItem:[NSMenuItem separatorItem]];
     AddItem(viewMenu, @"Rotate Left", @selector(rotateLeft:), self, @"l", cmd);
     AddItem(viewMenu, @"Rotate Right", @selector(rotateRight:), self, @"r", cmd);
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    NSMenu* appearanceMenu = AddSubmenu(viewMenu, @"Appearance");
+    AddItem(appearanceMenu, @"Use System Setting", @selector(useSystemAppearance:), self, @"", 0);
+    AddItem(appearanceMenu, @"Light", @selector(useLightAppearance:), self, @"", 0);
+    AddItem(appearanceMenu, @"Dark", @selector(useDarkAppearance:), self, @"", 0);
+    [appearanceMenu addItem:[NSMenuItem separatorItem]];
+    AddItem(appearanceMenu, @"Toggle Light/Dark", @selector(toggleLightDark:), self, @"d", shiftCmd);
+    NSMenu* colorsMenu = AddSubmenu(viewMenu, @"Document Colors");
+    AddItem(colorsMenu, @"Match Appearance", @selector(toggleMatchAppearance:), self, @"", 0);
+    [colorsMenu addItem:[NSMenuItem separatorItem]];
+    AddItem(colorsMenu, @"Normal", @selector(useNormalDocColors:), self, @"", 0);
+    AddItem(colorsMenu, @"Smart Dark", @selector(useSmartDarkDocColors:), self, @"", 0);
+    AddItem(colorsMenu, @"Inverted", @selector(useInvertedDocColors:), self, @"", 0);
+    [colorsMenu addItem:[NSMenuItem separatorItem]];
+    AddItem(colorsMenu, @"Preserve Image Colors", @selector(togglePreserveImageColors:), self, @"", 0);
+    AddItem(colorsMenu, @"Invert Colors", @selector(toggleInvertColors:), self, @"i", shiftCmd);
     [viewMenu addItem:[NSMenuItem separatorItem]];
     AddItem(viewMenu, @"Show Toolbar", @selector(toggleToolbarShown:), nil, @"t", optCmd);
     AddItem(viewMenu, @"Customize Toolbar…", @selector(runToolbarCustomizationPalette:), nil, @"", 0);

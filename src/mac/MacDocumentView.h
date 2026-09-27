@@ -8,6 +8,8 @@
 #define SumatraPDF_MacDocumentView_h
 
 CGImageRef SumatraCreateImage(MacRenderedPage* page);
+BOOL SumatraIsDarkAppearance(NSAppearance* appearance);
+NSColor* SumatraCanvasColor(void);
 
 // Implemented by the app delegate. Points are in document view coordinates
 // (flipped, points); page-local x/y are relative to a page's frame origin.
@@ -48,6 +50,8 @@ CGImageRef SumatraCreateImage(MacRenderedPage* page);
 @property(nonatomic, retain) NSArray* pages;  // SumatraPageImage
 @property(nonatomic, copy) NSString* message; // shown when there are no pages
 @property(nonatomic) BOOL busy;               // spinner above the message (document opening)
+@property(nonatomic, retain) NSColor* pageColor; // under the page image (dark document colors)
+@property(nonatomic) BOOL darkPages;            // stronger find / selection highlights
 @property(nonatomic, assign) id<SumatraDocumentViewOwner> owner;
 - (SumatraPageImage*)pageAtPoint:(NSPoint)point;
 @end

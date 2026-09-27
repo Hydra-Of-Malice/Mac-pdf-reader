@@ -30,6 +30,7 @@ struct PageRenderServiceData {
     ConditionVariable condition;
     ThreadHandle worker = nullptr;
     EngineBase* engine = nullptr;
+    PageRenderFn render = nullptr;
     AbortCookie* activeCookie = nullptr;
     Vec<PageRenderPolicyRequest> requests;
     Vec<PageRenderCacheEntry> cache;
@@ -153,7 +154,7 @@ static void RenderWorker(PageRenderServiceData* data) {
 
         RenderPageArgs args(request.key.pageNo, request.key.zoom, request.key.rotation, nullptr, RenderTarget::View,
                             &data->activeCookie);
-        Pixmap* pixmap = data->engine->RenderPage(args);
+        Pixmap* pixmap = data->render ? data->render(data->engine, args) : data->engine->RenderPage(args);
 
         data->mutex.Lock();
         delete data->activeCookie;
@@ -173,7 +174,7 @@ static void RenderWorker(PageRenderServiceData* data) {
 }
 
 PageRenderService* PageRenderService::Create(EngineBase* engine, const Func0& onPageReady, i64 maxBytes,
-                                             PageRenderEngine use) {
+                                             PageRenderEngine use, PageRenderFn render) {
     if (!engine || maxBytes <= 0) {
         return nullptr;
     }
@@ -192,6 +193,7 @@ PageRenderService* PageRenderService::Create(EngineBase* engine, const Func0& on
     auto* serviceData = new PageRenderServiceData();
     service->data = serviceData;
     serviceData->engine = clone;
+    serviceData->render = render;
     serviceData->maxBytes = maxBytes;
     serviceData->notify = new PageRenderNotify();
     serviceData->notify->callback = onPageReady;

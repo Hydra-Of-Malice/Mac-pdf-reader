@@ -33,6 +33,7 @@ void EngineDjvuDec_UnitTests();
 void LitDoc_UnitTests();
 void MobiDoc_UnitTests();
 void PageRenderPolicy_UnitTests();
+void PdfDarkModeImageClassifier_UnitTests();
 void PdfDarkModeOklab_UnitTests();
 void SimpleLogTest();
 void TextSelection_UnitTests();
@@ -179,6 +180,7 @@ int main(int argc, char** argv) {
     LitDoc_UnitTests();
     MobiDoc_UnitTests();
     PageRenderPolicy_UnitTests();
+    PdfDarkModeImageClassifier_UnitTests();
     PdfDarkModeOklab_UnitTests();
     SimpleLogTest();
     TextSelection_UnitTests();

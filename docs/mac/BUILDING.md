@@ -109,6 +109,8 @@ from the `.dmg` (or the unpacked `.zip`) to `/Applications`.
   - `-self-test-manifest <manifest.json>`: expectations (pages, passwords, search words); without paths, every
     fixture in it. `-self-test-find <word>`: search word for documents not in the manifest.
     `-self-test-timeout <seconds>`: watchdog, default 1500.
+  - `-appearance system|light|dark` and `-doc-colors normal|smart|invert`: start in that appearance / with those
+    document colors (not saved), e.g. for dark mode screenshots.
 - Remote Mac over ssh: `SUMATRA_MAC_HOST=user@host SUMATRA_MAC_DIR=src/sumatrapdf bun cmd/build.ts -mac-remote
 -branch <pushed-branch> -dbg`.
 - Manual checks before a release: [MANUAL-TEST-CHECKLIST.md](MANUAL-TEST-CHECKLIST.md).

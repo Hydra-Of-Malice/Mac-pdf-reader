@@ -14,6 +14,7 @@
 #include "PageRenderService.h"
 #include "ProgressUpdateUI.h"
 #include "ReaderModel.h"
+#include "DocColors.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
 #include "gui/PlatformWindow.h"
@@ -71,7 +72,19 @@ struct MacDocument {
     bool propertiesLoaded = false;
     MacPageReadyCallback onPageReady = nullptr;
     void* callbackContext = nullptr;
+    int serial = 0; // tells a closed document from a new one at the same address
 };
+
+// documents handed to the app (main thread), for MacSetDocColors()
+static Vec<MacDocument*> gOpenDocuments;
+static int gDocumentSerial = 0;
+
+static void RegisterDocument(MacDocument* doc) {
+    if (doc) {
+        doc->serial = ++gDocumentSerial;
+        VecAppend(gOpenDocuments, doc);
+    }
+}
 
 static MacDocument* AsDocument(void* document) {
     return (MacDocument*)document;
@@ -298,6 +311,11 @@ static bool CopyPixmap(Pixmap* pixmap, MacRenderedPage* page) {
     return true;
 }
 
+// the page renderer's render function: the view with the current document colors
+static Pixmap* RenderViewPage(EngineBase* engine, RenderPageArgs& args) {
+    return RenderPageWithDocColors(engine, args);
+}
+
 static MacPasswordCallback gPasswordCallback = nullptr;
 static void* gPasswordContext = nullptr;
 
@@ -402,12 +420,12 @@ static MacDocument* OpenDocumentImpl(void* passwordParent, const char* path, Mac
     // a render copy would paginate lazily laid out chapters on its own, so they'd disagree on page numbers
     bool chaptered = model->GetEngine()->HasChapters();
     PageRenderEngine use = chaptered ? PageRenderEngine::Shared : PageRenderEngine::Clone;
-    document->renderer =
-        PageRenderService::Create(model->GetEngine(), MkFunc0(OnPageReady, document), kMacRenderCacheBytes, use);
+    document->renderer = PageRenderService::Create(model->GetEngine(), MkFunc0(OnPageReady, document),
+                                                   kMacRenderCacheBytes, use, RenderViewPage);
     if (!document->renderer && use == PageRenderEngine::Clone) {
         // some engines can't be copied, e.g. a password-protected comic archive re-opened without its password
         document->renderer = PageRenderService::Create(model->GetEngine(), MkFunc0(OnPageReady, document),
-                                                       kMacRenderCacheBytes, PageRenderEngine::Shared);
+                                                       kMacRenderCacheBytes, PageRenderEngine::Shared, RenderViewPage);
     }
     if (!document->renderer) {
         // the engine owns the ToC tree
@@ -430,6 +448,7 @@ void* MacOpenDocument(void* passwordParent, const char* path, MacPageReadyCallba
                       char** errorOut) {
     MacOpenError err = MacOpenError::None;
     MacDocument* document = OpenDocumentImpl(passwordParent, path, onPageReady, callbackContext, &err);
+    RegisterDocument(document);
     if (document || !errorOut) {
         return document;
     }
@@ -585,7 +604,8 @@ bool MacRenderPage(void* document, int pageNo, float zoom, int rotation, MacRend
     // like the app's layout: a damaged file can claim e.g. 56142 x 36429 px pages
     zoom = (float)CapRenderZoom(zoom, model->PageMediabox(pageNo));
 
-    Pixmap* pixmap = model->RenderPage(pageNo, zoom, rotation);
+    RenderPageArgs args(pageNo, zoom, rotation);
+    Pixmap* pixmap = RenderPageWithDocColors(model->GetEngine(), args);
     bool ok = CopyPixmap(pixmap, page);
     FreePixmap(pixmap);
     return ok;
@@ -886,6 +906,7 @@ void MacCloseDocument(void* document) {
         return;
     }
     MacDocument* doc = AsDocument(document);
+    VecRemove(gOpenDocuments, doc);
     UnwatchChapterLayout(doc);
     StopFindWorker(doc);
     StopTextWorker(doc);
@@ -958,6 +979,7 @@ void* MacOpenDocumentEx(void* passwordParent, const char* path, MacPageReadyCall
                         MacOpenError* errorOut) {
     MacOpenError err = MacOpenError::None;
     MacDocument* document = OpenDocumentImpl(passwordParent, path, onPageReady, callbackContext, &err);
+    RegisterDocument(document);
     if (errorOut) {
         *errorOut = err;
     }
@@ -980,6 +1002,8 @@ struct MacOpenJob {
 };
 
 static void FinishOpenJob(MacOpenJob* job) {
+    // nothing was rendered yet, so a document colors change meanwhile needs nothing more
+    RegisterDocument(job->document);
     job->onDone(job->doneContext, job->document, job->error);
     free(job->path);
     delete job;
@@ -1134,7 +1158,8 @@ void MacCancelPendingRenders(void* document) {
     }
 }
 
-// Like MacRenderPage() but with print-only content (RenderTarget::Print).
+// Like MacRenderPage() but with print-only content (RenderTarget::Print), and always
+// in the document's own colors.
 bool MacRenderPageForPrint(void* document, int pageNo, float zoom, int rotation, MacRenderedPage* page) {
     if (!page) {
         return false;
@@ -1618,4 +1643,73 @@ void MacLayOutAllPages(void* document) {
 // The main thread's temp arena, reset between events like the Windows message loop.
 void MacResetTempArena() {
     ResetTempArena();
+}
+
+//--- document colors (dark mode)
+
+// the scheme as the app set it (DocColors.cpp has the one pages render with)
+static MacDocColorScheme gDocColors = {MacDocColors::Normal, 0x1E1E1E, 0xE6E6E6, true};
+
+static Color ColorFromRgb(unsigned int rgb) {
+    return MkRgb((u8)(rgb >> 16), (u8)(rgb >> 8), (u8)rgb);
+}
+
+struct MacColorsChanged {
+    MacDocument* doc = nullptr;
+    int serial = 0;
+};
+
+// Main thread: page-ready, so the app requests the pages again (unless the document was closed meanwhile).
+static void RunColorsChangedTask(MacColorsChanged* c) {
+    for (MacDocument* doc : gOpenDocuments) {
+        if (doc == c->doc && doc->serial == c->serial) {
+            OnPageReady(doc);
+            break;
+        }
+    }
+    delete c;
+}
+
+void MacSetDocColors(const MacDocColorScheme* scheme) {
+    if (!scheme) {
+        return;
+    }
+    gDocColors = *scheme;
+    if (gDocColors.mode != MacDocColors::SmartDark && gDocColors.mode != MacDocColors::Inverted) {
+        gDocColors.mode = MacDocColors::Normal;
+    }
+    gDocColors.backgroundRgb &= 0xFFFFFF;
+    gDocColors.textRgb &= 0xFFFFFF;
+
+    DocColorScheme s;
+    if (gDocColors.mode == MacDocColors::SmartDark) {
+        s.mode = DocColorsMode::SmartDark;
+    } else if (gDocColors.mode == MacDocColors::Inverted) {
+        s.mode = DocColorsMode::Inverted;
+    }
+    s.text = ColorFromRgb(gDocColors.textRgb);
+    s.background = ColorFromRgb(gDocColors.backgroundRgb);
+    s.preserveImages = gDocColors.preserveImages;
+    u32 epoch = GetDocColorsEpoch();
+    SetDocColorScheme(s);
+    if (GetDocColorsEpoch() == epoch) {
+        return;
+    }
+    // drop the cache and the queue, abort the render in progress and discard what
+    // it delivers (MacThumbnails.cpp notices the new epoch itself)
+    for (MacDocument* doc : gOpenDocuments) {
+        if (doc->renderer) {
+            doc->renderer->NewGeneration();
+        }
+        auto* c = new MacColorsChanged();
+        c->doc = doc;
+        c->serial = doc->serial;
+        PlatformPostTask(MkFunc0(RunColorsChangedTask, c));
+    }
+}
+
+void MacGetDocColors(MacDocColorScheme* out) {
+    if (out) {
+        *out = gDocColors;
+    }
 }

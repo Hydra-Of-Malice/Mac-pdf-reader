@@ -637,6 +637,7 @@ export const ENGINE_SOURCES = [
   "src/CachedObjects.cpp",
   "src/ChapterTable.cpp",
   "src/ChmFile.cpp",
+  "src/DocColors.cpp",
   "src/DocProperties.cpp",
   "src/EbookDoc.cpp",
   "src/EmbeddedResources.cpp",
@@ -653,7 +654,18 @@ export const ENGINE_SOURCES = [
   "src/MobiDoc.cpp",
   "src/PalmDbReader.cpp",
   "src/PdfCad.cpp",
-  "src/PdfDarkModeNoOp.cpp",
+  // the smart dark mode; DocColors.cpp is its host (PdfDarkModeProfile.cpp on Windows)
+  "src/PdfDarkModeAnalysis.cpp",
+  "src/PdfDarkModeCache.cpp",
+  "src/PdfDarkModeColor.cpp",
+  "src/PdfDarkModeDevice.cpp",
+  "src/PdfDarkModeEngineCache.cpp",
+  "src/PdfDarkModeImageBgBlend.cpp",
+  "src/PdfDarkModeImageClassifier.cpp",
+  "src/PdfDarkModeImageRules.cpp",
+  "src/PdfDarkModeImageStats.cpp",
+  "src/PdfDarkModeOklab.cpp",
+  "src/PdfDarkModeScanProcess.cpp",
   "src/TextSearch.cpp",
   "src/TextSelection.cpp",
   "src/WebpReader.cpp",
@@ -697,9 +709,8 @@ export function cocoaSources(): string[] {
 
 // Unit tests that run on POSIX (the Windows app runs the full set from src/tests/Sumatra_ut.cpp) and the modules
 // they test. Not here: ClipboardImage_ut / Win_ut (Win32), File_ut (Windows path semantics), PdfSync_ut (SyncTeX),
-// RefHover_ut, CommandPalette_ut (Commands.cpp needs the Windows settings), PdfDarkModeImageClassifier_ut (the
-// engines link PdfDarkModeNoOp.cpp), the gui/ tests and the ones for Win32 UI modules (AnnotSearch, PagePosition,
-// ReadAloud, ShortcutParse).
+// RefHover_ut, CommandPalette_ut (Commands.cpp needs the Windows settings), the gui/ tests and the ones for Win32 UI
+// modules (AnnotSearch, PagePosition, ReadAloud, ShortcutParse).
 export const TEST_UTIL_SOURCES = [
   "src/base/tests/Base_ut.cpp",
   "src/base/tests/ByteReaderWriter_ut.cpp",
@@ -721,11 +732,11 @@ export const TEST_UTIL_SOURCES = [
   "src/tests/LitDoc_ut.cpp",
   "src/tests/MobiDoc_ut.cpp",
   "src/tests/PageRenderPolicy_ut.cpp",
+  "src/tests/PdfDarkModeImageClassifier_ut.cpp",
   "src/tests/PdfDarkModeOklab_ut.cpp",
   "src/tests/SimpleLog_ut.cpp",
   "src/tests/TextSelection_ut.cpp",
   "src/CrashHandlerNoOp.cpp",
-  "src/PdfDarkModeOklab.cpp",
   "src/SumatraLog_posix.cpp",
   "src/tools/test_util.cpp",
 ];

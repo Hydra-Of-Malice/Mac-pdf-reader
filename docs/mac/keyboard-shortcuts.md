@@ -21,20 +21,27 @@ In single page view, scrolling past the top or bottom of a page moves to the pre
 
 ## Zoom and view
 
-| Keys                        | Action                        |
-| --------------------------- | ----------------------------- |
-| ⌘+ ⌘= (+)                   | zoom in                       |
-| ⌘- (-)                      | zoom out                      |
-| ⌘0                          | actual size                   |
-| ⌘9                          | zoom to fit page              |
-| ⌘8                          | zoom to fit width             |
-| pinch                       | zoom around the pointer       |
-| double-tap with two fingers | smart zoom in / back          |
-| ⌘L ⌘R                       | rotate left / right           |
-| ⌥⌘S                         | show / hide sidebar           |
-| ⌥⌘3 ⌥⌘2                     | sidebar: outline / thumbnails |
-| ⌥⌘T                         | show / hide toolbar           |
-| ⌃⌘F                         | enter / exit full screen      |
+| Keys                        | Action                         |
+| --------------------------- | ------------------------------ |
+| ⌘+ ⌘= (+)                   | zoom in                        |
+| ⌘- (-)                      | zoom out                       |
+| ⌘0                          | actual size                    |
+| ⌘9                          | zoom to fit page               |
+| ⌘8                          | zoom to fit width              |
+| pinch                       | zoom around the pointer        |
+| double-tap with two fingers | smart zoom in / back           |
+| ⌘L ⌘R                       | rotate left / right            |
+| ⌥⌘S                         | show / hide sidebar            |
+| ⌥⌘3 ⌥⌘2                     | sidebar: outline / thumbnails  |
+| ⌥⌘T                         | show / hide toolbar            |
+| ⌃⌘F                         | enter / exit full screen       |
+| ⇧⌘D                         | toggle light / dark appearance |
+| ⇧⌘I                         | invert document colors         |
+
+**View › Appearance** picks Use System Setting (default), Light or Dark. **View › Document Colors**: Match
+Appearance (default; Smart Dark pages while the appearance is dark), or always Normal, Smart Dark or Inverted, and
+Preserve Image Colors (Smart Dark leaves pictures as they are). Invert Colors (⇧⌘I) is for this session only, like
+Shift+I in the Windows app. A **Dark Mode** toolbar button can be added with View › Customize Toolbar.
 
 ## Find and select
 

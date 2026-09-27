@@ -462,12 +462,14 @@ static NSImage* ImageFromThumb(MacThumbImage* thumb, NSSize pointSize) {
 @property(nonatomic, retain) NSImage* thumbImage;
 @property(nonatomic) BOOL hasExactImage;
 @property(nonatomic) CGFloat imageScale; // backing scale the image was rendered for
+@property(nonatomic, retain) NSColor* pageColor; // under the thumbnail; nil: white
 @end
 
 @implementation SumatraThumbCellView
 
 - (void)dealloc {
     [_thumbImage release];
+    [_pageColor release];
     [super dealloc];
 }
 
@@ -508,7 +510,7 @@ static NSImage* ImageFromThumb(MacThumbImage* thumb, NSSize pointSize) {
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
     NSRect thumb = [self thumbRect];
-    [[NSColor whiteColor] setFill];
+    [(_pageColor ?: [NSColor whiteColor]) setFill];
     NSRectFill(thumb);
     if (_thumbImage) {
         NSDictionary* hints = @{NSImageHintInterpolation : @(NSImageInterpolationHigh)};
@@ -556,6 +558,9 @@ static NSImage* ImageFromThumb(MacThumbImage* thumb, NSSize pointSize) {
 - (void)thumbnailReady:(void*)document page:(int)pageNo;
 - (void)shutdown;
 - (int)visibleImageCount;
+- (double)visibleImageLuminance;
+- (void)setPageColor:(NSColor*)color;
+- (void)reloadThumbnails;
 @end
 
 // Worker thread. The block retains relay; the pane clears relay.pane before it
@@ -580,6 +585,7 @@ static void ThumbReady(void* context, void* document, int pageNo) {
     double* _pageSizes; // unrotated width, height per page
     CGFloat _thumbWidth;
     CGFloat _backingScale;
+    NSColor* _pageColor;
     BOOL _active;
     BOOL _syncingSelection;
 }
@@ -839,6 +845,7 @@ static void ThumbReady(void* context, void* document, int pageNo) {
     [cell setThumbSize:[self thumbSizeForPage:pageNo]];
     [cell setThumbImage:nil];
     [cell setHasExactImage:NO];
+    [cell setPageColor:_pageColor];
     BOOL visible = NSIntersectsRect([tableView rectOfRow:row], [tableView visibleRect]);
     [self loadCell:cell priority:visible ? MacThumbPriority::Visible : MacThumbPriority::Prefetch];
     return cell;
@@ -926,6 +933,63 @@ static void ThumbReady(void* context, void* document, int pageNo) {
     if (cell && ![self cellIsCurrent:cell]) {
         [self loadCell:cell priority:MacThumbPriority::Visible];
     }
+}
+
+- (void)setPageColor:(NSColor*)color {
+    if (_pageColor != color) {
+        [_pageColor release];
+        _pageColor = [color retain];
+    }
+}
+
+// Document colors changed: the thumbnails are rendered again.
+- (void)reloadThumbnails {
+    void* document = _document;
+    int pageCount = _pageCount;
+    int rotation = _rotation;
+    [self showDocument:nullptr pageCount:0 rotation:0];
+    [self showDocument:document pageCount:pageCount rotation:rotation];
+    [self syncToPage:[_sidebar currentPage]];
+}
+
+// Mean luminance (0..1) of the first thumbnail on screen, -1 if none (self-test).
+- (double)visibleImageLuminance {
+    if (!_active || !_document) {
+        return -1;
+    }
+    NSRange rows = [_table rowsInRect:[_table visibleRect]];
+    for (NSUInteger row = rows.location; row < rows.location + rows.length; row++) {
+        SumatraThumbCellView* cell = [_table viewAtColumn:0 row:(NSInteger)row makeIfNecessary:NO];
+        NSImage* image = [cell thumbImage];
+        if (!image || ![cell hasExactImage]) {
+            continue;
+        }
+        const NSInteger n = 32;
+        NSBitmapImageRep* rep = [[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr
+                                                                         pixelsWide:n
+                                                                         pixelsHigh:n
+                                                                      bitsPerSample:8
+                                                                    samplesPerPixel:4
+                                                                           hasAlpha:YES
+                                                                           isPlanar:NO
+                                                                     colorSpaceName:NSDeviceRGBColorSpace
+                                                                        bytesPerRow:0
+                                                                       bitsPerPixel:0] autorelease];
+        [NSGraphicsContext saveGraphicsState];
+        [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithBitmapImageRep:rep]];
+        [image drawInRect:NSMakeRect(0, 0, n, n)];
+        [NSGraphicsContext restoreGraphicsState];
+        double sum = 0;
+        NSUInteger pixel[4] = {};
+        for (NSInteger y = 0; y < n; y++) {
+            for (NSInteger x = 0; x < n; x++) {
+                [rep getPixel:pixel atX:x y:y];
+                sum += (0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2]) / 255.0;
+            }
+        }
+        return sum / (double)(n * n);
+    }
+    return -1;
 }
 
 - (int)visibleImageCount {
@@ -1136,6 +1200,24 @@ static void ThumbReady(void* context, void* document, int pageNo) {
 
 - (int)visibleThumbnailCount {
     return _mode == SumatraSidebarModeThumbnails ? [_thumbPane visibleImageCount] : 0;
+}
+
+- (double)visibleThumbnailLuminance {
+    return _mode == SumatraSidebarModeThumbnails ? [_thumbPane visibleImageLuminance] : -1;
+}
+
+- (int)currentPage {
+    return _currentPage;
+}
+
+- (void)setPageColor:(NSColor*)color {
+    [_thumbPane setPageColor:color];
+}
+
+- (void)documentColorsChanged {
+    if (_document) {
+        [_thumbPane reloadThumbnails];
+    }
 }
 
 @end

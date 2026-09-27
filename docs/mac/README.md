@@ -11,6 +11,9 @@ Native AppKit reader that reuses SumatraPDF's portable engines, layout, renderin
 | [MANUAL-TEST-CHECKLIST.md](MANUAL-TEST-CHECKLIST.md) | manual checks before a release                                     |
 | [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)   | linked libraries, shipped license texts, redistribution duties     |
 
+Dark mode: View › Appearance (system, light, dark) and View › Document Colors (match the appearance, normal,
+Smart Dark, inverted); see [keyboard-shortcuts.md](keyboard-shortcuts.md) and [architecture.md](architecture.md).
+
 History of the port: [mac-port-plan.md](../mac-port-plan.md), [mac-port-progress.md](../mac-port-progress.md).
 
 ## Where things live

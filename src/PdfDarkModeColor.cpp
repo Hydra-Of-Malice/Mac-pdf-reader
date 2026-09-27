@@ -7,13 +7,13 @@ extern "C" {
 #include <mupdf/fitz.h>
 }
 
-#include "Settings.h"
-#include "AppSettings.h"
-#include "Theme.h"
-#include "Translations.h"
-
 #include "PdfDarkMode.h"
 #include "PdfDarkModeInternal.h"
+
+// Color mapping, options and profile helpers; no theme or settings. The platform host supplies
+// PdfDarkModePagesDark(), GetDocumentColorsFollowTheme(), PdfDarkModeUsesObjectLevel() and
+// BuildViewDarkModeProfile(): PdfDarkModeProfile.cpp from the Windows theme, DocColors.cpp from the
+// reader's color scheme elsewhere (macOS).
 
 // Hardcoded PDF dark mode defaults (not persisted in settings file).
 static constexpr int kPreservePdfImagesMinSize = 72;
@@ -21,15 +21,6 @@ static constexpr int kPreservePdfImagesMinSize = 72;
 static constexpr PdfDarkModeRenderer kPdfDarkModeRenderer = PdfDarkModeRenderer::LegacyBitmapPostProcess;
 
 static bool gPreservePdfImagesInDarkMode = true;
-
-// dark page rendering is active when the effective page background is dark
-// (DocumentColorsFollowTheme or custom dark FixedPageUI colors); master's
-// themes never touch page colors, unlike the fork's
-static bool DarkChromeActive() {
-    Color bg;
-    ThemePageRenderColors(bg);
-    return !IsLightColor(bg);
-}
 
 DocumentColorsFollowTheme DocumentColorsFollowThemeFromString(Str v) {
     if (len(v) == 0 || str::EqI(v, StrL("off"))) {
@@ -52,16 +43,6 @@ DocumentColorsFollowTheme DocumentColorsFollowThemeFromString(Str v) {
         return DocumentColorsFollowTheme::Off;
     }
     return DocumentColorsFollowTheme::Off;
-}
-
-static const char* DocumentColorsFollowThemeToString(DocumentColorsFollowTheme mode) {
-    if (mode == DocumentColorsFollowTheme::Smart) {
-        return "smart";
-    }
-    if (mode == DocumentColorsFollowTheme::Legacy) {
-        return "legacy";
-    }
-    return "off";
 }
 
 static int gShadeForwardCount = 0;
@@ -93,96 +74,68 @@ PdfDarkModeRenderer GetPdfDarkModeRenderer() {
     return kPdfDarkModeRenderer;
 }
 
+static float ColorChannel01(byte v) {
+    return (float)v / 255.f;
+}
+
+DarkModePalette PdfDarkModePaletteFromColors(Color textCol, Color bgCol, Color linkCol) {
+    byte tr, tg, tb, br, bg, bb, lr, lg, lb;
+    UnpackColor(textCol, tr, tg, tb);
+    UnpackColor(bgCol, br, bg, bb);
+    UnpackColor(linkCol, lr, lg, lb);
+
+    DarkModePalette p;
+    p.textR = ColorChannel01(tr);
+    p.textG = ColorChannel01(tg);
+    p.textB = ColorChannel01(tb);
+    p.bgR = ColorChannel01(br);
+    p.bgG = ColorChannel01(bg);
+    p.bgB = ColorChannel01(bb);
+    p.linkR = ColorChannel01(lr);
+    p.linkG = ColorChannel01(lg);
+    p.linkB = ColorChannel01(lb);
+    p.diffR = p.bgR - p.textR;
+    p.diffG = p.bgG - p.textG;
+    p.diffB = p.bgB - p.textB;
+    return p;
+}
+
+bool DarkModeProfileUsesObjectLevel(const DarkModeProfile* profile) {
+    return profile && profile->mode == PageColorMode::SmartDark;
+}
+
+bool DarkModeProfileUsesLegacyPostProcess(const DarkModeProfile* profile) {
+    if (!profile) {
+        return false;
+    }
+    return profile->mode == PageColorMode::LegacyInvert || profile->mode == PageColorMode::PreserveImages;
+}
+
+u32 PdfDarkModeComputeProfileHash(const DarkModeProfile* profile) {
+    if (!profile) {
+        return 0;
+    }
+    auto mix = [](u32 h, u32 v) -> u32 { return (h * 31) + v; };
+    u32 h = 0;
+    h = mix(h, (u32)profile->mode);
+    h = mix(h, (u32)profile->foreground);
+    h = mix(h, (u32)profile->pageBackground);
+    h = mix(h, (u32)profile->linkColor);
+    h = mix(h, (u32)profile->preservePdfImages);
+    h = mix(h, (u32)profile->preservePdfImagesMinSize);
+    h = mix(h, *(u32*)&profile->options.scanImageCoverageThreshold);
+    h = mix(h, *(u32*)&profile->options.minScanDominantCoverage);
+    h = mix(h, *(u32*)&profile->options.maxScanAspectSkew);
+    h = mix(h, (u32)profile->options.maxTextOpsForScanPage);
+    h = mix(h, (u32)profile->options.maxVectorOpsForScanPage);
+    h = mix(h, *(u32*)&profile->options.preserveImagePaperSoftening);
+    h = mix(h, *(u32*)&profile->options.lightFillChromaThreshold);
+    h = mix(h, *(u32*)&profile->options.lightFillLuminanceThreshold);
+    return h;
+}
+
 bool DocumentColorsFollowThemeEnabled() {
     return GetDocumentColorsFollowTheme() != DocumentColorsFollowTheme::Off;
-}
-
-static TempStr ColorToCssHexTemp(Color c) {
-    u8 r, g, b;
-    UnpackColor(c, r, g, b);
-    return fmt("#%02x%02x%02x", r, g, b);
-}
-
-// User CSS overlay for MuPDF reflowable documents (EPUB, HTML, FB2, MOBI, TXT).
-// Empty when the effective page colors are black-on-white (nothing to override).
-TempStr ReflowDocumentThemeCssTemp() {
-    Color bgCol;
-    Color txtCol = ThemePageRenderColors(bgCol);
-    if (bgCol == kColWhite && txtCol == kColBlack) {
-        return {};
-    }
-    TempStr bg = ColorToCssHexTemp(bgCol);
-    TempStr fg = ColorToCssHexTemp(txtCol);
-    TempStr link = ColorToCssHexTemp(ThemeWindowLinkColor());
-    // * first so html/body's background wins if MuPDF treats later rules as
-    // stronger (a trailing * { background: transparent } would leave the
-    // pixmap's white clear color showing through). Images are unaffected.
-    return fmt(
-        "* { color: %s !important; background-color: transparent !important; }\n"
-        "html, body { background-color: %s !important; color: %s !important; }\n"
-        "a, a * { color: %s !important; }\n",
-        fg, bg, fg, link);
-}
-
-// an unsaved value the advanced settings dialog is previewing; -1 when there is
-// none and the saved setting applies
-static int gDocumentColorsFollowThemePreview = -1;
-
-DocumentColorsFollowTheme GetDocumentColorsFollowTheme() {
-    if (gDocumentColorsFollowThemePreview >= 0) {
-        return (DocumentColorsFollowTheme)gDocumentColorsFollowThemePreview;
-    }
-    if (!gSettings || len(gSettings->documentColorsFollowTheme) == 0) {
-        return DocumentColorsFollowTheme::Off;
-    }
-    return DocumentColorsFollowThemeFromString(gSettings->documentColorsFollowTheme);
-}
-
-// Render pages as if the setting had this value, without touching gSettings,
-// so the advanced settings dialog can show what a value does before it's saved
-// (and go back to the saved one when it's cancelled). The caller re-renders.
-void SetDocumentColorsFollowThemePreview(DocumentColorsFollowTheme mode) {
-    if (mode < DocumentColorsFollowTheme::Off || mode > DocumentColorsFollowTheme::Legacy) {
-        mode = DocumentColorsFollowTheme::Off;
-    }
-    gDocumentColorsFollowThemePreview = (int)mode;
-}
-
-void ClearDocumentColorsFollowThemePreview() {
-    gDocumentColorsFollowThemePreview = -1;
-}
-
-void SetDocumentColorsFollowTheme(DocumentColorsFollowTheme mode) {
-    if (mode < DocumentColorsFollowTheme::Off || mode > DocumentColorsFollowTheme::Legacy) {
-        mode = DocumentColorsFollowTheme::Off;
-    }
-    if (!gSettings) {
-        return;
-    }
-    Str name(DocumentColorsFollowThemeToString(mode));
-    if (!str::EqI(gSettings->documentColorsFollowTheme, name)) {
-        str::ReplaceWithCopy(&gSettings->documentColorsFollowTheme, name);
-    }
-}
-
-const char* DocumentColorsFollowThemeDescription(DocumentColorsFollowTheme mode) {
-    if (mode == DocumentColorsFollowTheme::Smart) {
-        return TrN("Document colors follow theme: Smart (recolor text and background, not images)").s;
-    }
-    if (mode == DocumentColorsFollowTheme::Legacy) {
-        return TrN("Document colors follow theme: Legacy (recolor text, background and images)").s;
-    }
-    return TrN("Document colors follow theme: Off").s;
-}
-
-bool PdfDarkModeUsesObjectLevel() {
-    if (!DarkChromeActive()) {
-        return false;
-    }
-    if (GetDocumentColorsFollowTheme() != DocumentColorsFollowTheme::Smart) {
-        return false;
-    }
-    return GetPdfDarkModeRenderer() == PdfDarkModeRenderer::ObjectLevelDevice;
 }
 
 void PdfDarkModeClearPixmapToThemeBackground(fz_context* /*ctx*/, fz_pixmap* pix, const DarkModePalette& palette) {
@@ -360,7 +313,7 @@ void MapColorToDarkTheme(fz_context* ctx, fz_colorspace* cs, const float* color,
     float rgb[FZ_MAX_COLORS] = {};
     fz_colorspace* ds = fz_device_rgb(ctx);
     fz_convert_color(ctx, cs, color, ds, rgb, cs, colorParams);
-    if (DarkChromeActive() && IsLikelyLinkRgb(rgb[0], rgb[1], rgb[2])) {
+    if (PdfDarkModePagesDark() && IsLikelyLinkRgb(rgb[0], rgb[1], rgb[2])) {
         outRgb[0] = palette.linkR;
         outRgb[1] = palette.linkG;
         outRgb[2] = palette.linkB;

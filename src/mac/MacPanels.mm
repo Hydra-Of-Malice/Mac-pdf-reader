@@ -360,6 +360,8 @@ static const ShortcutRow kShortcutRows[] = {
     {"⌥⌘S", "Show / hide sidebar"},
     {"⌥⌘3  ⌥⌘2", "Sidebar: outline / thumbnails"},
     {"⌃⌘F", "Enter / exit full screen"},
+    {"⇧⌘D", "Toggle light / dark appearance"},
+    {"⇧⌘I", "Invert document colors"},
     {nullptr, "Find and select"},
     {"⌘F", "Find (toolbar search field or find bar)"},
     {"⌘G  ⇧⌘G", "Find next / previous"},

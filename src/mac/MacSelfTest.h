@@ -31,6 +31,9 @@ struct SumatraTestState {
     bool sidebarVisible;
     int thumbnails; // sidebar thumbnails on screen with an image
     int lastOpenError; // MacOpenError of the last failed open
+    bool darkAppearance; // NSApp's effective appearance is dark
+    int docColors;       // effective document colors: 0 normal, 1 smart dark, 2 inverted
+    bool docColorsMatch; // document colors follow the appearance
 };
 
 @protocol SumatraSelfTestHost <NSObject>
@@ -45,6 +48,7 @@ struct SumatraTestState {
 - (void)openPaths:(NSArray*)paths;
 - (void)selfTestReloadPrefs;
 - (BOOL)selfTestPrintToPDF:(NSString*)path firstPage:(int)first lastPage:(int)last;
+- (double)selfTestThumbnailLuminance;
 - (void)selfTestFinished:(int)exitCode;
 @end
 

@@ -62,6 +62,21 @@ headers clash with Sumatra names such as `Size`), so the two sides meet only thr
 - Select All on long documents: `MacPrepareTextStart()` extracts every page's text on a worker (the engine's text
   cache is thread-safe), progress arrives on the main queue with a token; `MacCloseDocument()` joins the worker.
 
+## Appearance and document colors
+
+- The UI follows `NSApp.appearance`: nil (macOS setting), Aqua or DarkAqua (View › Appearance). Custom drawing uses
+  dynamic colors (`SumatraCanvasColor()`, the page border, `secondaryLabelColor`) resolved when drawn, so a switch
+  needs no code; highlights get stronger on dark pages.
+- Document colors (View › Document Colors) go to the bridge with `MacSetDocColors()`: Normal, Smart Dark
+  (background #1E1E1E, text #E6E6E6, like macOS's dark windows; pictures kept unless Preserve Image Colors is off)
+  or Inverted. Match Appearance picks Smart Dark while the effective appearance is dark. The app observes
+  `NSApp.effectiveAppearance` (KVO), so switching macOS to dark re-renders the documents; on a change it drops its
+  page images and reloads the thumbnails (the bridge drops its renders and thumbnail cache).
+- Saved in the user defaults, not the settings file: `Appearance` (system / light / dark), `DocumentColors`
+  (normal / smart / invert), `DocumentColorsMatchAppearance`, `PreserveImageColors`. The settings file always holds
+  the Windows defaults for `Theme` and `DocumentColorsFollowTheme`, so they can't express "follow macOS". Invert
+  Colors is not saved. `-for-testing` neither reads nor writes these; `-appearance` / `-doc-colors` override them.
+
 ## Coordinates
 
 - The document view is flipped (y down), in points. `MacLayoutDocument()` returns each page's frame in document

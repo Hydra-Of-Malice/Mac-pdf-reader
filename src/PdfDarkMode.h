@@ -134,6 +134,9 @@ int GetPreservePdfImagesMinSize();
 PdfDarkModeRenderer GetPdfDarkModeRenderer();
 
 bool PdfDarkModeUsesObjectLevel();
+// are the effective page colors dark (i.e. is a dark mode active)?
+bool PdfDarkModePagesDark();
+DarkModePalette PdfDarkModePaletteFromColors(Color textCol, Color bgCol, Color linkCol);
 bool DarkModeProfileUsesObjectLevel(const DarkModeProfile* profile);
 bool DarkModeProfileUsesLegacyPostProcess(const DarkModeProfile* profile);
 void BuildViewDarkModeProfile(EngineBase* engine, DarkModeProfile* profile);

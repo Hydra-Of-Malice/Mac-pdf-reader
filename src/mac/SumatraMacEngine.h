@@ -192,3 +192,26 @@ int MacPrepareTextStart(void* document, MacTextProgressCallback onProgress, void
 void MacPrepareTextCancel(void* document);
 void MacLayOutAllPages(void* document);
 void MacResetTempArena();
+
+//--- document colors (dark mode)
+
+enum class MacDocColors {
+    Normal = 0,
+    SmartDark = 1,
+    Inverted = 2,
+};
+
+struct MacDocColorScheme {
+    MacDocColors mode;
+    unsigned int backgroundRgb; // 0xRRGGBB page background for SmartDark (e.g. 0x1E1E1E)
+    unsigned int textRgb;       // 0xRRGGBB text color for SmartDark (e.g. 0xE6E6E6)
+    bool preserveImages;        // SmartDark: keep images' original colors (Windows CmdTogglePreservePdfImages)
+};
+
+// Global; main thread. Starts a new color epoch: drops the cached renders of all
+// open documents and thumbnails, discards renders in flight from the old epoch,
+// and page-ready callbacks fire as the new renders land. The default is Normal
+// (backgroundRgb 0x1E1E1E, textRgb 0xE6E6E6, preserveImages true).
+// MacRenderPageForPrint() always renders Normal colors.
+void MacSetDocColors(const MacDocColorScheme* scheme);
+void MacGetDocColors(MacDocColorScheme* out);

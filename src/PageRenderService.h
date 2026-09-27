@@ -3,6 +3,7 @@
 
 class EngineBase;
 struct Gfx;
+struct RenderPageArgs;
 struct PageRenderKey;
 enum class PageRenderPriority;
 
@@ -14,6 +15,10 @@ enum class PageRenderEngine {
     Shared,
 };
 
+// How the worker renders a page; the default is engine->RenderPage(args). The macOS reader passes
+// RenderPageWithDocColors (DocColors.h) to apply its dark mode.
+using PageRenderFn = Pixmap* (*)(EngineBase* engine, RenderPageArgs& args);
+
 struct PageRenderService {
     void* data = nullptr;
 
@@ -23,7 +28,7 @@ struct PageRenderService {
     ~PageRenderService();
 
     static PageRenderService* Create(EngineBase* engine, const Func0& onPageReady, i64 maxBytes = 96LL * 1024 * 1024,
-                                     PageRenderEngine use = PageRenderEngine::Clone);
+                                     PageRenderEngine use = PageRenderEngine::Clone, PageRenderFn render = nullptr);
 
     void NewGeneration();
     void CancelRequests();

@@ -10,8 +10,45 @@
 
 static const CGFloat kDragThreshold = 4.0;
 static const CGFloat kSpinnerSize = 32.0;
+// gray around the pages; dark pages (#1E1E1E) stay distinguishable from the dark one
+static const CGFloat kCanvasLightWhite = 0.78;
+static const CGFloat kCanvasDarkWhite = 0.08;
 static const double kPrintDpi = 300.0;
 static const double kMaxPrintPixels = 64.0 * 1024 * 1024;
+
+BOOL SumatraIsDarkAppearance(NSAppearance* appearance) {
+    NSAppearanceName name = [appearance bestMatchFromAppearancesWithNames:@[
+        NSAppearanceNameAqua, NSAppearanceNameDarkAqua
+    ]];
+    return [name isEqualToString:NSAppearanceNameDarkAqua];
+}
+
+// Resolved when drawn, for the view's light or dark appearance.
+NSColor* SumatraCanvasColor(void) {
+    static NSColor* color = nil;
+    if (!color) {
+        color = [[NSColor colorWithName:@"SumatraCanvas"
+                        dynamicProvider:^NSColor*(NSAppearance* appearance) {
+                          CGFloat white = SumatraIsDarkAppearance(appearance) ? kCanvasDarkWhite : kCanvasLightWhite;
+                          return [NSColor colorWithCalibratedWhite:white alpha:1.0];
+                        }] retain];
+    }
+    return color;
+}
+
+static NSColor* PageBorderColor(void) {
+    static NSColor* color = nil;
+    if (!color) {
+        color = [[NSColor colorWithName:@"SumatraPageBorder"
+                        dynamicProvider:^NSColor*(NSAppearance* appearance) {
+                          if (SumatraIsDarkAppearance(appearance)) {
+                              return [NSColor colorWithCalibratedWhite:1.0 alpha:0.22];
+                          }
+                          return [NSColor colorWithCalibratedWhite:0.0 alpha:0.35];
+                        }] retain];
+    }
+    return color;
+}
 
 static void ReleasePagePixels(void* info, const void* data, size_t size) {
     (void)data;
@@ -131,7 +168,21 @@ enum class DragMode {
     [_pages release];
     [_message release];
     [_spinner release];
+    [_pageColor release];
     [super dealloc];
+}
+
+- (void)setPageColor:(NSColor*)color {
+    if (_pageColor != color) {
+        [_pageColor release];
+        _pageColor = [color retain];
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (void)setDarkPages:(BOOL)dark {
+    _darkPages = dark;
+    [self setNeedsDisplay:YES];
 }
 
 - (void)placeSpinner {
@@ -193,7 +244,7 @@ enum class DragMode {
     [paragraph setAlignment:NSTextAlignmentCenter];
     NSDictionary* attrs = @{
         NSFontAttributeName : [NSFont systemFontOfSize:15],
-        NSForegroundColorAttributeName : [NSColor colorWithCalibratedWhite:0.85 alpha:1.0],
+        NSForegroundColorAttributeName : [NSColor secondaryLabelColor],
         NSParagraphStyleAttributeName : paragraph,
     };
     NSRect box = NSInsetRect([self visibleRect], 24, 24);
@@ -221,7 +272,7 @@ enum class DragMode {
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
-    [[NSColor colorWithCalibratedWhite:0.18 alpha:1.0] setFill];
+    [SumatraCanvasColor() setFill];
     NSRectFill(dirtyRect);
     if ([_pages count] == 0) {
         [self drawMessage];
@@ -229,9 +280,12 @@ enum class DragMode {
     }
 
     CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
-    NSColor* border = [NSColor colorWithCalibratedWhite:0.05 alpha:1.0];
-    NSColor* findColor = [NSColor colorWithCalibratedRed:1.0 green:0.8 blue:0.0 alpha:0.45];
-    NSColor* selectionColor = [[NSColor selectedTextBackgroundColor] colorWithAlphaComponent:0.5];
+    NSColor* border = PageBorderColor();
+    // stronger highlights on dark pages, where a light tint barely shows
+    CGFloat alpha = _darkPages ? 0.6 : 0.45;
+    NSColor* findColor = [NSColor colorWithCalibratedRed:1.0 green:0.8 blue:0.0 alpha:alpha];
+    NSColor* selectionColor = [[NSColor selectedTextBackgroundColor] colorWithAlphaComponent:_darkPages ? 0.65 : 0.5];
+    NSColor* pageColor = _pageColor ?: [NSColor whiteColor];
     for (SumatraPageImage* page in _pages) {
         NSRect frame = [page frame];
         if (!NSIntersectsRect(NSInsetRect(frame, -2, -2), dirtyRect)) {
@@ -239,7 +293,7 @@ enum class DragMode {
         }
         [border setFill];
         NSFrameRectWithWidth(NSInsetRect(frame, -1, -1), 1.0);
-        [[NSColor whiteColor] setFill];
+        [pageColor setFill];
         NSRectFill(frame);
         CGImageRef image = [page image];
         if (image && ctx) {

@@ -7376,7 +7376,9 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
                 fz_enable_device_hints(ctx, dev, FZ_DONT_INTERPOLATE_IMAGES);
             }
             DarkModeReplayState replayState{};
-            if (objectLevelDark && pdfdoc) {
+            // Windows asks for it only on PDFs (EngineSupportsSmartDarkMode); the macOS
+            // reader on every MuPDF document: the device only needs the display list
+            if (objectLevelDark) {
                 DarkModePageAnalysis* analysis =
                     PdfDarkModeGetOrBuildAnalysis(ctx, pageInfo, keptList, args.darkProfile->hash, darkModeEngineCache);
                 if (analysis) {

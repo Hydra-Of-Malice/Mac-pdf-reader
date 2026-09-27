@@ -32,10 +32,23 @@ static const CGFloat kScrollProbe = 60.0;
 static const int kMaxSnapshotSamples = 250;
 static const int kPrintPages = 3;
 static const double kOpenCallMaxMs = 500.0;
+static const double kLightLum = 0.75;
+static const double kDarkLum = 0.25;
+// dark mode checks: a dark page's mean luminance, and how close preserved or restored pages must stay
+static const double kDarkPageMaxLum = 0.35;
+static const double kSameLumTolerance = 0.12;
+static const double kInvertTolerance = 0.2;
+static const double kDarkThumbMaxLum = 0.4;
+static const CGFloat kCanvasMinWidth = 8;
 static const NSUInteger kWhiteLevel = 230;
 
 // "case/step" being run, printed by the watchdog
 static char gCurrentStep[256];
+
+// one document of each kind goes through the dark mode steps
+static NSSet* DarkModeCases() {
+    return [NSSet setWithObjects:@"pdf-text", @"epub-sample", @"cbz-sample", @"png", nil];
+}
 
 static double Now() {
     return CFAbsoluteTimeGetCurrent();
@@ -80,6 +93,65 @@ static NSMenuItem* FindMenuItem(NSMenu* menu, SEL action) {
         }
     }
     return nil;
+}
+
+// Pixel statistics of part of a document view capture.
+struct PixelStats {
+    int samples;
+    int inked;          // not white (a color channel below kWhiteLevel)
+    double meanLum;     // mean luminance, 0..1
+    double lightShare;  // share of samples brighter than kLightLum
+    double darkShare;   // share of samples darker than kDarkLum
+};
+
+// Samples r (view coordinates) of rep, a capture of the view's visible rect.
+// Bitmap rows run top-down, like the flipped view.
+static PixelStats MeasurePixels(NSBitmapImageRep* rep, NSRect visible, NSRect r) {
+    PixelStats stats = {};
+    r = NSIntersectionRect(r, visible);
+    if (!rep || NSIsEmptyRect(r) || [rep pixelsWide] <= 0) {
+        return stats;
+    }
+    double scale = (double)[rep pixelsWide] / visible.size.width;
+    NSInteger x0 = MAX((NSInteger)0, (NSInteger)((r.origin.x - visible.origin.x) * scale));
+    NSInteger y0 = MAX((NSInteger)0, (NSInteger)((r.origin.y - visible.origin.y) * scale));
+    NSInteger x1 = MIN([rep pixelsWide], (NSInteger)((NSMaxX(r) - visible.origin.x) * scale));
+    NSInteger y1 = MIN([rep pixelsHigh], (NSInteger)((NSMaxY(r) - visible.origin.y) * scale));
+    NSInteger step = MAX((NSInteger)1, MAX(x1 - x0, y1 - y0) / kMaxSnapshotSamples);
+    NSInteger nSamples = [rep samplesPerPixel];
+    BOOL alphaFirst = [rep hasAlpha] && ([rep bitmapFormat] & NSBitmapFormatAlphaFirst) != 0;
+    NSInteger first = alphaFirst ? 1 : 0;
+    NSInteger nColors = [rep hasAlpha] ? nSamples - 1 : nSamples;
+    double maxValue = (double)((1 << [rep bitsPerSample]) - 1);
+    double sum = 0;
+    int light = 0;
+    int dark = 0;
+    NSUInteger pixel[8] = {};
+    for (NSInteger y = y0; y < y1; y += step) {
+        for (NSInteger x = x0; x < x1; x += step) {
+            [rep getPixel:pixel atX:x y:y];
+            stats.samples++;
+            for (NSInteger i = 0; i < nColors && i + first < 8; i++) {
+                if (pixel[i + first] < kWhiteLevel) {
+                    stats.inked++;
+                    break;
+                }
+            }
+            double lum = pixel[first] / maxValue;
+            if (nColors >= 3 && first + 2 < 8) {
+                lum = (0.2126 * pixel[first] + 0.7152 * pixel[first + 1] + 0.0722 * pixel[first + 2]) / maxValue;
+            }
+            sum += lum;
+            light += lum > kLightLum ? 1 : 0;
+            dark += lum < kDarkLum ? 1 : 0;
+        }
+    }
+    if (stats.samples > 0) {
+        stats.meanLum = sum / stats.samples;
+        stats.lightShare = (double)light / stats.samples;
+        stats.darkShare = (double)dark / stats.samples;
+    }
+    return stats;
 }
 
 static const char* OpenErrorName(int err) {
@@ -131,6 +203,8 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     char* _passwords[kMaxPasswords];
     int _passwordCount;
     NSMutableArray* _retiredPasswords; // NSValue pointers, freed in dealloc
+    BOOL _capturedDarkWindow;
+    BOOL _capturedLightWindow;
     int _prompts; // written by the loader thread
 }
 
@@ -644,6 +718,10 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     [self selectAndCopy:StringValue([c objectForKey:@"search"])];
     [self printToPDF];
 
+    if ([DarkModeCases() containsObject:_caseId] || [[c objectForKey:@"darkMode"] boolValue]) {
+        [self darkMode:c];
+    }
+
     // ebooks lay out all chapters while opening: page numbers never shift afterwards
     int pagesNow = [self state].pageCount;
     NSString* detail = [NSString stringWithFormat:@"%d pages at open, %d now", pagesAtOpen, pagesNow];
@@ -653,64 +731,59 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
 
 #pragma mark - Steps
 
+// Renders the document view's visible part into a bitmap (nil if it can't).
+- (NSBitmapImageRep*)captureDocumentView:(NSRect*)visibleOut {
+    SumatraDocumentView* view = (SumatraDocumentView*)[_host selfTestDocumentView];
+    NSRect visible = [view visibleRect];
+    *visibleOut = visible;
+    if (NSIsEmptyRect(visible)) {
+        return nil;
+    }
+    NSBitmapImageRep* rep = [view bitmapImageRepForCachingDisplayInRect:visible];
+    if (rep) {
+        [view cacheDisplayInRect:visible toBitmapImageRep:rep];
+    }
+    return rep;
+}
+
+- (BOOL)writePng:(NSBitmapImageRep*)rep file:(NSString*)file {
+    NSData* png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    return [png writeToFile:[_outDir stringByAppendingPathComponent:file] atomically:YES];
+}
+
+- (SumatraPageImage*)currentPageImage {
+    SumatraDocumentView* view = (SumatraDocumentView*)[_host selfTestDocumentView];
+    int current = [self state].currentPage;
+    SumatraPageImage* page = nil;
+    for (SumatraPageImage* p in [view pages]) {
+        if (!page || [p pageNo] == current) {
+            page = p;
+        }
+    }
+    return page;
+}
+
 // PNG of the document view next to the report; fails if the current page is blank.
 - (void)snapshot {
     [self beginStep:@"snapshot"];
     double t0 = Now();
-    SumatraDocumentView* view = (SumatraDocumentView*)[_host selfTestDocumentView];
-    NSRect visible = [view visibleRect];
-    NSBitmapImageRep* rep = [view bitmapImageRepForCachingDisplayInRect:visible];
-    if (!rep || NSIsEmptyRect(visible)) {
+    NSRect visible = NSZeroRect;
+    NSBitmapImageRep* rep = [self captureDocumentView:&visible];
+    if (!rep) {
         [self step:@"snapshot" ok:NO since:t0 detail:@"no bitmap"];
         return;
     }
-    [view cacheDisplayInRect:visible toBitmapImageRep:rep];
     NSString* file = [SafeFileName(_caseId) stringByAppendingPathExtension:@"png"];
-    NSData* png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
-    BOOL written = [png writeToFile:[_outDir stringByAppendingPathComponent:file] atomically:YES];
+    BOOL written = [self writePng:rep file:file];
     if (written) {
         [_case setObject:file forKey:@"snapshot"];
     }
-
-    struct SumatraTestState s = [self state];
-    SumatraPageImage* page = nil;
-    for (SumatraPageImage* p in [view pages]) {
-        if (!page || [p pageNo] == s.currentPage) {
-            page = p;
-        }
-    }
-    NSRect r = page ? NSIntersectionRect(NSInsetRect([page frame], 2, 2), visible) : NSZeroRect;
-    int samples = 0;
-    int inked = 0;
-    if (!NSIsEmptyRect(r) && [rep pixelsWide] > 0) {
-        // bitmap rows run top-down, like the flipped view
-        double scale = (double)[rep pixelsWide] / visible.size.width;
-        NSInteger x0 = (NSInteger)((r.origin.x - visible.origin.x) * scale);
-        NSInteger y0 = (NSInteger)((r.origin.y - visible.origin.y) * scale);
-        NSInteger x1 = MIN([rep pixelsWide], (NSInteger)((NSMaxX(r) - visible.origin.x) * scale));
-        NSInteger y1 = MIN([rep pixelsHigh], (NSInteger)((NSMaxY(r) - visible.origin.y) * scale));
-        NSInteger step = MAX((NSInteger)1, MAX(x1 - x0, y1 - y0) / kMaxSnapshotSamples);
-        NSInteger nSamples = [rep samplesPerPixel];
-        BOOL alphaFirst = [rep hasAlpha] && ([rep bitmapFormat] & NSBitmapFormatAlphaFirst) != 0;
-        NSInteger firstColor = alphaFirst ? 1 : 0;
-        NSInteger nColors = [rep hasAlpha] ? nSamples - 1 : nSamples;
-        NSUInteger pixel[8] = {};
-        for (NSInteger y = MAX((NSInteger)0, y0); y < y1; y += step) {
-            for (NSInteger x = MAX((NSInteger)0, x0); x < x1; x += step) {
-                [rep getPixel:pixel atX:x y:y];
-                samples++;
-                for (NSInteger i = 0; i < nColors && i + firstColor < 8; i++) {
-                    if (pixel[i + firstColor] < kWhiteLevel) {
-                        inked++;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    SumatraPageImage* page = [self currentPageImage];
+    NSRect r = page ? NSInsetRect([page frame], 2, 2) : NSZeroRect;
+    PixelStats stats = MeasurePixels(rep, visible, r);
     NSString* detail = [NSString stringWithFormat:@"%@%@, %d of %d samples inked", file, written ? @"" : @" (not written)",
-                                                   inked, samples];
-    [self step:@"snapshot" ok:written && inked > 0 since:t0 detail:detail];
+                                                   stats.inked, stats.samples];
+    [self step:@"snapshot" ok:written && stats.inked > 0 since:t0 detail:detail];
 }
 
 - (void)goToPageUsingField:(int)pageNo name:(NSString*)name {
@@ -1145,6 +1218,199 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     NSString* detail = err ?: [NSString stringWithFormat:@"%lu characters%@", (unsigned long)[text length],
                                                          ok || !textDoc ? @"" : @", search word missing"];
     [self step:@"copy" ok:ok since:t0 detail:detail];
+}
+
+#pragma mark - Dark mode
+
+// Captures the current page after a color change: <case><suffix>.png next to
+// the report, page and canvas (left of the page) statistics.
+- (BOOL)capturePage:(NSString*)suffix page:(PixelStats*)pageStats canvas:(PixelStats*)canvasStats {
+    *pageStats = {};
+    *canvasStats = {};
+    NSRect visible = NSZeroRect;
+    NSBitmapImageRep* rep = [self captureDocumentView:&visible];
+    SumatraPageImage* page = [self currentPageImage];
+    if (!rep || !page) {
+        return NO;
+    }
+    NSString* file = [NSString stringWithFormat:@"%@%@.png", SafeFileName(_caseId), suffix];
+    [self writePng:rep file:file];
+    NSRect f = [page frame];
+    *pageStats = MeasurePixels(rep, visible, NSInsetRect(f, 2, 2));
+    CGFloat canvasWidth = NSMinX(f) - 3 - NSMinX(visible);
+    if (canvasWidth >= kCanvasMinWidth) {
+        NSRect canvas = NSMakeRect(NSMinX(visible), NSMinY(visible), canvasWidth, NSHeight(visible));
+        *canvasStats = MeasurePixels(rep, visible, canvas);
+    }
+    return YES;
+}
+
+// The whole window (toolbar, sidebar, document) in the current appearance, once per run.
+- (void)captureWindow:(NSString*)file {
+    NSWindow* window = [_host selfTestWindow];
+    NSView* view = [[window contentView] superview] ?: [window contentView];
+    NSRect r = [view bounds];
+    NSBitmapImageRep* rep = [view bitmapImageRepForCachingDisplayInRect:r];
+    if (!rep) {
+        return;
+    }
+    [view cacheDisplayInRect:r toBitmapImageRep:rep];
+    if ([self writePng:rep file:file]) {
+        NSMutableArray* captures = [_report objectForKey:@"windowCaptures"];
+        if (!captures) {
+            captures = [NSMutableArray array];
+            [_report setObject:captures forKey:@"windowCaptures"];
+        }
+        [captures addObject:file];
+    }
+}
+
+- (NSString*)statsText:(PixelStats)stats {
+    return [NSString stringWithFormat:@"mean luminance %.2f, %.1f%% light, %.1f%% dark", stats.meanLum,
+                                      stats.lightShare * 100.0, stats.darkShare * 100.0];
+}
+
+// Runs a document colors / appearance command and waits for the new renders.
+- (NSString*)recolor:(SEL)action {
+    NSString* err = [self invoke:action];
+    if (err) {
+        return err;
+    }
+    [self settle];
+    return [self waitRendered] ? nil : @"not re-rendered in time";
+}
+
+// Light and dark appearance, Smart Dark and inverted document colors, dark
+// thumbnails, and back: the canvas follows the appearance, text pages turn
+// dark with light text, pictures keep their colors in Smart Dark.
+- (void)darkMode:(NSDictionary*)c {
+    BOOL textDoc = [StringValue([c objectForKey:@"search"]) length] > 0;
+    [self invoke:@selector(zoomFitPage:)];
+    if ([self state].currentPage != 1) {
+        [self invoke:@selector(goToFirstPage:)];
+    }
+    [self waitRendered];
+
+    // light appearance, the document's own colors: the reference
+    [self beginStep:@"light appearance"];
+    double t0 = Now();
+    NSString* err = [self invoke:@selector(useLightAppearance:)];
+    err = err ?: [self recolor:@selector(useNormalDocColors:)];
+    PixelStats light = {};
+    PixelStats canvas = {};
+    if (!err && ![self capturePage:@"-light-before" page:&light canvas:&canvas]) {
+        err = @"no capture";
+    }
+    struct SumatraTestState s = [self state];
+    if (!err && (s.darkAppearance || s.docColors != 0)) {
+        err = @"appearance or document colors not light";
+    }
+    if (!err && canvas.samples > 0 && canvas.meanLum < 0.5) {
+        err = [NSString stringWithFormat:@"canvas too dark for the light appearance (%.2f)", canvas.meanLum];
+    }
+    [self step:@"light appearance" ok:!err since:t0 detail:err ?: [self statsText:light]];
+    if (err) {
+        return;
+    }
+
+    // dark appearance, normal pages: the canvas turns dark
+    [self beginStep:@"dark appearance"];
+    t0 = Now();
+    err = [self recolor:@selector(useDarkAppearance:)];
+    PixelStats page = {};
+    [self capturePage:@"-dark-appearance" page:&page canvas:&canvas];
+    s = [self state];
+    if (!err && !s.darkAppearance) {
+        err = @"effective appearance isn't dark";
+    }
+    if (!err && canvas.samples > 0 && canvas.meanLum > kDarkLum) {
+        err = [NSString stringWithFormat:@"canvas not dark (%.2f)", canvas.meanLum];
+    }
+    NSString* detail = canvas.samples > 0 ? [NSString stringWithFormat:@"canvas luminance %.2f", canvas.meanLum]
+                                          : @"no canvas beside the page";
+    [self step:@"dark appearance" ok:!err since:t0 detail:err ? [NSString stringWithFormat:@"%@; %@", err, detail] : detail];
+
+    // Smart Dark: dark page, light text; pictures keep their colors
+    [self beginStep:@"smart dark"];
+    t0 = Now();
+    err = [self recolor:@selector(useSmartDarkDocColors:)];
+    [self capturePage:@"-dark" page:&page canvas:&canvas];
+    if (!err && [self state].docColors != 1) {
+        err = @"document colors aren't Smart Dark";
+    }
+    if (!err && textDoc && (page.meanLum > kDarkPageMaxLum || page.lightShare <= 0)) {
+        err = @"page not dark with light text";
+    }
+    if (!err && !textDoc && fabs(page.meanLum - light.meanLum) > kSameLumTolerance) {
+        err = [NSString stringWithFormat:@"picture colors not preserved (light %.2f)", light.meanLum];
+    }
+    detail = [self statsText:page];
+    [self step:@"smart dark" ok:!err since:t0 detail:err ? [NSString stringWithFormat:@"%@; %@", err, detail] : detail];
+    if (!_capturedDarkWindow) {
+        _capturedDarkWindow = YES;
+        [self captureWindow:@"window-dark.png"];
+    }
+
+    // thumbnails are rendered again in Smart Dark
+    [self beginStep:@"dark thumbnails"];
+    t0 = Now();
+    err = [self invoke:@selector(showThumbnails:)];
+    __block double thumbLum = -1;
+    BOOL dark = !err && [self waitFor:^BOOL {
+        thumbLum = [_host selfTestThumbnailLuminance];
+        return thumbLum >= 0 && (!textDoc || thumbLum < kDarkThumbMaxLum);
+    }
+                                seconds:_waitSeconds];
+    if (!err && !dark) {
+        err = thumbLum < 0 ? @"no thumbnail" : @"thumbnail not dark";
+    }
+    detail = [NSString stringWithFormat:@"thumbnail luminance %.2f", thumbLum];
+    [self step:@"dark thumbnails" ok:!err since:t0 detail:err ? [NSString stringWithFormat:@"%@; %@", err, detail] : detail];
+    [self invoke:@selector(toggleSidebar:)];
+
+    // inverted: the light page's luminance flips
+    [self beginStep:@"inverted"];
+    t0 = Now();
+    err = [self recolor:@selector(useInvertedDocColors:)];
+    [self capturePage:@"-invert" page:&page canvas:&canvas];
+    if (!err && [self state].docColors != 2) {
+        err = @"document colors aren't inverted";
+    }
+    if (!err && fabs(page.meanLum - (1.0 - light.meanLum)) > kInvertTolerance) {
+        err = [NSString stringWithFormat:@"not inverted (light %.2f)", light.meanLum];
+    }
+    detail = [self statsText:page];
+    [self step:@"inverted" ok:!err since:t0 detail:err ? [NSString stringWithFormat:@"%@; %@", err, detail] : detail];
+
+    // Match Appearance: Smart Dark while dark, normal colors once light again
+    [self beginStep:@"match appearance"];
+    t0 = Now();
+    err = [self state].docColorsMatch ? nil : [self recolor:@selector(toggleMatchAppearance:)];
+    if (!err && [self state].docColors != 1) {
+        err = @"dark appearance doesn't give Smart Dark";
+    }
+    err = err ?: [self recolor:@selector(useLightAppearance:)];
+    [self capturePage:@"-light" page:&page canvas:&canvas];
+    if (!err && [self state].docColors != 0) {
+        err = @"light appearance doesn't give normal colors";
+    }
+    if (!err && fabs(page.meanLum - light.meanLum) > kSameLumTolerance) {
+        err = [NSString stringWithFormat:@"page not back to its colors (was %.2f)", light.meanLum];
+    }
+    detail = [self statsText:page];
+    [self step:@"match appearance" ok:!err since:t0 detail:err ? [NSString stringWithFormat:@"%@; %@", err, detail] : detail];
+    if (!_capturedLightWindow) {
+        _capturedLightWindow = YES;
+        [self captureWindow:@"window-light.png"];
+    }
+
+    // defaults for the next cases: follow macOS, colors match the appearance
+    [self invoke:@selector(useSystemAppearance:)];
+    if (![self state].docColorsMatch) {
+        [self invoke:@selector(toggleMatchAppearance:)];
+    }
+    [self settle];
+    [self waitRendered];
 }
 
 // The print path with a Save-as-PDF job: the PDF must have one page per printed page.

@@ -120,6 +120,31 @@ jobs:
           fi
           tail -50 "$smoke/app.log"
 
+      # The same straight into dark mode (dark appearance, Smart Dark pages); the screenshot is uploaded with the
+      # smoke results for a visual check.
+      - name: Dark launch smoke test
+        if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
+        run: |
+          app=$(find out -maxdepth 3 -type d -name SumatraPDF.app | head -1)
+          test -n "$app"
+          smoke="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke"
+          "$app/Contents/MacOS/SumatraPDF" -for-testing -appearance dark -doc-colors smart \
+            "$PWD/tests/mac/fixtures/text.pdf" > "$smoke/app-dark.log" 2>&1 &
+          pid=$!
+          sleep 15
+          screencapture -x "$smoke/screen-dark.png" || echo "screencapture failed"
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "app still running after 15s"
+            kill "$pid"
+          else
+            wait "$pid" && rc=0 || rc=$?
+            echo "app exited early with code $rc"
+            tail -50 "$smoke/app-dark.log"
+            exit 1
+          fi
+          tail -50 "$smoke/app-dark.log"
+
       - name: Upload smoke test results
         if: always()
         uses: actions/upload-artifact@v4
