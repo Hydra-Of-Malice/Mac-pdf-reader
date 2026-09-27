@@ -6,6 +6,8 @@
 //          [--jobs <n>] [--timeout-ms <n>] [--budget-s <n>] [--only <id-substring>] [--max-size <bytes>] [--ci]
 // --ci: the small, fixed, fast subset CI runs (seed 1, 3 variants of each fixture up to 40 KB).
 // --max-size: skip bigger fixtures (under ASan each job on a big book can take gigabytes).
+// --max-rss-mb: (Linux) kill a driver whose RSS grows past this (default 2048, 0: no limit) and report it, so that
+// --jobs variants claiming huge images can't exhaust the machine's memory at once (that took WSL down).
 // A given --seed / --count always produces the same variants. Exit code 1 if anything crashed or hung.
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -30,7 +32,7 @@ interface Variant {
 
 interface Outcome {
   variant: Variant;
-  kind: "ok" | "crash" | "sanitizer" | "hang";
+  kind: "ok" | "crash" | "sanitizer" | "hang" | "memory";
   detail: string;
   stage: string;
   ms: number;
@@ -58,6 +60,7 @@ function parseArgs() {
     only: "",
     ci: false,
     maxSize: 0,
+    maxRssMb: 2048,
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -71,6 +74,7 @@ function parseArgs() {
     else if (a === "--only") o.only = next();
     else if (a === "--ci") o.ci = true;
     else if (a === "--max-size") o.maxSize = Number(next());
+    else if (a === "--max-rss-mb") o.maxRssMb = Number(next());
     else {
       console.error(`unknown argument: ${a}`);
       process.exit(2);
@@ -251,7 +255,17 @@ function crashFrame(lines: string[]): string {
   return "";
 }
 
-async function runDriver(driver: string, v: Variant, timeoutMs: number): Promise<Outcome> {
+// the process' resident memory in MB, from /proc (Linux only; 0 elsewhere or once it's gone)
+function rssMb(pid: number): number {
+  try {
+    const m = /VmRSS:\s+(\d+) kB/.exec(readFileSync(`/proc/${pid}/status`, "utf8"));
+    return m ? Math.round(Number(m[1]) / 1024) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function runDriver(driver: string, v: Variant, timeoutMs: number, maxRssMb: number): Promise<Outcome> {
   const start = performance.now();
   const args = [v.file, "-fuzz"];
   if (v.fixture.password) args.push("-password", v.fixture.password.split(",").pop()!);
@@ -265,10 +279,22 @@ async function runDriver(driver: string, v: Variant, timeoutMs: number): Promise
     timedOut = true;
     proc.kill(9);
   }, timeoutMs);
+  let rssOverMb = 0;
+  const rssTimer =
+    maxRssMb > 0 && process.platform === "linux"
+      ? setInterval(() => {
+          const mb = rssMb(proc.pid);
+          if (mb > maxRssMb && rssOverMb === 0) {
+            rssOverMb = mb;
+            proc.kill(9);
+          }
+        }, 200)
+      : undefined;
   const stdoutP = new Response(proc.stdout).text();
   const stderrP = new Response(proc.stderr).text();
   const code = await proc.exited;
   clearTimeout(timer);
+  clearInterval(rssTimer);
   const drain = (p: Promise<string>) => Promise.race([p, Bun.sleep(2000).then(() => "")]);
   const [stdout, stderr] = await Promise.all([drain(stdoutP), drain(stderrP)]);
   const ms = performance.now() - start;
@@ -281,6 +307,7 @@ async function runDriver(driver: string, v: Variant, timeoutMs: number): Promise
     .join("\n");
   const san = stderr.split("\n").find((l) => /ERROR: AddressSanitizer|runtime error:|SUMMARY: \w+Sanitizer/.test(l));
   if (timedOut) return { variant: v, kind: "hang", detail: `timeout ${timeoutMs} ms`, stage, ms, log };
+  if (rssOverMb > 0) return { variant: v, kind: "memory", detail: `RSS over ${maxRssMb} MB`, stage, ms, log };
   // the driver's -fuzz watchdog fired: a hang, with the stuck call's stack in the log
   if (stderr.includes("watchdog: no progress")) {
     const frame = lines.find((l) => /^\s+#[0-9]+ .* in (?!__sanitizer|OnWatchdog|__restore|killpg|pthread)/.test(l));
@@ -362,7 +389,7 @@ async function main() {
       }
       const v = variants[next++];
       if (!v) return;
-      const res = await runDriver(o.driver, v, o.timeoutMs);
+      const res = await runDriver(o.driver, v, o.timeoutMs, o.maxRssMb);
       outcomes.push(res);
       if (res.kind !== "ok") {
         const dst = saveRepro(res, res.log ?? "");

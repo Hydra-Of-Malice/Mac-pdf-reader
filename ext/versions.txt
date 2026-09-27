@@ -57,6 +57,10 @@ djvudec         main       2026-08-01
   local change (re-apply on update; upstream to github.com/kjk/djvudec): djvu.c compose_bg_native_build()
   checks djvu_compute_red() before rendering the BG44 layer; a damaged header claiming a huge layer made the
   render take a minute, only for compose_background_from_native() to reject the size (found by fuzzing)
+  local change (re-apply on update; upstream to github.com/kjk/djvudec): djvu.c iw_bg_layer_oversized(), called
+  by decode_iw_layer_fresh() and preload_iw_layer(), reads the BG layer's size from its first chunk header and
+  skips decoding a layer that isn't the page's size reduced 1..15x (djvu_compute_red() < 1), which every renderer
+  rejects after decoding anyway; the damaged ~2 Gpx layer took 5-20 s and GBs to decode on macOS
 
 libwebp         1.6.0      2025-06-30
   https://github.com/webmproject/libwebp

@@ -444,7 +444,7 @@
       "format": "DjVu",
       "path": "tests/mac/fixtures/regress/djvu-huge-iw44-layer.djvu",
       "expect": "any",
-      "timeoutMs": 20000
+      "timeoutMs": 10000
     },
     {
       "id": "regress-chm-link-invalid-utf8",

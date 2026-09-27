@@ -6431,15 +6431,38 @@ static const char *resolve_iw_layer_id(djvu_doc *doc, djvu_page_int *pg,
     return id;
 }
 
+/* SumatraPDF local change: every renderer rejects a background layer whose size
+   isn't the page's reduced 1..15x (djvu_compute_red() < 1), but only after
+   decoding it. A damaged header can claim a ~2 Gpx layer, which takes GBs and
+   many seconds to decode: check the size in the first chunk's header first. */
+static int iw_bg_layer_oversized(djvu_doc *doc, djvu_page_int *pg,
+                                 const char *req_id, const char *id)
+{
+    uint32_t sz;
+    const uint8_t *p;
+    int w, h;
+
+    if (!pg->has_info || strcmp(req_id, "BG44") != 0) return 0;
+    p = djvu_form_find_chunk(doc, pg->form_off, id, &sz, NULL);
+    /* serial 0 carries the header: serial, slices, major, minor, w, h */
+    if (!p || sz < 8 || p[0] != 0) return 0;
+    w = (p[4] << 8) | p[5];
+    h = (p[6] << 8) | p[7];
+    return djvu_compute_red(pg->info.width, pg->info.height, w, h) < 1;
+}
+
 static iw_pixmap *decode_iw_layer_fresh(djvu_doc *doc, djvu_page_int *pg,
                                         const char *id)
 {
     uint32_t sz;
     int maxc;
     iw_pixmap *pm;
+    const char *req_id = id;
 
     id = resolve_iw_layer_id(doc, pg, id);
     if (!id || !djvu_form_find_chunk(doc, pg->form_off, id, &sz, NULL))
+        return NULL;
+    if (iw_bg_layer_oversized(doc, pg, req_id, id))
         return NULL;
     pm = djvu_iw44_new(doc->ctx);
     if (!pm) return NULL;
@@ -6457,10 +6480,13 @@ static void preload_iw_layer(djvu_doc *doc, djvu_page_int *pg, const char *id,
     uint32_t sz;
     int maxc;
     iw_pixmap *pm;
+    const char *req_id = id;
 
     if (!djvu_cache_stores_page(doc->ctx)) return;
     id = resolve_iw_layer_id(doc, pg, id);
     if (*slot || !id || !djvu_form_find_chunk(doc, pg->form_off, id, &sz, NULL))
+        return;
+    if (iw_bg_layer_oversized(doc, pg, req_id, id))
         return;
     pm = djvu_iw44_new(doc->ctx);
     if (!pm) return;
