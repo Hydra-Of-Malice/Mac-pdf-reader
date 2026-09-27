@@ -91,6 +91,20 @@ jobs:
         continue-on-error: true
         run: bun tests/mac/fuzz-engine.ts --driver out/mac-core-dbg-clang/test_mac_engine --ci
 
+      # Dark mode (MacSetDocColors): Smart Dark and Inverted on a subset of the formats (manifest "dark" entries):
+      # pages, kept photos, stale renders after a colors switch, thumbnails. Reported, not gating yet.
+      - name: Dark mode matrix
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: >-
+          bun tests/mac/run-engine-tests.ts --driver out/mac-core-dbg-clang/test_mac_engine --dark-only
+          --json out/mac-engine-dark-results.json
+
+      - name: Fuzz subset (Smart Dark)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: bun tests/mac/fuzz-engine.ts --driver out/mac-core-dbg-clang/test_mac_engine --ci --colors smart
+
       - name: Debug build
         id: debug
         if: ${{ !cancelled() }}
@@ -169,6 +183,7 @@ jobs:
           name: SumatraPDF-mac-${{ matrix.arch }}
           path: |
             out/mac-engine-results.json
+            out/mac-engine-dark-results.json
             tests/tmp/mac-fuzz/repro
             out/**/*.tar.gz
             out/**/*.dmg

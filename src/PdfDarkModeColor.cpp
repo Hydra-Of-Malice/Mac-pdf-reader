@@ -74,12 +74,12 @@ PdfDarkModeRenderer GetPdfDarkModeRenderer() {
     return kPdfDarkModeRenderer;
 }
 
-static float ColorChannel01(byte v) {
+static float ColorChannel01(u8 v) {
     return (float)v / 255.f;
 }
 
 DarkModePalette PdfDarkModePaletteFromColors(Color textCol, Color bgCol, Color linkCol) {
-    byte tr, tg, tb, br, bg, bb, lr, lg, lb;
+    u8 tr, tg, tb, br, bg, bb, lr, lg, lb;
     UnpackColor(textCol, tr, tg, tb);
     UnpackColor(bgCol, br, bg, bb);
     UnpackColor(linkCol, lr, lg, lb);
@@ -142,9 +142,9 @@ void PdfDarkModeClearPixmapToThemeBackground(fz_context* /*ctx*/, fz_pixmap* pix
     if (!pix || !pix->samples) {
         return;
     }
-    byte rb = (byte)lroundf(palette.bgR * 255.f);
-    byte gb = (byte)lroundf(palette.bgG * 255.f);
-    byte bb = (byte)lroundf(palette.bgB * 255.f);
+    u8 rb = (u8)lroundf(palette.bgR * 255.f);
+    u8 gb = (u8)lroundf(palette.bgG * 255.f);
+    u8 bb = (u8)lroundf(palette.bgB * 255.f);
     int w = pix->w;
     int h = pix->h;
     int n = pix->n;

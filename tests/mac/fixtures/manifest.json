@@ -1,5 +1,5 @@
 {
-  "comment": "Expectations for tests/mac/run-engine-tests.ts. regress/*: tests/mac/fuzz-engine.ts reproducers of fixed crashes and hangs. Paths are relative to the repo root. expect: open | fail | any (any = must not crash or hang). target: false = format not planned for the mac port. Fixtures in tests/mac/fixtures are made by tests/mac/make-fixtures.ts; large-2000.pdf and large-500.mobi are generated at test time; tests/mac/make-extra-fixtures.ts makes the image, MOBI and CHM fixtures it lists.",
+  "comment": "Expectations for tests/mac/run-engine-tests.ts. regress/*: tests/mac/fuzz-engine.ts reproducers of fixed crashes and hangs. Paths are relative to the repo root. expect: open | fail | any (any = must not crash or hang). target: false = format not planned for the mac port. dark: expectations of the dark mode pass (run-engine-tests.ts --dark), see DarkExpect there. Fixtures in tests/mac/fixtures are made by tests/mac/make-fixtures.ts; large-2000.pdf and large-500.mobi are generated at test time; tests/mac/make-extra-fixtures.ts makes the image, MOBI and CHM fixtures it lists.",
   "fixtures": [
     {
       "id": "pdf-text",
@@ -12,11 +12,25 @@
       "tocMin": 3,
       "tocFirst": "Chapter One",
       "links": [
-        { "kind": "page", "targetPage": 3 },
-        { "kind": "url", "value": "https://www.sumatrapdfreader.org/" }
+        {
+          "kind": "page",
+          "targetPage": 3
+        },
+        {
+          "kind": "url",
+          "value": "https://www.sumatrapdfreader.org/"
+        }
       ],
-      "props": { "title": "SumatraPDF mac fixture" },
-      "lastPageLandscape": true
+      "props": {
+        "title": "SumatraPDF mac fixture"
+      },
+      "lastPageLandscape": true,
+      "dark": [
+        {
+          "smart": "dark",
+          "invert": "invert"
+        }
+      ]
     },
     {
       "id": "pdf-aes128",
@@ -64,10 +78,30 @@
       "expect": "fail",
       "prompts": 1
     },
-    { "id": "pdf-truncated", "format": "PDF", "path": "tests/mac/fixtures/truncated.pdf", "expect": "any" },
-    { "id": "pdf-header-only", "format": "PDF", "path": "tests/mac/fixtures/header-only.pdf", "expect": "fail" },
-    { "id": "pdf-empty", "format": "PDF", "path": "tests/mac/fixtures/empty.pdf", "expect": "fail" },
-    { "id": "pdf-garbage", "format": "PDF", "path": "tests/mac/fixtures/garbage.pdf", "expect": "fail" },
+    {
+      "id": "pdf-truncated",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/truncated.pdf",
+      "expect": "any"
+    },
+    {
+      "id": "pdf-header-only",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/header-only.pdf",
+      "expect": "fail"
+    },
+    {
+      "id": "pdf-empty",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/empty.pdf",
+      "expect": "fail"
+    },
+    {
+      "id": "pdf-garbage",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/garbage.pdf",
+      "expect": "fail"
+    },
     {
       "id": "pdf-system-fonts",
       "format": "PDF",
@@ -75,6 +109,22 @@
       "expect": "open",
       "pages": 1,
       "search": "okapi"
+    },
+    {
+      "id": "pdf-photo",
+      "format": "PDF",
+      "path": "tests/mac/fixtures/photo.pdf",
+      "expect": "open",
+      "pages": 1,
+      "search": "heron",
+      "dark": [
+        {
+          "region": [0.13, 0.1, 0.87, 0.46],
+          "smart": "photo",
+          "smartNoPreserve": "recolor",
+          "invert": "invert"
+        }
+      ]
     },
     {
       "id": "pdf-large-2000",
@@ -88,8 +138,20 @@
       "stress": 500,
       "timeoutMs": 300000
     },
-    { "id": "pdf-repo-6132", "format": "PDF", "path": "tests/issue-6132.pdf", "expect": "open", "minPages": 1 },
-    { "id": "pdf-repo-5873", "format": "PDF", "path": "tests/issue-5873.pdf", "expect": "open", "minPages": 1 },
+    {
+      "id": "pdf-repo-6132",
+      "format": "PDF",
+      "path": "tests/issue-6132.pdf",
+      "expect": "open",
+      "minPages": 1
+    },
+    {
+      "id": "pdf-repo-5873",
+      "format": "PDF",
+      "path": "tests/issue-5873.pdf",
+      "expect": "open",
+      "minPages": 1
+    },
     {
       "id": "pdf-repo-xmp",
       "format": "PDF",
@@ -107,7 +169,21 @@
       "searchPage": 1,
       "tocMin": 2,
       "tocFirst": "Chapter One",
-      "links": [{ "kind": "page" }, { "kind": "url", "value": "https://www.sumatrapdfreader.org/" }]
+      "links": [
+        {
+          "kind": "page"
+        },
+        {
+          "kind": "url",
+          "value": "https://www.sumatrapdfreader.org/"
+        }
+      ],
+      "dark": [
+        {
+          "smart": "dark",
+          "invert": "invert"
+        }
+      ]
     },
     {
       "id": "epub-chapters-growth",
@@ -127,13 +203,48 @@
       "expect": "open",
       "minPages": 2,
       "search": "okapi",
-      "links": [{ "kind": "page" }],
-      "props": { "title": "LIT mac fixture" }
+      "links": [
+        {
+          "kind": "page"
+        }
+      ],
+      "props": {
+        "title": "LIT mac fixture"
+      }
     },
-    { "id": "epub-repo-5846", "format": "EPUB", "path": "tests/issue-5846.epub", "expect": "open", "minPages": 1 },
-    { "id": "epub-repo-6095", "format": "EPUB", "path": "tests/issue-6095.epub", "expect": "open", "minPages": 2 },
-    { "id": "epub-corrupt", "format": "EPUB", "path": "tests/mac/fixtures/corrupt.epub", "expect": "any" },
-    { "id": "epub-empty", "format": "EPUB", "path": "tests/mac/fixtures/empty.epub", "expect": "fail" },
+    {
+      "id": "epub-repo-5846",
+      "format": "EPUB",
+      "path": "tests/issue-5846.epub",
+      "expect": "open",
+      "minPages": 1,
+      "dark": [
+        {
+          "region": [0.12, 0.2, 0.78, 0.85],
+          "smart": "photo",
+          "invert": "invert"
+        }
+      ]
+    },
+    {
+      "id": "epub-repo-6095",
+      "format": "EPUB",
+      "path": "tests/issue-6095.epub",
+      "expect": "open",
+      "minPages": 2
+    },
+    {
+      "id": "epub-corrupt",
+      "format": "EPUB",
+      "path": "tests/mac/fixtures/corrupt.epub",
+      "expect": "any"
+    },
+    {
+      "id": "epub-empty",
+      "format": "EPUB",
+      "path": "tests/mac/fixtures/empty.epub",
+      "expect": "fail"
+    },
     {
       "id": "mobi-sample",
       "format": "MOBI",
@@ -141,7 +252,13 @@
       "expect": "open",
       "minPages": 2,
       "search": "numbat",
-      "searchPage": 1
+      "searchPage": 1,
+      "dark": [
+        {
+          "smart": "dark",
+          "invert": "invert"
+        }
+      ]
     },
     {
       "id": "azw-uncompressed",
@@ -152,8 +269,19 @@
       "search": "bilby",
       "searchPage": 1
     },
-    { "id": "azw3-repo-4315", "format": "MOBI", "path": "tests/issue-4315.azw3", "expect": "open", "pages": 2 },
-    { "id": "mobi-corrupt", "format": "MOBI", "path": "tests/mac/fixtures/corrupt.mobi", "expect": "any" },
+    {
+      "id": "azw3-repo-4315",
+      "format": "MOBI",
+      "path": "tests/issue-4315.azw3",
+      "expect": "open",
+      "pages": 2
+    },
+    {
+      "id": "mobi-corrupt",
+      "format": "MOBI",
+      "path": "tests/mac/fixtures/corrupt.mobi",
+      "expect": "any"
+    },
     {
       "id": "mobi-huffcdic",
       "format": "MOBI",
@@ -164,7 +292,12 @@
       "searchPage": 1,
       "tocMin": 3,
       "tocFirst": "Chapter One",
-      "links": [{ "kind": "page", "targetPage": 3 }]
+      "links": [
+        {
+          "kind": "page",
+          "targetPage": 3
+        }
+      ]
     },
     {
       "id": "mobi-drm-message",
@@ -201,7 +334,19 @@
       "search": "tarsier",
       "searchPage": 2
     },
-    { "id": "cbz-sample", "format": "CBZ", "path": "tests/mac/fixtures/sample.cbz", "expect": "open", "pages": 3 },
+    {
+      "id": "cbz-sample",
+      "format": "CBZ",
+      "path": "tests/mac/fixtures/sample.cbz",
+      "expect": "open",
+      "pages": 3,
+      "dark": [
+        {
+          "smart": "keep",
+          "invert": "keep"
+        }
+      ]
+    },
     {
       "id": "cbz-repo-1201",
       "format": "CBZ",
@@ -226,11 +371,38 @@
       "password": "sumatra",
       "pages": 3
     },
-    { "id": "cbz-huge-page-claims", "format": "CBZ", "path": "tests/mac/fixtures/huge-pages.cbz", "expect": "any" },
-    { "id": "cbz-corrupt", "format": "CBZ", "path": "tests/mac/fixtures/corrupt.cbz", "expect": "fail" },
-    { "id": "cbz-empty", "format": "CBZ", "path": "tests/mac/fixtures/empty.cbz", "expect": "fail" },
-    { "id": "cbr-rar4", "format": "CBR", "path": "tests/mac/fixtures/sample-rar4.cbr", "expect": "open", "pages": 3 },
-    { "id": "cbr-rar5", "format": "CBR", "path": "tests/mac/fixtures/sample-rar5.cbr", "expect": "open", "pages": 3 },
+    {
+      "id": "cbz-huge-page-claims",
+      "format": "CBZ",
+      "path": "tests/mac/fixtures/huge-pages.cbz",
+      "expect": "any"
+    },
+    {
+      "id": "cbz-corrupt",
+      "format": "CBZ",
+      "path": "tests/mac/fixtures/corrupt.cbz",
+      "expect": "fail"
+    },
+    {
+      "id": "cbz-empty",
+      "format": "CBZ",
+      "path": "tests/mac/fixtures/empty.cbz",
+      "expect": "fail"
+    },
+    {
+      "id": "cbr-rar4",
+      "format": "CBR",
+      "path": "tests/mac/fixtures/sample-rar4.cbr",
+      "expect": "open",
+      "pages": 3
+    },
+    {
+      "id": "cbr-rar5",
+      "format": "CBR",
+      "path": "tests/mac/fixtures/sample-rar5.cbr",
+      "expect": "open",
+      "pages": 3
+    },
     {
       "id": "cbr-password",
       "format": "CBR",
@@ -239,10 +411,32 @@
       "password": "sumatra",
       "pages": 3
     },
-    { "id": "cbr-password-missing", "format": "CBR", "path": "tests/mac/fixtures/password.cbr", "expect": "any" },
-    { "id": "cbr-corrupt", "format": "CBR", "path": "tests/mac/fixtures/corrupt.cbr", "expect": "fail" },
-    { "id": "cb7-sample", "format": "CB7", "path": "tests/mac/fixtures/sample.cb7", "expect": "open", "pages": 3 },
-    { "id": "cbt-sample", "format": "CBT", "path": "tests/mac/fixtures/sample.cbt", "expect": "open", "pages": 3 },
+    {
+      "id": "cbr-password-missing",
+      "format": "CBR",
+      "path": "tests/mac/fixtures/password.cbr",
+      "expect": "any"
+    },
+    {
+      "id": "cbr-corrupt",
+      "format": "CBR",
+      "path": "tests/mac/fixtures/corrupt.cbr",
+      "expect": "fail"
+    },
+    {
+      "id": "cb7-sample",
+      "format": "CB7",
+      "path": "tests/mac/fixtures/sample.cb7",
+      "expect": "open",
+      "pages": 3
+    },
+    {
+      "id": "cbt-sample",
+      "format": "CBT",
+      "path": "tests/mac/fixtures/sample.cbt",
+      "expect": "open",
+      "pages": 3
+    },
     {
       "id": "fb2-sample",
       "format": "FB2",
@@ -251,7 +445,13 @@
       "minPages": 1,
       "search": "echidna",
       "searchPage": 1,
-      "tocMin": 2
+      "tocMin": 2,
+      "dark": [
+        {
+          "smart": "dark",
+          "invert": "invert"
+        }
+      ]
     },
     {
       "id": "fbz-sample",
@@ -261,8 +461,20 @@
       "minPages": 1,
       "search": "dingo"
     },
-    { "id": "fb2-repo-2254", "format": "FB2", "path": "tests/issue-2254.fb2", "expect": "open", "minPages": 1 },
-    { "id": "fb2-repo-5792", "format": "FB2", "path": "tests/issue-5792.fb2", "expect": "open", "minPages": 1 },
+    {
+      "id": "fb2-repo-2254",
+      "format": "FB2",
+      "path": "tests/issue-2254.fb2",
+      "expect": "open",
+      "minPages": 1
+    },
+    {
+      "id": "fb2-repo-5792",
+      "format": "FB2",
+      "path": "tests/issue-5792.fb2",
+      "expect": "open",
+      "minPages": 1
+    },
     {
       "id": "chm-repo-2737",
       "format": "CHM",
@@ -271,7 +483,12 @@
       "minPages": 1,
       "search": "regression"
     },
-    { "id": "chm-repo-lzx-malformed", "format": "CHM", "path": "tests/issue-chm-lzx.chm", "expect": "any" },
+    {
+      "id": "chm-repo-lzx-malformed",
+      "format": "CHM",
+      "path": "tests/issue-chm-lzx.chm",
+      "expect": "any"
+    },
     {
       "id": "chm-sample",
       "format": "CHM",
@@ -282,7 +499,21 @@
       "searchPage": 1,
       "tocMin": 3,
       "tocFirst": "CHM Home",
-      "links": [{ "kind": "page" }, { "kind": "url", "value": "https://www.sumatrapdfreader.org/" }]
+      "links": [
+        {
+          "kind": "page"
+        },
+        {
+          "kind": "url",
+          "value": "https://www.sumatrapdfreader.org/"
+        }
+      ],
+      "dark": [
+        {
+          "smart": "dark",
+          "invert": "invert"
+        }
+      ]
     },
     {
       "id": "chm-large-1025-topics",
@@ -305,7 +536,12 @@
       "searchPage": 1,
       "tocMin": 104,
       "tocFirst": "Tricky Home",
-      "links": [{ "kind": "page", "targetPage": 2 }]
+      "links": [
+        {
+          "kind": "page",
+          "targetPage": 2
+        }
+      ]
     },
     {
       "id": "chm-tricky-windows-1253",
@@ -341,11 +577,28 @@
       "searchPage": 1,
       "tocMin": 2,
       "links": [
-        { "kind": "page", "targetPage": 2 },
-        { "kind": "url", "value": "https://www.sumatrapdfreader.org/" }
+        {
+          "kind": "page",
+          "targetPage": 2
+        },
+        {
+          "kind": "url",
+          "value": "https://www.sumatrapdfreader.org/"
+        }
+      ],
+      "dark": [
+        {
+          "smart": "dark",
+          "invert": "invert"
+        }
       ]
     },
-    { "id": "xps-corrupt", "format": "XPS", "path": "tests/mac/fixtures/corrupt.xps", "expect": "fail" },
+    {
+      "id": "xps-corrupt",
+      "format": "XPS",
+      "path": "tests/mac/fixtures/corrupt.xps",
+      "expect": "fail"
+    },
     {
       "id": "djvu-sample",
       "format": "DjVu",
@@ -354,14 +607,73 @@
       "pages": 2,
       "search": "wombat",
       "searchPage": 1,
-      "tocMin": 2
+      "tocMin": 2,
+      "dark": [
+        {
+          "page": 2,
+          "smart": "dark",
+          "invert": "invert"
+        },
+        {
+          "page": 1,
+          "smart": "keep",
+          "invert": "invert"
+        }
+      ]
     },
-    { "id": "djvu-corrupt", "format": "DjVu", "path": "tests/mac/fixtures/corrupt.djvu", "expect": "any" },
-    { "id": "png", "format": "Image", "path": "tests/mac/fixtures/sample.png", "expect": "open", "pages": 1 },
-    { "id": "bmp", "format": "Image", "path": "tests/mac/fixtures/sample.bmp", "expect": "open", "pages": 1 },
-    { "id": "tga", "format": "Image", "path": "tests/mac/fixtures/sample.tga", "expect": "open", "pages": 1 },
-    { "id": "jpeg", "format": "Image", "path": "tests/issue-6236.jpg", "expect": "open", "pages": 1 },
-    { "id": "gif", "format": "Image", "path": "tests/mac/fixtures/sample.gif", "expect": "open", "pages": 1 },
+    {
+      "id": "djvu-corrupt",
+      "format": "DjVu",
+      "path": "tests/mac/fixtures/corrupt.djvu",
+      "expect": "any"
+    },
+    {
+      "id": "png",
+      "format": "Image",
+      "path": "tests/mac/fixtures/sample.png",
+      "expect": "open",
+      "pages": 1,
+      "dark": [
+        {
+          "smart": "keep",
+          "invert": "keep"
+        }
+      ]
+    },
+    {
+      "id": "bmp",
+      "format": "Image",
+      "path": "tests/mac/fixtures/sample.bmp",
+      "expect": "open",
+      "pages": 1
+    },
+    {
+      "id": "tga",
+      "format": "Image",
+      "path": "tests/mac/fixtures/sample.tga",
+      "expect": "open",
+      "pages": 1
+    },
+    {
+      "id": "jpeg",
+      "format": "Image",
+      "path": "tests/issue-6236.jpg",
+      "expect": "open",
+      "pages": 1,
+      "dark": [
+        {
+          "smart": "keep",
+          "invert": "keep"
+        }
+      ]
+    },
+    {
+      "id": "gif",
+      "format": "Image",
+      "path": "tests/mac/fixtures/sample.gif",
+      "expect": "open",
+      "pages": 1
+    },
     {
       "id": "gif-animated",
       "format": "Image",
@@ -369,10 +681,33 @@
       "expect": "open",
       "pages": 3
     },
-    { "id": "gif-repo-6150-malformed", "format": "Image", "path": "tests/issue-6150.gif", "expect": "any" },
-    { "id": "jp2", "format": "Image", "path": "tests/mac/fixtures/sample.jp2", "expect": "open", "pages": 1 },
-    { "id": "heic", "format": "Image", "path": "tests/mac/fixtures/sample.heic", "expect": "open", "pages": 1 },
-    { "id": "avif", "format": "Image", "path": "tests/mac/fixtures/sample.avif", "expect": "open", "pages": 1 },
+    {
+      "id": "gif-repo-6150-malformed",
+      "format": "Image",
+      "path": "tests/issue-6150.gif",
+      "expect": "any"
+    },
+    {
+      "id": "jp2",
+      "format": "Image",
+      "path": "tests/mac/fixtures/sample.jp2",
+      "expect": "open",
+      "pages": 1
+    },
+    {
+      "id": "heic",
+      "format": "Image",
+      "path": "tests/mac/fixtures/sample.heic",
+      "expect": "open",
+      "pages": 1
+    },
+    {
+      "id": "avif",
+      "format": "Image",
+      "path": "tests/mac/fixtures/sample.avif",
+      "expect": "open",
+      "pages": 1
+    },
     {
       "id": "cbz-mixed-images",
       "format": "CBZ",
@@ -387,16 +722,40 @@
       "expect": "open",
       "pages": 3
     },
-    { "id": "webp", "format": "Image", "path": "tests/issue-6245-data/halves.webp", "expect": "open", "pages": 1 },
-    { "id": "jxl", "format": "Image", "path": "tests/issue-6245-data/keong_macan.jxl", "expect": "open", "pages": 1 },
-    { "id": "tiff-2-pages", "format": "TIFF", "path": "tests/mac/fixtures/sample.tif", "expect": "open", "pages": 2 },
+    {
+      "id": "webp",
+      "format": "Image",
+      "path": "tests/issue-6245-data/halves.webp",
+      "expect": "open",
+      "pages": 1
+    },
+    {
+      "id": "jxl",
+      "format": "Image",
+      "path": "tests/issue-6245-data/keong_macan.jxl",
+      "expect": "open",
+      "pages": 1
+    },
+    {
+      "id": "tiff-2-pages",
+      "format": "TIFF",
+      "path": "tests/mac/fixtures/sample.tif",
+      "expect": "open",
+      "pages": 2
+    },
     {
       "id": "txt",
       "format": "Text",
       "path": "tests/mac/fixtures/sample.txt",
       "expect": "open",
       "minPages": 1,
-      "search": "bandicoot"
+      "search": "bandicoot",
+      "dark": [
+        {
+          "smart": "dark",
+          "invert": "invert"
+        }
+      ]
     },
     {
       "id": "markdown",
@@ -404,7 +763,13 @@
       "path": "tests/mac/fixtures/sample.md",
       "expect": "open",
       "minPages": 1,
-      "search": "cassowary"
+      "search": "cassowary",
+      "dark": [
+        {
+          "smart": "dark",
+          "invert": "invert"
+        }
+      ]
     },
     {
       "id": "html",
@@ -413,7 +778,18 @@
       "expect": "open",
       "minPages": 1,
       "search": "dugong",
-      "links": [{ "kind": "url", "value": "https://www.sumatrapdfreader.org/" }]
+      "links": [
+        {
+          "kind": "url",
+          "value": "https://www.sumatrapdfreader.org/"
+        }
+      ],
+      "dark": [
+        {
+          "smart": "dark",
+          "invert": "invert"
+        }
+      ]
     },
     {
       "id": "html-scripts",

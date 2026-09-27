@@ -6,6 +6,7 @@
 
 #include "gui/UIModels.h"
 #include "EngineBase.h"
+#include "DocColors.h"
 #include "mac/SumatraMacEngine.h"
 #include "mac/MacThumbnails.h"
 
@@ -28,6 +29,9 @@ Like PageRenderService, the abort cookie is published by the engine without
 our lock; we only read it under the lock to call Abort() and delete it after
 RenderPage() returns.
 
+Thumbnails render with the document colors (DocColors.h). Keys carry the colors'
+epoch; the first call after MacSetDocColors() drops what the old colors made.
+
 Call everything but MacThumbsReleaseImage() from one thread (the main thread).
 */
 
@@ -44,6 +48,7 @@ struct ThumbPixels {
 };
 
 struct ThumbKey {
+    u32 epoch = 0; // of the document colors
     int docId = 0;
     int pageNo = 0;
     int rotation = 0;
@@ -91,13 +96,16 @@ struct ThumbService {
     i64 maxBytes = 0;
     u64 useSerial = 0;
 
+    u32 epoch = 0; // of the document colors the cache and queue are for
+
     bool busy = false;
     ThumbKey activeKey;
     AbortCookie* activeCookie = nullptr;
 };
 
 static bool SameKey(const ThumbKey& a, const ThumbKey& b) {
-    return a.docId == b.docId && a.pageNo == b.pageNo && a.rotation == b.rotation && a.dx == b.dx && a.dy == b.dy;
+    return a.epoch == b.epoch && a.docId == b.docId && a.pageNo == b.pageNo && a.rotation == b.rotation &&
+           a.dx == b.dx && a.dy == b.dy;
 }
 
 static int NormRotation(int rotation) {
@@ -269,6 +277,23 @@ static void RemoveDocRequests(ThumbService* s, int docId) {
     }
 }
 
+// Called with the mutex held: after a document colors change, drop the thumbnails
+// and requests of the old colors and abort a render of them (its result is discarded).
+static void SyncColorsEpoch(ThumbService* s) {
+    u32 epoch = GetDocColorsEpoch();
+    if (epoch == s->epoch) {
+        return;
+    }
+    s->epoch = epoch;
+    while (len(s->cache) > 0) {
+        RemoveCacheEntry(s, len(s->cache) - 1);
+    }
+    VecReset(s->requests);
+    if (s->busy && s->activeCookie) {
+        s->activeCookie->Abort();
+    }
+}
+
 // Visible before prefetch, then oldest first so a screenful fills top to bottom.
 static int PickRequest(ThumbService* s) {
     int best = -1;
@@ -314,8 +339,10 @@ static ThumbPixels* RenderThumb(ThumbService* s, EngineBase* engine, const Thumb
         return nullptr;
     }
     RenderPageArgs args(key.pageNo, zoom, key.rotation, nullptr, RenderTarget::View, &s->activeCookie);
-    Pixmap* pixmap = engine->RenderPage(args);
-    ThumbPixels* pixels = PixelsFromPixmap(pixmap);
+    u32 epoch = 0;
+    Pixmap* pixmap = RenderPageWithDocColors(engine, args, &epoch);
+    // colors changed since the request: the pixels are of the old ones
+    ThumbPixels* pixels = epoch == key.epoch ? PixelsFromPixmap(pixmap) : nullptr;
     FreePixmap(pixmap);
     return pixels;
 }
@@ -355,7 +382,7 @@ static void ThumbWorker(ThumbService* s) {
 
         doc = FindDocById(s, key.docId);
         void* handle = nullptr;
-        if (pixels && doc && !doc->closing && !s->stopping) {
+        if (pixels && doc && !doc->closing && !s->stopping && key.epoch == s->epoch) {
             AddToCache(s, key, pixels);
             pixels = nullptr;
             handle = doc->handle;
@@ -495,14 +522,16 @@ void MacThumbsRequest(void* thumbs, void* document, int pageNo, int rotation, in
         return;
     }
 
+    AutoUnlockMutex lock(&s->mutex);
+    SyncColorsEpoch(s);
     ThumbKey key;
+    key.epoch = s->epoch;
     key.docId = doc->id;
     key.pageNo = pageNo;
     key.rotation = NormRotation(rotation);
     key.dx = std::min(dx, kMaxThumbDx);
     key.dy = std::min(dy, kMaxThumbDx);
 
-    AutoUnlockMutex lock(&s->mutex);
     if (s->stopping || doc->closing || FindCached(s, key) >= 0 || (s->busy && SameKey(s->activeKey, key))) {
         return;
     }
@@ -567,6 +596,7 @@ bool MacThumbsGet(void* thumbs, void* document, int pageNo, int rotation, int dx
     dy = std::min(dy, kMaxThumbDx);
 
     AutoUnlockMutex lock(&s->mutex);
+    SyncColorsEpoch(s);
     int best = -1;
     int bestDiff = 0;
     for (int i = 0; i < len(s->cache); i++) {

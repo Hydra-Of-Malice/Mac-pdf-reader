@@ -4,10 +4,12 @@
 //
 // usage: bun tests/mac/fuzz-engine.ts --driver <test_mac_engine> [--count <variants per fixture>] [--seed <n>]
 //          [--jobs <n>] [--timeout-ms <n>] [--budget-s <n>] [--only <id-substring>] [--max-size <bytes>] [--ci]
+//          [--colors normal|smart|invert]
 // --ci: the small, fixed, fast subset CI runs (seed 1, 3 variants of each fixture up to 40 KB).
 // --max-size: skip bigger fixtures (under ASan each job on a big book can take gigabytes).
 // --max-rss-mb: (Linux) kill a driver whose RSS grows past this (default 2048, 0: no limit) and report it, so that
 // --jobs variants claiming huge images can't exhaust the machine's memory at once (that took WSL down).
+// --colors: the driver renders with these document colors (dark mode) and also runs its colors check.
 // A given --seed / --count always produces the same variants. Exit code 1 if anything crashed or hung.
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -61,6 +63,7 @@ function parseArgs() {
     ci: false,
     maxSize: 0,
     maxRssMb: 2048,
+    colors: "",
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -75,6 +78,7 @@ function parseArgs() {
     else if (a === "--ci") o.ci = true;
     else if (a === "--max-size") o.maxSize = Number(next());
     else if (a === "--max-rss-mb") o.maxRssMb = Number(next());
+    else if (a === "--colors") o.colors = next();
     else {
       console.error(`unknown argument: ${a}`);
       process.exit(2);
@@ -265,9 +269,16 @@ function rssMb(pid: number): number {
   }
 }
 
-async function runDriver(driver: string, v: Variant, timeoutMs: number, maxRssMb: number): Promise<Outcome> {
+async function runDriver(
+  driver: string,
+  v: Variant,
+  timeoutMs: number,
+  maxRssMb: number,
+  colors: string,
+): Promise<Outcome> {
   const start = performance.now();
   const args = [v.file, "-fuzz"];
+  if (colors) args.push("-colors", colors);
   if (v.fixture.password) args.push("-password", v.fixture.password.split(",").pop()!);
   const proc = Bun.spawn([driver, ...args], {
     stdout: "pipe",
@@ -375,7 +386,10 @@ async function main() {
       variants.push({ fixture: f, index: i, file, mutations });
     }
   }
-  console.log(`${variants.length} variants of ${seen.size} fixtures, ${o.jobs} jobs, timeout ${o.timeoutMs} ms`);
+  const colorsNote = o.colors ? `, colors ${o.colors}` : "";
+  console.log(
+    `${variants.length} variants of ${seen.size} fixtures, ${o.jobs} jobs, timeout ${o.timeoutMs} ms${colorsNote}`,
+  );
 
   const outcomes: Outcome[] = [];
   const startAll = performance.now();
@@ -389,7 +403,7 @@ async function main() {
       }
       const v = variants[next++];
       if (!v) return;
-      const res = await runDriver(o.driver, v, o.timeoutMs, o.maxRssMb);
+      const res = await runDriver(o.driver, v, o.timeoutMs, o.maxRssMb, o.colors);
       outcomes.push(res);
       if (res.kind !== "ok") {
         const dst = saveRepro(res, res.log ?? "");

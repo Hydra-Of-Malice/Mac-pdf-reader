@@ -2,8 +2,11 @@
 // and prints a per-fixture and per-format PASS/FAIL table. Builds nothing itself.
 //
 // usage: bun tests/mac/run-engine-tests.ts --driver <path-to-test_mac_engine> [--only <id-substring>]
-//                                          [--json <results.json>] [--timeout-ms <n>]
+//                                          [--json <results.json>] [--timeout-ms <n>] [--dark | --dark-only]
 // The driver path can also come from MAC_ENGINE_DRIVER. Exit code 1 if any fixture fails.
+// --dark also runs the dark mode pass (MacSetDocColors) over the fixtures with a "dark" entry, --dark-only only
+// that: each runs again with -colors smart and -colors invert (and smart without preserved images where the
+// manifest says what to expect), with all the usual checks plus the dark mode expectations (see checkDark).
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -38,6 +41,28 @@ interface Fixture {
   // chaptered doc whose page count must grow after open; search / last toc item / last page must work past the
   // initial count
   growth?: boolean;
+  // dark mode pass: what each document colors mode must do to a page
+  dark?: DarkExpect[];
+}
+
+// dark: the page's background turns dark with light text (a text page, a scan)
+// keep: the page renders as in Normal (images, comics)
+// photo: the page turns dark but the image in region keeps its colors
+// recolor: the image in region is recolored (smart without preserved images)
+// invert: roughly the inverse of Normal
+type DarkResult = "dark" | "keep" | "photo" | "recolor" | "invert";
+
+interface DarkExpect {
+  page?: number; // default 1
+  region?: [number, number, number, number]; // fractions of the page (x0, y0, x1, y1)
+  smart: DarkResult;
+  invert: DarkResult;
+  smartNoPreserve?: DarkResult;
+}
+
+interface DarkRun {
+  mode: "smart" | "invert" | "smartNoPreserve";
+  expect: DarkExpect;
 }
 
 interface RunResult {
@@ -68,6 +93,8 @@ function parseArgs() {
     only: "",
     json: "",
     timeoutMs: defaultTimeoutMs,
+    dark: false,
+    darkOnly: false,
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -76,6 +103,8 @@ function parseArgs() {
     else if (a === "--only") opts.only = next();
     else if (a === "--json") opts.json = next();
     else if (a === "--timeout-ms") opts.timeoutMs = Number(next());
+    else if (a === "--dark") opts.dark = true;
+    else if (a === "--dark-only") opts.darkOnly = opts.dark = true;
     else {
       console.error(`unknown argument: ${a}`);
       process.exit(2);
@@ -104,11 +133,17 @@ function ensureGenerated(f: Fixture, absPath: string) {
   writeFileSync(absPath, m[1] === "pdf" ? makeLargePdf(n) : makeLargeMobi(n));
 }
 
-function driverArgs(f: Fixture, absPath: string): string[] {
+function driverArgs(f: Fixture, absPath: string, dark?: DarkRun): string[] {
   const args = [absPath];
   if (f.password) args.push("-password", f.password);
   if (f.search) args.push("-search", f.search);
   if (f.stress) args.push("-stress", String(f.stress));
+  if (dark) {
+    args.push("-colors", dark.mode === "invert" ? "invert" : "smart");
+    if (dark.mode === "smartNoPreserve") args.push("-no-preserve-images");
+    if (dark.expect.page) args.push("-colors-page", String(dark.expect.page));
+    if (dark.expect.region) args.push("-region", dark.expect.region.join(","));
+  }
   return args;
 }
 
@@ -151,6 +186,67 @@ function checkGrowth(f: Fixture, r: any, fail: (s: string) => void) {
   const last = items[items.length - 1];
   if (!(last?.page > initial && last?.page <= settled)) {
     fail(`last toc item points to page ${last?.page}, want ${initial + 1}..${settled}`);
+  }
+}
+
+// Luminance / difference thresholds (0..255) for the dark mode expectations; the SmartDark default background
+// 0x1E1E1E has luminance 30.
+const kDarkPageMaxLum = 90;
+const kPhotoPageMaxLum = 120;
+// the lightest pixel of a dark page with text (text 0xE6E6E6 has luminance 230; thin antialiased glyphs less)
+const kMinTextLum = 150;
+const kKeepMaxDiff = 2;
+const kPhotoKeptMaxDiff = 45;
+const kRecoloredMinDiff = 60;
+const kInvertMaxDiff = 25;
+
+function checkDark(run: DarkRun, r: any, fail: (s: string) => void) {
+  const c = r.colors;
+  if (!c) return fail("no colors report");
+  if (!c.ok) return fail("render with colors failed");
+  if (!c.modeSet) fail("MacGetDocColors doesn't return the mode set");
+  if (!c.normalRestored) fail("Normal after the dark mode doesn't render as before");
+  if (!(c.printDiff >= 0 && c.printDiff < kKeepMaxDiff)) {
+    fail(`print render isn't in Normal colors (mean difference ${c.printDiff})`);
+  }
+  const e = c.epoch ?? {};
+  if (e.testable) {
+    if (e.stale) fail(`${e.stale}/${e.rounds} renders after a colors switch were of the old colors`);
+    if (e.missing) fail(`${e.missing}/${e.rounds} renders after a colors switch never arrived`);
+    if (e.droppedAtSwitch !== e.rounds) fail(`colors switch kept the cached page ${e.rounds - e.droppedAtSwitch}x`);
+  }
+  const t = c.thumbs ?? {};
+  if (!t.ok) fail("thumbnail with colors failed");
+  else if (!t.droppedOnChange) fail("thumbnail of the old colors kept after a switch");
+
+  const want = run.expect[run.mode];
+  const f2 = (v: number) => v.toFixed(1);
+  switch (want) {
+    case "dark":
+      if (!(c.normal.meanLum > 150)) fail(`Normal page isn't light (luminance ${f2(c.normal.meanLum)})`);
+      if (!(c.themed.meanLum < kDarkPageMaxLum)) fail(`page not dark (luminance ${f2(c.themed.meanLum)})`);
+      if (!(c.themed.maxLum >= kMinTextLum)) fail(`no light text (lightest pixel ${f2(c.themed.maxLum)})`);
+      if (t.ok && !(t.themed.meanLum < t.normal.meanLum - 60)) {
+        fail(`thumbnail not dark (${f2(t.themed.meanLum)} vs Normal ${f2(t.normal.meanLum)})`);
+      }
+      break;
+    case "keep":
+      if (!(c.diff >= 0 && c.diff < kKeepMaxDiff)) fail(`page changed (mean difference ${f2(c.diff)})`);
+      break;
+    case "photo":
+      if (!(c.themed.meanLum < kPhotoPageMaxLum)) fail(`page not dark (luminance ${f2(c.themed.meanLum)})`);
+      if (!(c.regionDiff >= 0 && c.regionDiff < kPhotoKeptMaxDiff && c.regionDiff < c.regionDiffInverse / 2)) {
+        fail(`image not kept (difference ${f2(c.regionDiff)}, to the inverse ${f2(c.regionDiffInverse)})`);
+      }
+      break;
+    case "recolor":
+      if (!(c.regionDiff > kRecoloredMinDiff)) fail(`image not recolored (difference ${f2(c.regionDiff)})`);
+      break;
+    case "invert":
+      if (!(c.diffInverse >= 0 && c.diffInverse < kInvertMaxDiff)) {
+        fail(`page not inverted (difference to the inverse ${f2(c.diffInverse)})`);
+      }
+      break;
   }
 }
 
@@ -219,9 +315,10 @@ function checkOpened(f: Fixture, r: any, fail: (s: string) => void) {
   }
 }
 
-async function runFixture(driver: string, f: Fixture, defTimeout: number): Promise<RunResult> {
+async function runFixture(driver: string, f: Fixture, defTimeout: number, dark?: DarkRun): Promise<RunResult> {
+  const suffix = dark ? `:${dark.mode}${dark.expect.page ? `@${dark.expect.page}` : ""}` : "";
   const res: RunResult = {
-    id: f.id,
+    id: f.id + suffix,
     format: f.format,
     target: f.target !== false,
     ok: false,
@@ -238,7 +335,7 @@ async function runFixture(driver: string, f: Fixture, defTimeout: number): Promi
     return res;
   }
 
-  const out = await runDriver(driver, driverArgs(f, absPath), f.timeoutMs ?? defTimeout);
+  const out = await runDriver(driver, driverArgs(f, absPath, dark), f.timeoutMs ?? defTimeout);
   res.ms = out.ms;
   res.stage = lastStage(out.stderr);
   res.stderrTail = out.stderr.split("\n").slice(-60).join("\n");
@@ -272,7 +369,10 @@ async function runFixture(driver: string, f: Fixture, defTimeout: number): Promi
   }
   if (f.expect === "open") {
     if (!r.open) fail(`did not open: ${r.error}`);
-    else checkOpened(f, r, fail);
+    else {
+      checkOpened(f, r, fail);
+      if (dark) checkDark(dark, r, fail);
+    }
   } else if (f.expect === "any" && r.open && r.layout?.sane === false) {
     fail(`continuous layout has pages at bad positions (canvas ${r.layout.canvas})`);
   } else if (f.expect === "fail") {
@@ -323,11 +423,21 @@ async function main() {
   const opts = parseArgs();
   const manifest = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "manifest.json"), "utf8"));
   const fixtures: Fixture[] = manifest.fixtures.filter((f: Fixture) => !opts.only || f.id.includes(opts.only));
+  const runs: { f: Fixture; dark?: DarkRun }[] = [];
+  if (!opts.darkOnly) runs.push(...fixtures.map((f) => ({ f })));
+  if (opts.dark) {
+    for (const f of fixtures) {
+      for (const expect of f.dark ?? []) {
+        runs.push({ f, dark: { mode: "smart", expect } }, { f, dark: { mode: "invert", expect } });
+        if (expect.smartNoPreserve) runs.push({ f, dark: { mode: "smartNoPreserve", expect } });
+      }
+    }
+  }
   const results: RunResult[] = [];
-  for (const f of fixtures) {
-    const r = await runFixture(opts.driver, f, opts.timeoutMs);
+  for (const { f, dark } of runs) {
+    const r = await runFixture(opts.driver, f, opts.timeoutMs, dark);
     console.log(
-      `${r.ok ? "PASS" : "FAIL"} ${f.id} (${Math.round(r.ms)} ms)${r.ok ? "" : ": " + r.failures.join("; ")}`,
+      `${r.ok ? "PASS" : "FAIL"} ${r.id} (${Math.round(r.ms)} ms)${r.ok ? "" : ": " + r.failures.join("; ")}`,
     );
     // a crash / hang: the driver's stack dump (or sanitizer report) is the useful part
     if (r.outcome === "crash" || r.outcome === "timeout") console.log(indentLines(r.stderrTail ?? ""));

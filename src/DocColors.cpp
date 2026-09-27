@@ -23,8 +23,7 @@ static DocColorScheme gDocColors;
 static u32 gDocColorsEpoch = 1;
 
 static bool SameScheme(const DocColorScheme& a, const DocColorScheme& b) {
-    return a.mode == b.mode && a.text == b.text && a.background == b.background &&
-           a.preserveImages == b.preserveImages;
+    return a.mode == b.mode && a.text == b.text && a.background == b.background && a.preserveImages == b.preserveImages;
 }
 
 void SetDocColorScheme(const DocColorScheme& scheme) {
@@ -152,6 +151,31 @@ void BuildViewDarkModeProfile(EngineBase* engine, DarkModeProfile* profile) {
 
 //--- rendering
 
+// A DjVu page is recolored as a whole (the engine has no image regions to keep).
+// That suits scans (ink and paper), not photos and color illustrations: those
+// keep their colors when images are preserved. Colorful = a good share of
+// clearly chromatic pixels (a scan's colored highlights or stamps are few).
+static bool PixmapLooksLikeColorImage(const Pixmap* bmp) {
+    int bpp = PixmapBytesPerPixel(bmp->format);
+    if (!bmp->data || (bmp->format != PixmapFormat::BGRA8 && bmp->format != PixmapFormat::BGR8)) {
+        return false;
+    }
+    constexpr int kStep = 3;
+    constexpr int kMinChroma = 40;
+    i64 n = 0, colorful = 0;
+    for (int y = 0; y < bmp->height; y += kStep) {
+        const u8* row = bmp->data + (size_t)y * (size_t)bmp->stride;
+        for (int x = 0; x < bmp->width; x += kStep) {
+            const u8* p = row + (size_t)x * bpp;
+            int maxC = std::max({p[0], p[1], p[2]});
+            int minC = std::min({p[0], p[1], p[2]});
+            colorful += maxC - minC >= kMinChroma ? 1 : 0;
+            n++;
+        }
+    }
+    return n > 0 && colorful * 10 >= n * 3;
+}
+
 Pixmap* RenderPageWithDocColors(EngineBase* engine, RenderPageArgs& args, u32* epochOut) {
     DocColorScheme scheme;
     u32 epoch = 0;
@@ -181,7 +205,14 @@ Pixmap* RenderPageWithDocColors(EngineBase* engine, RenderPageArgs& args, u32* e
     }
     Vec<Rect> skipRects;
     Vec<Rect>* skip = nullptr;
-    if (profile.mode == PageColorMode::PreserveImages && profile.preservePdfImages) {
+    Color linkColor = profile.linkColor;
+    if (engine->kind == kindEngineDjVu) {
+        if (profile.mode == PageColorMode::PreserveImages && PixmapLooksLikeColorImage(bmp)) {
+            return bmp;
+        }
+        // blue-ish areas of a scan aren't links
+        linkColor = 0;
+    } else if (profile.mode == PageColorMode::PreserveImages && profile.preservePdfImages) {
         RectF pageRect = args.pageRect ? *args.pageRect : engine->PageMediabox(args.pageNo);
         engine->GetBitmapRecolorSkipRects(args.pageNo, args.zoom, args.rotation, pageRect,
                                           Size(bmp->width, bmp->height), skipRects);
@@ -189,6 +220,6 @@ Pixmap* RenderPageWithDocColors(EngineBase* engine, RenderPageArgs& args, u32* e
             skip = &skipRects;
         }
     }
-    RecolorPixmap(bmp, profile.foreground, profile.pageBackground, profile.linkColor, skip);
+    RecolorPixmap(bmp, profile.foreground, profile.pageBackground, linkColor, skip);
     return bmp;
 }

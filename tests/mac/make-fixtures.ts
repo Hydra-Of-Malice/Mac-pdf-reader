@@ -19,6 +19,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { deflateSync } from "node:zlib";
 import {
   bytes,
   concat,
@@ -150,6 +151,67 @@ save("empty.pdf", new Uint8Array(0));
   w.set(pages, `<< /Type /Pages /Kids [${page} 0 R] /Count 1 >>`);
   w.set(catalog, `<< /Type /Catalog /Pages ${pages} 0 R >>`);
   save("system-fonts.pdf", w.build(catalog));
+}
+
+// A page with a photo-like image (sky, sun, hills, a house; noisy like a photo) above text, for dark mode: the
+// photo must keep its colors (manifest: its region) while the page and the text are recolored.
+{
+  const iw = 160;
+  const ih = 100;
+  const rnd = prng(0xf070);
+  const px = new Uint8Array(iw * ih * 3);
+  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+  for (let y = 0; y < ih; y++) {
+    for (let x = 0; x < iw; x++) {
+      const noise = (rnd() - 0.5) * 30;
+      const hill = 58 + 9 * Math.sin(x / 14) + 5 * Math.sin(x / 5);
+      let c: number[];
+      if (Math.hypot(x - 122, y - 22) < 11) {
+        c = [255, 226, 120];
+      } else if (x >= 28 && x < 52 && y >= 52 && y < 80) {
+        c = y < 62 ? [150, 40, 35] : [205, 180, 140];
+      } else if (y < hill) {
+        const t = y / hill;
+        c = [60 + 110 * t, 120 + 80 * t, 215 + 25 * t];
+      } else {
+        const t = (y - hill) / (ih - hill);
+        c = [55 - 25 * t + 20 * Math.sin(x / 7), 150 - 60 * t, 45 - 15 * t];
+      }
+      const i = (y * iw + x) * 3;
+      px[i] = clamp(c[0]! + noise);
+      px[i + 1] = clamp(c[1]! + noise);
+      px[i + 2] = clamp(c[2]! + noise);
+    }
+  }
+  const hex = Buffer.from(deflateSync(px)).toString("hex") + ">";
+  const w = new PdfWriter();
+  const catalog = w.alloc();
+  const pages = w.alloc();
+  const page = w.alloc();
+  const font = w.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+  const img = w.add(
+    w.stream(
+      `/Type /XObject /Subtype /Image /Width ${iw} /Height ${ih} /ColorSpace /DeviceRGB /BitsPerComponent 8 ` +
+        `/Filter [/ASCIIHexDecode /FlateDecode]`,
+      hex,
+    ),
+  );
+  // the photo covers x 72..540, y 420..720 (PDF units, origin bottom left)
+  const text = [
+    "q 468 0 0 300 72 420 cm /Im0 Do Q",
+    `BT /F1 24 Tf 72 380 Td ${pdfStr("Photo page")} Tj ET`,
+    `BT /F1 14 Tf 72 350 Td ${pdfStr("The heron waits in the reeds while the sun sets over the hills.")} Tj ET`,
+    `BT /F1 14 Tf 72 326 Td ${pdfStr("Dark mode keeps the photo's colors and recolors this text.")} Tj ET`,
+  ];
+  const content = w.add(w.stream("", text.join("\n")));
+  w.set(
+    page,
+    `<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 612 792] ` +
+      `/Resources << /Font << /F1 ${font} 0 R >> /XObject << /Im0 ${img} 0 R >> >> /Contents ${content} 0 R >>`,
+  );
+  w.set(pages, `<< /Type /Pages /Kids [${page} 0 R] /Count 1 >>`);
+  w.set(catalog, `<< /Type /Catalog /Pages ${pages} 0 R >>`);
+  save("photo.pdf", w.build(catalog));
 }
 
 // ---- EPUB ----

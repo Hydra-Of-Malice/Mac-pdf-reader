@@ -6,6 +6,11 @@
 // Driven by tests/mac/run-engine-tests.ts; runs on macOS and on Linux (-mac-core builds).
 //
 // usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>] [-render-all] [-fuzz]
+//          [-colors normal|smart|invert [-colors-bg RRGGBB] [-colors-text RRGGBB] [-no-preserve-images]
+//          [-region x0,y0,x1,y1] [-colors-page <n>] [-colors-dump <prefix>]]
+// -colors: document colors (dark mode) for the whole run, plus a check of page 1 in them vs Normal (in -region,
+// fractions of the page, too), of stale renders after a switch, and of thumbnails. -colors-dump <prefix> saves
+// page 1 in both as <prefix>-normal.ppm and <prefix>-themed.ppm.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +26,7 @@
 #endif
 
 #include "mac/SumatraMacEngine.h"
+#include "mac/MacThumbnails.h"
 
 // base/UITask.h: the bridge posts page-ready / find-done / layout tasks to the
 // main thread; PumpUiTasks() runs them the way the app's run loop does
@@ -558,6 +564,313 @@ static void CheckProperties(void* doc) {
     putchar('}');
 }
 
+//--- document colors (-colors): dark mode
+
+constexpr int kEpochRounds = 4;
+constexpr int kThumbDx = 120;
+constexpr int kThumbDy = 160;
+// Rec. 709 luminance (0..255) above / below which a pixel counts as light / dark
+constexpr double kLightLum = 160;
+constexpr double kDarkLum = 60;
+
+struct PageRegion {
+    // fractions of the page, e.g. where a fixture's photo is
+    double x0 = 0;
+    double y0 = 0;
+    double x1 = 1;
+    double y1 = 1;
+};
+
+struct ColorStats {
+    bool ok = false;
+    double meanLum = 0;
+    double lightFrac = 0;
+    double darkFrac = 0;
+    double minLum = 0;
+    double maxLum = 0;
+};
+
+static MacDocColorScheme gColors = {MacDocColors::Normal, 0x1E1E1E, 0xE6E6E6, true};
+// -colors-dump <prefix>: page 1 in Normal and in the scheme, as <prefix>-normal.ppm / <prefix>-themed.ppm
+static const char* gColorsDump = nullptr;
+// -colors-page <n>: the page the colors check renders (default 1)
+static int gColorsPage = 1;
+static int gThumbsReady = 0;
+
+static double Lum(const unsigned char* bgra) {
+    return 0.2126 * bgra[2] + 0.7152 * bgra[1] + 0.0722 * bgra[0];
+}
+
+struct PixelRect {
+    int x0, y0, x1, y1;
+};
+
+static PixelRect ToPixels(const PageRegion& r, int w, int h) {
+    auto clamp = [](double v, int max) { return v < 0 ? 0 : (v > max ? max : (int)v); };
+    PixelRect px = {clamp(r.x0 * w, w), clamp(r.y0 * h, h), clamp(r.x1 * w, w), clamp(r.y1 * h, h)};
+    if (px.x1 <= px.x0 || px.y1 <= px.y0) {
+        px = {0, 0, w, h};
+    }
+    return px;
+}
+
+static ColorStats StatsOf(const unsigned char* data, int w, int h, int stride, const PageRegion& r) {
+    ColorStats st;
+    if (!data || w <= 0 || h <= 0) {
+        return st;
+    }
+    PixelRect px = ToPixels(r, w, h);
+    long long n = 0, light = 0, dark = 0;
+    double sum = 0;
+    st.minLum = 255;
+    for (int y = px.y0; y < px.y1; y++) {
+        const unsigned char* row = data + (size_t)y * (size_t)stride;
+        for (int x = px.x0; x < px.x1; x++) {
+            double l = Lum(row + x * 4);
+            sum += l;
+            light += l > kLightLum ? 1 : 0;
+            dark += l < kDarkLum ? 1 : 0;
+            st.minLum = l < st.minLum ? l : st.minLum;
+            st.maxLum = l > st.maxLum ? l : st.maxLum;
+            n++;
+        }
+    }
+    st.ok = n > 0;
+    if (n > 0) {
+        st.meanLum = sum / (double)n;
+        st.lightFrac = (double)light / (double)n;
+        st.darkFrac = (double)dark / (double)n;
+    }
+    return st;
+}
+
+static ColorStats PageStats(const MacRenderedPage& p, const PageRegion& r) {
+    return StatsOf(p.data, p.width, p.height, p.stride, r);
+}
+
+// mean absolute channel difference of a and b (or of a and b's inverse) in region r; -1 if sizes differ
+static double MeanAbsDiff(const MacRenderedPage& a, const MacRenderedPage& b, const PageRegion& r, bool invertB) {
+    if (!a.data || !b.data || a.width != b.width || a.height != b.height) {
+        return -1;
+    }
+    PixelRect px = ToPixels(r, a.width, a.height);
+    double sum = 0;
+    long long n = 0;
+    for (int y = px.y0; y < px.y1; y++) {
+        const unsigned char* ra = a.data + (size_t)y * (size_t)a.stride;
+        const unsigned char* rb = b.data + (size_t)y * (size_t)b.stride;
+        for (int x = px.x0; x < px.x1; x++) {
+            for (int c = 0; c < 3; c++) {
+                int vb = rb[x * 4 + c];
+                sum += abs((int)ra[x * 4 + c] - (invertB ? 255 - vb : vb));
+            }
+            n += 3;
+        }
+    }
+    return n > 0 ? sum / (double)n : -1;
+}
+
+static bool SamePixels(const MacRenderedPage& a, const MacRenderedPage& b) {
+    if (!a.data || !b.data || a.width != b.width || a.height != b.height) {
+        return false;
+    }
+    for (int y = 0; y < a.height; y++) {
+        if (memcmp(a.data + (size_t)y * a.stride, b.data + (size_t)y * b.stride, (size_t)a.width * 4) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void WritePpm(const MacRenderedPage& p, const char* suffix) {
+    if (!gColorsDump || !p.data) {
+        return;
+    }
+    char path[1024];
+    snprintf(path, sizeof(path), "%s-%s.ppm", gColorsDump, suffix);
+    FILE* f = fopen(path, "wb");
+    if (!f) {
+        return;
+    }
+    fprintf(f, "P6\n%d %d\n255\n", p.width, p.height);
+    for (int y = 0; y < p.height; y++) {
+        const unsigned char* row = p.data + (size_t)y * p.stride;
+        for (int x = 0; x < p.width; x++) {
+            unsigned char rgb[3] = {row[x * 4 + 2], row[x * 4 + 1], row[x * 4]};
+            fwrite(rgb, 1, 3, f);
+        }
+    }
+    fclose(f);
+}
+
+static void SetColors(MacDocColors mode) {
+    MacDocColorScheme s = gColors;
+    s.mode = mode;
+    MacSetDocColors(&s);
+}
+
+static void PrintColorStats(const char* name, const ColorStats& st) {
+    printf("\"%s\":{\"ok\":%s,\"meanLum\":%.1f,\"lightFrac\":%.6f,\"darkFrac\":%.6f,\"minLum\":%.1f,\"maxLum\":%.1f}",
+           name, st.ok ? "true" : "false", st.meanLum, st.lightFrac, st.darkFrac, st.minLum, st.maxLum);
+}
+
+// Waits for page 1 at zoom from the async renderer, requesting it again like the app
+// does on page-ready (a colors change drops queued requests).
+static bool WaitForAsyncPage(void* doc, float zoom, MacRenderedPage* page) {
+    double start = NowMs();
+    while (NowMs() - start < gWaitMs) {
+        MacRequestPage(doc, gColorsPage, zoom, 0, 0);
+        if (MacCopyRenderedPage(doc, gColorsPage, zoom, 0, page)) {
+            return true;
+        }
+        SleepMs(2);
+    }
+    return false;
+}
+
+// Page 1 requested under one scheme and the colors switched right away (at various
+// points of the render): the first page the renderer delivers must be the new colors'.
+static void CheckColorsEpoch(void* doc, float zoom, const MacRenderedPage& refThemed,
+                             const MacRenderedPage& refNormal) {
+    bool testable = MeanAbsDiff(refThemed, refNormal, PageRegion{}, false) > 2;
+    int stale = 0, missing = 0, droppedAtSwitch = 0;
+    for (int i = 0; testable && i < kEpochRounds; i++) {
+        bool toThemed = i % 2 == 0;
+        SetColors(toThemed ? MacDocColors::Normal : gColors.mode);
+        MacRequestPage(doc, gColorsPage, zoom, 0, 0);
+        SleepMs(i * 3);
+        SetColors(toThemed ? gColors.mode : MacDocColors::Normal);
+        MacRenderedPage page{};
+        // the colors change dropped the cache
+        droppedAtSwitch += MacCopyRenderedPage(doc, gColorsPage, zoom, 0, &page) ? 0 : 1;
+        MacFreeRenderedPage(&page);
+        if (!WaitForAsyncPage(doc, zoom, &page)) {
+            missing++;
+            continue;
+        }
+        const MacRenderedPage& want = toThemed ? refThemed : refNormal;
+        const MacRenderedPage& old = toThemed ? refNormal : refThemed;
+        if (MeanAbsDiff(page, want, PageRegion{}, false) >= MeanAbsDiff(page, old, PageRegion{}, false)) {
+            stale++;
+        }
+        MacFreeRenderedPage(&page);
+    }
+    MacSetDocColors(&gColors);
+    printf(",\"epoch\":{\"testable\":%s,\"rounds\":%d,\"stale\":%d,\"missing\":%d,\"droppedAtSwitch\":%d}",
+           testable ? "true" : "false", testable ? kEpochRounds : 0, stale, missing, droppedAtSwitch);
+}
+
+static void OnThumbReady(void*, void*, int) {
+    __atomic_add_fetch(&gThumbsReady, 1, __ATOMIC_SEQ_CST);
+}
+
+static bool WaitForThumb(void* thumbs, void* doc, ColorStats* st) {
+    double start = NowMs();
+    while (NowMs() - start < gWaitMs) {
+        MacThumbsRequest(thumbs, doc, gColorsPage, 0, kThumbDx, kThumbDy, MacThumbPriority::Visible);
+        MacThumbImage img{};
+        if (MacThumbsGet(thumbs, doc, gColorsPage, 0, kThumbDx, kThumbDy, &img)) {
+            *st = StatsOf(img.data, img.width, img.height, img.stride, PageRegion{});
+            MacThumbsReleaseImage(img.ref);
+            return true;
+        }
+        SleepMs(2);
+    }
+    return false;
+}
+
+// Thumbnails render with the colors too, and a change drops the old ones.
+static void CheckColorsThumbnails(void* doc) {
+    void* thumbs = MacThumbsCreate(OnThumbReady, nullptr, 0);
+    ColorStats themed, normal;
+    bool okThemed = WaitForThumb(thumbs, doc, &themed);
+    SetColors(MacDocColors::Normal);
+    MacThumbImage img{};
+    bool dropped = !MacThumbsGet(thumbs, doc, gColorsPage, 0, kThumbDx, kThumbDy, &img);
+    if (!dropped) {
+        MacThumbsReleaseImage(img.ref);
+    }
+    bool okNormal = WaitForThumb(thumbs, doc, &normal);
+    MacSetDocColors(&gColors);
+    MacThumbsForget(thumbs, doc);
+    MacThumbsDestroy(thumbs);
+    printf(",\"thumbs\":{\"ok\":%s,\"droppedOnChange\":%s,", okThemed && okNormal ? "true" : "false",
+           dropped ? "true" : "false");
+    PrintColorStats("themed", themed);
+    putchar(',');
+    PrintColorStats("normal", normal);
+    putchar('}');
+}
+
+static const char* ColorsModeName(MacDocColors mode) {
+    return mode == MacDocColors::SmartDark ? "smart" : (mode == MacDocColors::Inverted ? "invert" : "normal");
+}
+
+// The page in Normal and in the -colors scheme, compared (in region too); switching back
+// to Normal must render exactly as before; stale renders of an old scheme are dropped.
+static void CheckColors(void* doc, const PageRegion& region) {
+    Stage("colors");
+    if (gColorsPage < 1 || gColorsPage > MacPageCount(doc)) {
+        gColorsPage = 1;
+    }
+    float zoom = RenderZoom(doc, gColorsPage, 1.0f);
+    SetColors(MacDocColors::Normal);
+    MacRenderedPage normal{};
+    bool okNormal = MacRenderPage(doc, gColorsPage, zoom, 0, &normal);
+    MacSetDocColors(&gColors);
+    MacRenderedPage themed{};
+    bool okThemed = MacRenderPage(doc, gColorsPage, zoom, 0, &themed);
+    SetColors(MacDocColors::Normal);
+    MacRenderedPage normal2{};
+    MacRenderPage(doc, gColorsPage, zoom, 0, &normal2);
+    MacSetDocColors(&gColors);
+    // printing ignores the document colors
+    MacRenderedPage print{};
+    MacRenderPageForPrint(doc, gColorsPage, zoom, 0, &print);
+
+    WritePpm(normal, "normal");
+    WritePpm(themed, "themed");
+
+    MacDocColorScheme current{};
+    MacGetDocColors(&current);
+    Key("colors");
+    printf("{\"mode\":\"%s\",\"page\":%d,\"modeSet\":%s,\"ok\":%s,", ColorsModeName(gColors.mode), gColorsPage,
+           current.mode == gColors.mode ? "true" : "false", okNormal && okThemed ? "true" : "false");
+    PrintColorStats("normal", PageStats(normal, PageRegion{}));
+    putchar(',');
+    PrintColorStats("themed", PageStats(themed, PageRegion{}));
+    putchar(',');
+    PrintColorStats("normalRegion", PageStats(normal, region));
+    putchar(',');
+    PrintColorStats("themedRegion", PageStats(themed, region));
+    printf(",\"diff\":%.2f,\"diffInverse\":%.2f,\"regionDiff\":%.2f,\"regionDiffInverse\":%.2f,\"normalRestored\":%s",
+           MeanAbsDiff(themed, normal, PageRegion{}, false), MeanAbsDiff(themed, normal, PageRegion{}, true),
+           MeanAbsDiff(themed, normal, region, false), MeanAbsDiff(themed, normal, region, true),
+           SamePixels(normal, normal2) ? "true" : "false");
+    printf(",\"printDiff\":%.2f", MeanAbsDiff(print, normal, PageRegion{}, false));
+    if (okNormal && okThemed) {
+        Stage("colors-epoch");
+        CheckColorsEpoch(doc, zoom, themed, normal);
+        Stage("colors-thumbnails");
+        CheckColorsThumbnails(doc);
+    }
+    putchar('}');
+    MacFreeRenderedPage(&normal);
+    MacFreeRenderedPage(&normal2);
+    MacFreeRenderedPage(&print);
+    MacFreeRenderedPage(&themed);
+}
+
+static bool ParseRgb(const char* s, unsigned int* rgb) {
+    char* end = nullptr;
+    unsigned long v = strtoul(s, &end, 16);
+    if (!s[0] || *end || v > 0xFFFFFF) {
+        return false;
+    }
+    *rgb = (unsigned int)v;
+    return true;
+}
+
 // Chaptered docs (EPUB) lay out the first chapter at open and count the rest in
 // the background, so the page count grows. Wait until it's final, delivering the
 // page-ready callbacks the app relayouts on.
@@ -643,7 +956,8 @@ static void OnCrash(int sig) {
 static void Usage() {
     fprintf(stderr,
             "usage: test_mac_engine <file> [-password <p1[,p2...]>] [-search <word>] [-stress <nPages>] [-render-all] "
-            "[-fuzz]\n");
+            "[-fuzz] [-colors normal|smart|invert [-colors-bg RRGGBB] [-colors-text RRGGBB] [-no-preserve-images] "
+            "[-region x0,y0,x1,y1] [-colors-page <n>] [-colors-dump <prefix>]]\n");
 }
 
 int main(int argc, char** argv) {
@@ -652,9 +966,39 @@ int main(int argc, char** argv) {
     char* passwordList = nullptr;
     int stress = 0;
     bool renderAll = false;
+    bool colors = false;
+    PageRegion region;
     for (int i = 1; i < argc; i++) {
         bool hasArg = i + 1 < argc;
-        if (!strcmp(argv[i], "-password") && hasArg) {
+        if (!strcmp(argv[i], "-colors") && hasArg) {
+            const char* mode = argv[++i];
+            colors = true;
+            if (!strcmp(mode, "smart")) {
+                gColors.mode = MacDocColors::SmartDark;
+            } else if (!strcmp(mode, "invert")) {
+                gColors.mode = MacDocColors::Inverted;
+            } else if (strcmp(mode, "normal") != 0) {
+                Usage();
+                return 2;
+            }
+        } else if ((!strcmp(argv[i], "-colors-bg") || !strcmp(argv[i], "-colors-text")) && hasArg) {
+            bool bg = !strcmp(argv[i], "-colors-bg");
+            if (!ParseRgb(argv[++i], bg ? &gColors.backgroundRgb : &gColors.textRgb)) {
+                Usage();
+                return 2;
+            }
+        } else if (!strcmp(argv[i], "-colors-page") && hasArg) {
+            gColorsPage = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "-colors-dump") && hasArg) {
+            gColorsDump = argv[++i];
+        } else if (!strcmp(argv[i], "-no-preserve-images")) {
+            gColors.preserveImages = false;
+        } else if (!strcmp(argv[i], "-region") && hasArg) {
+            if (sscanf(argv[++i], "%lf,%lf,%lf,%lf", &region.x0, &region.y0, &region.x1, &region.y1) != 4) {
+                Usage();
+                return 2;
+            }
+        } else if (!strcmp(argv[i], "-password") && hasArg) {
             passwordList = strdup(argv[++i]);
         } else if (!strcmp(argv[i], "-search") && hasArg) {
             search = argv[++i];
@@ -698,6 +1042,9 @@ int main(int argc, char** argv) {
         signal(SIGABRT, OnCrash);
     }
 
+    // every check (and -fuzz's render of every page) runs with these colors
+    MacSetDocColors(&gColors);
+
     putchar('{');
     KeyStr("file", path);
     Stage("open");
@@ -724,6 +1071,9 @@ int main(int argc, char** argv) {
         CheckToc(doc);
         CheckLinks(doc, nPages);
         CheckProperties(doc);
+        if (colors) {
+            CheckColors(doc, region);
+        }
         if (renderAll) {
             RenderAll(doc);
         }

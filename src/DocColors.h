@@ -12,7 +12,8 @@
 //              and backgrounds take the scheme's colors, images are classified
 //              (photos kept, light artwork blended, full-page scans darkened).
 //              DjVu: the bitmap recolor pass (a scan's paper takes the
-//              background color, its ink the text color).
+//              background color, its ink the text color); a color page (photo,
+//              illustration) keeps its colors.
 //              With preserveImages off, both get the full bitmap recolor
 //              (images included), like Windows' CmdTogglePreservePdfImages.
 //   Inverted   the bitmap recolor pass with white text on black, images included
