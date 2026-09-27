@@ -19,15 +19,15 @@ SumatraPDF for macOS is a native Mac build of the [SumatraPDF](https://www.sumat
 
 ## 💡 Why you'll like it
 
-|                                    |                                                                                                     |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------- |
-| 📚 **One app, many formats**       | PDF, EPUB, MOBI, AZW, CBZ, CBR, DjVu, CHM, XPS, FB2, LIT and common images open in the same window. |
-| 🗂️ **Tabs and a sidebar**          | Keep several documents open and jump around with the outline or page thumbnails.                    |
-| 🔍 **Search that keeps up**        | Find text with ⌘F, ⌘G and ⇧⌘G; long documents are searched in the background.                       |
-| 🔖 **Picks up where you left off** | Page, zoom, rotation and position within the page come back when you reopen a file.                 |
-| 🔐 **Opens protected files**       | You get a password prompt for encrypted PDFs and password-protected CBZ and CBR comics.             |
-| 💻 **Feels like a Mac app**        | Standard menus, Preview-style shortcuts, trackpad pinch zoom and printing through the macOS dialog. |
-| 🆓 **Free and open source**        | GPLv3. The full source of every release is in this repository.                                      |
+|                                    |                                                                                                       |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| 📚 **One app, many formats**       | PDF, EPUB, MOBI, AZW, CBZ, CBR, DjVu, CHM, XPS, FB2, LIT and common images open in the same window.   |
+| 🗂️ **Tabs and a sidebar**          | Keep several documents open and jump around with the outline or page thumbnails.                      |
+| 🔍 **Search that keeps up**        | Find text with ⌘F, ⌘G and ⇧⌘G; long documents are searched in the background.                         |
+| 🔖 **Picks up where you left off** | Page, zoom, rotation and position within the page come back when you reopen a file.                   |
+| 🔐 **Opens protected files**       | You get a password prompt for encrypted PDFs and password-protected CBZ and CBR comics.               |
+| 💻 **Feels like a Mac app**        | Light and dark mode with dark pages, standard menus, Preview-style shortcuts and trackpad pinch zoom. |
+| 🆓 **Free and open source**        | GPLv3. The full source of every release is in this repository.                                        |
 
 ## 🚀 Three steps
 
@@ -62,14 +62,15 @@ The release page lists SHA-256 checksums for both downloads.
 
 ## 🔍 What it does
 
-| Stage         | What happens                                                                                                                                                     |
-| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Open          | The reader is chosen from the file extension. MOBI, CHM and LIT books are converted to EPUB in memory. Large files open in the background while a spinner shows. |
-| Render        | Visible pages render on background threads. Pages you scroll past are cancelled, and a size-limited cache keeps recent pages.                                    |
-| Read          | Continuous or single-page view, zoom, fit page, fit width, rotation, full screen, clickable links, back and forward.                                             |
-| Find and copy | Search results are highlighted; ⌘G and ⇧⌘G move between them. Select text with the mouse or ⌘A and copy it.                                                      |
-| Print         | Pages go through the standard macOS print dialog, which also offers Save as PDF.                                                                                 |
-| Remember      | Recent files, reading position, zoom and rotation are saved per document.                                                                                        |
+| Stage         | What happens                                                                                                                                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Open          | The reader is chosen from the file extension. MOBI, CHM and LIT books are converted to EPUB in memory. Large files open in the background while a spinner shows.                                                   |
+| Render        | Visible pages render on background threads. Pages you scroll past are cancelled, and a size-limited cache keeps recent pages.                                                                                      |
+| Read          | Continuous or single-page view, zoom, fit page, fit width, rotation, full screen, clickable links, back and forward.                                                                                               |
+| Find and copy | Search results are highlighted; ⌘G and ⇧⌘G move between them. Select text with the mouse or ⌘A and copy it.                                                                                                        |
+| Print         | Pages go through the standard macOS print dialog, which also offers Save as PDF.                                                                                                                                   |
+| Remember      | Recent files, reading position, zoom and rotation are saved per document.                                                                                                                                          |
+| Colors        | View ▸ Appearance switches the app between system, light and dark. Document pages follow it with Smart Dark: text and backgrounds are recolored, photos keep their colors, and printing always uses normal colors. |
 
 ## ⚙️ How it works
 
@@ -110,7 +111,6 @@ The full list, with the license file for each part, is in [THIRD-PARTY-LICENSES.
 - Annotations and form fields are displayed but cannot be edited, filled in or saved.
 - JPEG XR, ICO, TCR and PostScript files are not supported.
 - A page that fails to render stays blank. There is no error message on the page.
-- Dark mode is not in this release. It is being worked on for the next one.
 - Some damaged files use a lot of memory, for example a DjVu file that claims a page of almost two billion pixels.
 - Reloading a document after it changes on disk briefly pauses the window.
 - UnRAR's license is not compatible with the GPL, and jxldec has no stated license. Check both before you redistribute the app.
