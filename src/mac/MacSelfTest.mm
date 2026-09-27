@@ -34,6 +34,7 @@ static const int kPrintPages = 3;
 static const double kOpenCallMaxMs = 500.0;
 static const double kLightLum = 0.75;
 static const double kDarkLum = 0.25;
+static const double kTextOnDarkLum = 0.4;
 // dark mode checks: a dark page's mean luminance, and how close preserved or restored pages must stay
 static const double kDarkPageMaxLum = 0.35;
 static const double kSameLumTolerance = 0.12;
@@ -102,6 +103,7 @@ struct PixelStats {
     double meanLum;     // mean luminance, 0..1
     double lightShare;  // share of samples brighter than kLightLum
     double darkShare;   // share of samples darker than kDarkLum
+    double brightShare; // share brighter than kTextOnDarkLum: (anti-aliased) light text on a dark page
 };
 
 // Samples r (view coordinates) of rep, a capture of the view's visible rect.
@@ -126,6 +128,7 @@ static PixelStats MeasurePixels(NSBitmapImageRep* rep, NSRect visible, NSRect r)
     double sum = 0;
     int light = 0;
     int dark = 0;
+    int bright = 0;
     NSUInteger pixel[8] = {};
     for (NSInteger y = y0; y < y1; y += step) {
         for (NSInteger x = x0; x < x1; x += step) {
@@ -144,12 +147,14 @@ static PixelStats MeasurePixels(NSBitmapImageRep* rep, NSRect visible, NSRect r)
             sum += lum;
             light += lum > kLightLum ? 1 : 0;
             dark += lum < kDarkLum ? 1 : 0;
+            bright += lum > kTextOnDarkLum ? 1 : 0;
         }
     }
     if (stats.samples > 0) {
         stats.meanLum = sum / stats.samples;
         stats.lightShare = (double)light / stats.samples;
         stats.darkShare = (double)dark / stats.samples;
+        stats.brightShare = (double)bright / stats.samples;
     }
     return stats;
 }
@@ -1222,6 +1227,26 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
 
 #pragma mark - Dark mode
 
+- (void)pressEscape {
+    NSWindow* window = [_host selfTestWindow];
+    NSView* view = [_host selfTestDocumentView];
+    [window makeFirstResponder:view];
+    unichar esc = 27;
+    NSString* chars = [NSString stringWithCharacters:&esc length:1];
+    const unsigned short kEscapeKeyCode = 53;
+    NSEvent* event = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                      location:NSZeroPoint
+                                 modifierFlags:0
+                                     timestamp:[[NSProcessInfo processInfo] systemUptime]
+                                  windowNumber:[window windowNumber]
+                                       context:nil
+                                    characters:chars
+                   charactersIgnoringModifiers:chars
+                                     isARepeat:NO
+                                       keyCode:kEscapeKeyCode];
+    [view keyDown:event];
+}
+
 // Captures the current page after a color change: <case><suffix>.png next to
 // the report, page and canvas (left of the page) statistics.
 - (BOOL)capturePage:(NSString*)suffix page:(PixelStats*)pageStats canvas:(PixelStats*)canvasStats {
@@ -1266,8 +1291,8 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
 }
 
 - (NSString*)statsText:(PixelStats)stats {
-    return [NSString stringWithFormat:@"mean luminance %.2f, %.1f%% light, %.1f%% dark", stats.meanLum,
-                                      stats.lightShare * 100.0, stats.darkShare * 100.0];
+    return [NSString stringWithFormat:@"mean luminance %.2f, %.1f%% light, %.1f%% bright, %.1f%% dark", stats.meanLum,
+                                      stats.lightShare * 100.0, stats.brightShare * 100.0, stats.darkShare * 100.0];
 }
 
 // Runs a document colors / appearance command and waits for the new renders.
@@ -1282,9 +1307,11 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
 
 // Light and dark appearance, Smart Dark and inverted document colors, dark
 // thumbnails, and back: the canvas follows the appearance, text pages turn
-// dark with light text, pictures keep their colors in Smart Dark.
+// dark with light text, pictures (image collections) keep their colors.
 - (void)darkMode:(NSDictionary*)c {
     BOOL textDoc = [StringValue([c objectForKey:@"search"]) length] > 0;
+    // Esc in the document drops the selection and search highlights left by earlier steps
+    [self pressEscape];
     [self invoke:@selector(zoomFitPage:)];
     if ([self state].currentPage != 1) {
         [self invoke:@selector(goToFirstPage:)];
@@ -1338,7 +1365,7 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     if (!err && [self state].docColors != 1) {
         err = @"document colors aren't Smart Dark";
     }
-    if (!err && textDoc && (page.meanLum > kDarkPageMaxLum || page.lightShare <= 0)) {
+    if (!err && textDoc && (page.meanLum > kDarkPageMaxLum || page.brightShare <= 0)) {
         err = @"page not dark with light text";
     }
     if (!err && !textDoc && fabs(page.meanLum - light.meanLum) > kSameLumTolerance) {
@@ -1368,7 +1395,8 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     [self step:@"dark thumbnails" ok:!err since:t0 detail:err ? [NSString stringWithFormat:@"%@; %@", err, detail] : detail];
     [self invoke:@selector(toggleSidebar:)];
 
-    // inverted: the light page's luminance flips
+    // inverted: the light page's luminance flips; image collections (comics,
+    // pictures) keep their colors in every mode
     [self beginStep:@"inverted"];
     t0 = Now();
     err = [self recolor:@selector(useInvertedDocColors:)];
@@ -1376,8 +1404,11 @@ static const char* SelfTestPassword(void* context, const char* fileName, int att
     if (!err && [self state].docColors != 2) {
         err = @"document colors aren't inverted";
     }
-    if (!err && fabs(page.meanLum - (1.0 - light.meanLum)) > kInvertTolerance) {
+    if (!err && textDoc && fabs(page.meanLum - (1.0 - light.meanLum)) > kInvertTolerance) {
         err = [NSString stringWithFormat:@"not inverted (light %.2f)", light.meanLum];
+    }
+    if (!err && !textDoc && fabs(page.meanLum - light.meanLum) > kSameLumTolerance) {
+        err = [NSString stringWithFormat:@"picture colors changed (light %.2f)", light.meanLum];
     }
     detail = [self statsText:page];
     [self step:@"inverted" ok:!err since:t0 detail:err ? [NSString stringWithFormat:@"%@; %@", err, detail] : detail];

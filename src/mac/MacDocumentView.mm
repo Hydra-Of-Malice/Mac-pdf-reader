@@ -41,10 +41,8 @@ static NSColor* PageBorderColor(void) {
     if (!color) {
         color = [[NSColor colorWithName:@"SumatraPageBorder"
                         dynamicProvider:^NSColor*(NSAppearance* appearance) {
-                          if (SumatraIsDarkAppearance(appearance)) {
-                              return [NSColor colorWithCalibratedWhite:1.0 alpha:0.22];
-                          }
-                          return [NSColor colorWithCalibratedWhite:0.0 alpha:0.35];
+                          CGFloat white = SumatraIsDarkAppearance(appearance) ? 0.32 : 0.45;
+                          return [NSColor colorWithCalibratedWhite:white alpha:1.0];
                         }] retain];
     }
     return color;
@@ -292,7 +290,7 @@ enum class DragMode {
             continue;
         }
         [border setFill];
-        NSFrameRectWithWidth(NSInsetRect(frame, -1, -1), 1.0);
+        NSFrameRectWithWidthUsingOperation(NSInsetRect(frame, -1, -1), 1.0, NSCompositingOperationSourceOver);
         [pageColor setFill];
         NSRectFill(frame);
         CGImageRef image = [page image];
